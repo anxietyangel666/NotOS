@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "fermentId": "019ea649-e226-72c8-9900-f7a63bac0577",
+  "phaseId": "phase-1",
+  "phaseName": "Backend: DB + API",
+  "attempt": 1,
+  "timestamp": "2026-06-08T08:27:03.642Z",
+  "goal": "Добавить поле status в БД, типы, endpoint обновления и публичный endpoint",
+  "summary": "Бэкенд готов: добавлено поле status в БД (миграция), типы (UserRecord, PublicUser), endpoint PATCH /api/users/me с валидацией zod (max 200 символов). Серверная сборка проходит без ошибок.",
+  "stepSummaries": "  1. Обновить migrate.ts, типы, db/users.ts, user.routes.ts [verified]",
+  "diffAvailable": false,
+  "flags": [],
+  "derivedGrade": "A",
+  "reviewerRationale": "All gates pass; project checks validate.",
+  "gateVerdicts": [
+    {
+      "id": "F1",
+      "verdict": "pass",
+      "rationale": "Единственный шаг фазы проверялся реальной сборкой tsc — это smoke/test верификация, не proxy.",
+      "evidence": "cd apps/server && npm run build — команда выполнена, ошибок нет."
+    },
+    {
+      "id": "F2",
+      "verdict": "pass",
+      "rationale": "Цель фазы: добавить поле status в БД, типы и endpoint. Все изменения внесены и подтверждены сборкой.",
+      "evidence": "Файлы изменены: migrate.ts (ALTER TABLE), users.ts (типы + update logic), user.routes.ts (zod schema), types.ts (PublicUser). Сборка прошла."
+    },
+    {
+      "id": "F3",
+      "verdict": "pass",
+      "rationale": "Ничего не оставлено на потом: все backend-изменения для status завершены.",
+      "evidence": "n/a"
+    }
+  ],
+  "projectChecks": {
+    "discovered": false,
+    "anyFailed": false,
+    "commands": []
+  }
+}

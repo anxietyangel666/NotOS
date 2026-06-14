@@ -1,0 +1,196 @@
+{
+  "id": "019ea649-e226-72c8-9900-f7a63bac0577",
+  "name": "Add user profile modal",
+  "description": "В мессенджере нужно сделать так, чтобы при правом клике по пользователю появлялся пункт \"Профиль\". При клике открывается окно/модал профиля, где:\n- Сверху панель с фоном (wallpaper пользователя) — как на рабочем столе\n- Сверху слева иконка (аватар) пользователя\n- Рядом со статусом онлайн/оффлайн (presence dot + текст)\n- Снизу под фоном: никнейм\n- Под никнеймом: статус/описание (bio)\n- Под описанием: текстовое поле для быстрой отправки сообщения этому пользователю напрямую\n\nВозможность менять свой статус/описание (bio):\n- В настройках профиля (вкладка \"Пользователь\")\n- При правом клике на себя в мессенджере — тоже открывается профиль со своим статусом, можно редактировать\n- На рабочем столе в панели Пуск (кнопка \"Пуск\" слева снизу) — при открытии меню пуска должна быть плашка с моим профилем, где тоже можно менять статус/описание\n\nТекущее состояние кода:\n- Есть PublicUser без поля bio/status\n- Есть online-статус через socket.io (presence:snapshot, presence:changed)\n- Есть MessengerWindow с вкладками друзей и ПКМ-меню на рабочем столе для иконок\n- Есть settings window с вкладкой profile\n- Нужно добавить миграцию БД, обновить типы, обновить роуты настроек, создать компонент профиля, интегрировать в мессенджер и пуск меню",
+  "status": "complete",
+  "worktree": {
+    "path": "/mnt/c/My Projects/NotOC"
+  },
+  "scoping": {
+    "goal": {
+      "answer": "Добавить модальное окно профиля пользователя, доступное через ПКМ в мессенджере и через аватарку в таскбаре. Профиль содержит фон-обои, аватар, онлайн-статус, никнейм, текстовый статус пользователя (до 200 символов) и поле для прямой отправки сообщения. Свой статус можно изменить в профиле, в настройках профиля и через таскбар.",
+      "confirmedAt": "2026-06-08T08:23:36.875Z"
+    },
+    "criteria": {
+      "answer": "В БД добавлена колонка status (TEXT), миграция проходит, серверная сборка проходит без ошибок\nPATCH /api/users/me принимает и сохраняет status (макс 200 символов)\nPublicUser (клиент и сервер) содержит поле status\nСоздан компонент ProfileModal (центрированная модал-карточка) с фоном, аватаром, presence, ником, статусом и полем отправки сообщения\nВ MessengerWindow при ПКМ по любому пользователю появляется пункт 'Профиль', открывающий ProfileModal\nПри ПКМ по себе в мессенджере открывается свой профиль с возможностью редактировать status\nКнопка аватарки в таскбаре открывает свой профиль с возможностью редактировать status\nВ настройках (вкладка 'Пользователь') добавлено поле редактирования status\nДобавлены i18n-переводы для новых строк на en/ru/uk\nСборка клиента (npm run build) и сервера (npm run build) проходит без ошибок",
+      "confirmedAt": "2026-06-08T08:23:36.875Z"
+    },
+    "constraints": {
+      "answer": "Не добавлять новые зависимости, Следовать существующим паттернам проекта (migrate.ts для БД, zod для валидации, modal-backdrop/CSS для модалок), Поле в БД и типах называется status, максимум 200 символов",
+      "confirmedAt": "2026-06-08T08:23:36.875Z"
+    },
+    "phases": {
+      "answer": "Backend: DB + API, ProfileModal + i18n + styles, Frontend integration, Build verification",
+      "confirmedAt": "2026-06-08T08:23:36.875Z"
+    },
+    "assumptions": {
+      "answer": "Онлайн-статус (presence) уже реализован через socket.io и массив onlineUserIds — его переиспользуем; Отправка сообщений напрямую из профиля использует существующий api.sendMessage и POST /api/messenger/messages; Профиль любого пользователя (даже не в друзьях) можно открыть через GET /api/users/:userId/public; Кнопка .profile-start в таскбаре ведёт себя как триггер профиля (без раскрывающегося меню Пуск)",
+      "confirmedAt": "2026-06-08T08:23:36.875Z"
+    }
+  },
+  "phases": [
+    {
+      "id": "phase-1",
+      "index": 1,
+      "name": "Backend: DB + API",
+      "goal": "Добавить поле status в БД, типы, endpoint обновления и публичный endpoint",
+      "description": "1. Добавить ALTER TABLE ... ADD COLUMN IF NOT EXISTS status TEXT в migrate.ts\n2. Добавить status в UserRecord и PublicUser (server/src/db/users.ts)\n3. Добавить status в client/src/api/types.ts PublicUser\n4. Обновить updateUserSettings в users.ts для приёма status\n5. Добавить status в updateUserSchema (zod string max 200) в user.routes.ts\n6. Обновить toPublicUser для возврата status\n7. Проверить серверную сборку",
+      "parallel": false,
+      "status": "completed",
+      "steps": [
+        {
+          "id": "step-1",
+          "index": 1,
+          "description": "Обновить migrate.ts, типы, db/users.ts, user.routes.ts",
+          "status": "verified",
+          "verification": {
+            "command": "cd apps/server && npm run build",
+            "retries": 2,
+            "retryDelayMs": 1000
+          },
+          "parallel": false,
+          "startedAt": "2026-06-08T08:24:04.198Z",
+          "completedAt": "2026-06-08T08:26:29.320Z",
+          "result": {
+            "success": true,
+            "exitCode": 0,
+            "stdout": "",
+            "stderr": "",
+            "completedAt": "2026-06-08T08:26:29.320Z"
+          }
+        }
+      ],
+      "startedAt": "2026-06-08T08:23:44.410Z",
+      "completedAt": "2026-06-08T08:27:03.678Z",
+      "summary": "Бэкенд готов: добавлено поле status в БД (миграция), типы (UserRecord, PublicUser), endpoint PATCH /api/users/me с валидацией zod (max 200 символов). Серверная сборка проходит без ошибок."
+    },
+    {
+      "id": "phase-2",
+      "index": 2,
+      "name": "ProfileModal + i18n + styles",
+      "goal": "Создать переиспользуемый компонент модалки профиля с вёрсткой, стилями и переводами",
+      "description": "1. Создать client/src/components/ProfileModal.tsx (props: user, currentUser, onlineUserIds, language, onClose, onSendMessage, onStatusChange)\n2. Добавить CSS для .profile-modal, .profile-banner, .profile-avatar-wrap, .profile-info, .profile-message-input\n3. Добавить i18n-ключи: viewProfile, editStatus, sendMessage, profileStatus и др. в en/ru/uk\n4. Проверить, что компонент компилируется (tsc)",
+      "parallel": false,
+      "status": "completed",
+      "steps": [
+        {
+          "id": "step-1",
+          "index": 1,
+          "description": "Создать ProfileModal.tsx, обновить styles.css и i18n.ts",
+          "status": "verified",
+          "verification": {
+            "command": "cd apps/client && npx tsc --noEmit",
+            "retries": 2,
+            "retryDelayMs": 1000
+          },
+          "parallel": false,
+          "startedAt": "2026-06-08T08:27:18.368Z",
+          "completedAt": "2026-06-08T08:34:41.080Z",
+          "result": {
+            "success": true,
+            "exitCode": 0,
+            "stdout": "",
+            "stderr": "",
+            "completedAt": "2026-06-08T08:34:41.080Z"
+          }
+        }
+      ],
+      "startedAt": "2026-06-08T08:27:10.608Z",
+      "completedAt": "2026-06-08T08:34:56.840Z",
+      "summary": "Фаза завершена: создан переиспользуемый компонент ProfileModal с вёрсткой, стилями и переводами. Компонент компилируется без ошибок."
+    },
+    {
+      "id": "phase-3",
+      "index": 3,
+      "name": "Frontend integration",
+      "goal": "Интегрировать ProfileModal в MessengerWindow, таскбар и настройки",
+      "description": "1. В MessengerWindow: добавить пункт 'Профиль' в context menu (openUserMenu), открывать ProfileModal\n2. В MessengerWindow: при ПКМ на себе открывать ProfileModal с editable status\n3. В Desktop.tsx: заменить openSettings('profile') в .profile-start на открытие ProfileModal с editable status\n4. В Desktop.tsx (вкладка profile settings): добавить textarea/input для statusDraft + включить в saveSettings\n5. Проверить клиентскую сборку",
+      "parallel": false,
+      "status": "completed",
+      "steps": [
+        {
+          "id": "step-1",
+          "index": 1,
+          "description": "Изменить MessengerWindow.tsx и Desktop.tsx для интеграции модалки",
+          "status": "verified",
+          "verification": {
+            "command": "cd apps/client && npm run build",
+            "retries": 2,
+            "retryDelayMs": 1000
+          },
+          "parallel": false,
+          "startedAt": "2026-06-08T08:35:37.979Z",
+          "completedAt": "2026-06-08T08:46:20.059Z",
+          "result": {
+            "success": true,
+            "exitCode": 0,
+            "stdout": "",
+            "stderr": "",
+            "completedAt": "2026-06-08T08:46:20.059Z"
+          }
+        }
+      ],
+      "startedAt": "2026-06-08T08:35:14.815Z",
+      "completedAt": "2026-06-08T08:46:44.562Z",
+      "summary": "Фаза завершена: ProfileModal интегрирован в MessengerWindow (ПКМ-меню + отправка сообщений с переходом в чат) и Desktop (таскбар + поле status в настройках). Клиентская сборка проходит без ошибок."
+    },
+    {
+      "id": "phase-4",
+      "index": 4,
+      "name": "Build verification",
+      "goal": "Убедиться, что обе части проекта собираются",
+      "description": "1. Собрать сервер: cd apps/server && npm run build\n2. Собрать клиент: cd apps/client && npm run build\n3. Убедиться, что нет TypeScript-ошибок",
+      "parallel": false,
+      "status": "completed",
+      "steps": [
+        {
+          "id": "step-1",
+          "index": 1,
+          "description": "Полная сборка обеих частей",
+          "status": "verified",
+          "verification": {
+            "command": "cd apps/server && npm run build && cd ../client && npm run build",
+            "retries": 2,
+            "retryDelayMs": 1000
+          },
+          "parallel": false,
+          "startedAt": "2026-06-08T08:47:30.774Z",
+          "completedAt": "2026-06-08T08:48:59.530Z",
+          "result": {
+            "success": true,
+            "exitCode": 0,
+            "stdout": "",
+            "stderr": "",
+            "completedAt": "2026-06-08T08:48:59.530Z"
+          }
+        }
+      ],
+      "startedAt": "2026-06-08T08:47:14.617Z",
+      "completedAt": "2026-06-08T08:49:14.436Z",
+      "summary": "Фаза завершена: серверная и клиентская сборки проходят без ошибок."
+    }
+  ],
+  "decisions": [],
+  "memories": [],
+  "createdAt": "2026-06-08T08:12:00.421Z",
+  "updatedAt": "2026-06-08T08:52:07.737Z",
+  "goal": "Добавить модальное окно профиля пользователя, доступное через ПКМ в мессенджере и через аватарку в таскбаре. Профиль содержит фон-обои, аватар, онлайн-статус, никнейм, текстовый статус пользователя (до 200 символов) и поле для прямой отправки сообщения. Свой статус можно изменить в профиле, в настройках профиля и через таскбар.",
+  "successCriteria": [
+    "В БД добавлена колонка status (TEXT), миграция проходит, серверная сборка проходит без ошибок",
+    "PATCH /api/users/me принимает и сохраняет status (макс 200 символов)",
+    "PublicUser (клиент и сервер) содержит поле status",
+    "Создан компонент ProfileModal (центрированная модал-карточка) с фоном, аватаром, presence, ником, статусом и полем отправки сообщения",
+    "В MessengerWindow при ПКМ по любому пользователю появляется пункт 'Профиль', открывающий ProfileModal",
+    "При ПКМ по себе в мессенджере открывается свой профиль с возможностью редактировать status",
+    "Кнопка аватарки в таскбаре открывает свой профиль с возможностью редактировать status",
+    "В настройках (вкладка 'Пользователь') добавлено поле редактирования status",
+    "Добавлены i18n-переводы для новых строк на en/ru/uk",
+    "Сборка клиента (npm run build) и сервера (npm run build) проходит без ошибок"
+  ],
+  "constraints": [
+    "Не добавлять новые зависимости",
+    "Следовать существующим паттернам проекта (migrate.ts для БД, zod для валидации, modal-backdrop/CSS для модалок)",
+    "Поле в БД и типах называется status, максимум 200 символов"
+  ],
+  "lastActiveAt": "2026-06-08T08:47:14.617Z"
+}

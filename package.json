@@ -1,0 +1,16 @@
+{
+  "name": "notoc",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/client",
+    "apps/server"
+  ],
+  "scripts": {
+    "desktop": "npm --workspace @notoc/client run desktop",
+    "dev:client": "npm --workspace @notoc/client run dev",
+    "dev:server": "npm --workspace @notoc/server run dev",
+    "build": "npm --workspace @notoc/server run build && npm --workspace @notoc/client run build",
+    "docker:up": "docker compose up --build"
+  }
+}
