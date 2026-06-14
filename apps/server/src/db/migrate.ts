@@ -179,6 +179,11 @@ export async function migrate() {
     ALTER TABLE groups
       ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT '';
 
+    -- Role automatically granted to members when they join the server. NULL
+    -- falls back to the lowest non-owner role (legacy behaviour).
+    ALTER TABLE groups
+      ADD COLUMN IF NOT EXISTS default_role_id UUID;
+
     CREATE INDEX IF NOT EXISTS groups_owner_idx
       ON groups (owner_id);
 
@@ -271,6 +276,80 @@ export async function migrate() {
         ADD CONSTRAINT group_channels_folder_fk
         FOREIGN KEY (folder_id) REFERENCES group_folders(id) ON DELETE SET NULL;
     EXCEPTION WHEN duplicate_object THEN NULL; END $do$;
+
+    -- ── Server profile customization ──
+    -- Admin-defined categories ("Hobby", "Faction", ...). selection_type is
+    -- 'multi' (checkboxes) or 'single' (radio: picking one clears the others).
+    -- hide_channels toggles auto-created hidden channel categories per option.
+    -- required gates the server behind an onboarding modal on first visit.
+    CREATE TABLE IF NOT EXISTS group_custom_categories (
+      id UUID PRIMARY KEY,
+      group_id UUID NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      selection_type TEXT NOT NULL DEFAULT 'multi',
+      hide_channels BOOLEAN NOT NULL DEFAULT FALSE,
+      required BOOLEAN NOT NULL DEFAULT FALSE,
+      position INT NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS group_custom_categories_group_idx
+      ON group_custom_categories (group_id, position);
+
+    -- A selectable option inside a category. Each option owns an auto-generated
+    -- group role (role_id) and, when the category hides channels, an
+    -- auto-generated channel folder (folder_id) only its holders can see.
+    CREATE TABLE IF NOT EXISTS group_custom_options (
+      id UUID PRIMARY KEY,
+      category_id UUID NOT NULL REFERENCES group_custom_categories(id) ON DELETE CASCADE,
+      group_id UUID NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+      label TEXT NOT NULL,
+      emoji TEXT NOT NULL DEFAULT '',
+      color TEXT NOT NULL DEFAULT '#8a8a8a',
+      role_id UUID,
+      folder_id UUID,
+      position INT NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS group_custom_options_category_idx
+      ON group_custom_options (category_id, position);
+
+    -- Channel visibility gated by roles. A channel with one or more rows here is
+    -- only visible to members holding at least one of the listed roles (plus the
+    -- owner). Channels with no rows are visible to everyone (legacy behaviour).
+    CREATE TABLE IF NOT EXISTS group_channel_roles (
+      channel_id UUID NOT NULL REFERENCES group_channels(id) ON DELETE CASCADE,
+      role_id UUID NOT NULL REFERENCES group_roles(id) ON DELETE CASCADE,
+      PRIMARY KEY (channel_id, role_id)
+    );
+
+    -- Same role-gated visibility for folders (used by hidden channel folders).
+    ALTER TABLE group_folders
+      ADD COLUMN IF NOT EXISTS required_role_id UUID;
+
+    -- Extra (additive) roles a member holds beyond their primary role_id. Used
+    -- by the profile customization feature so a member can hold several
+    -- customization roles at once (e.g. multiple hobbies).
+    CREATE TABLE IF NOT EXISTS group_member_roles (
+      group_id UUID NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+      user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      role_id UUID NOT NULL REFERENCES group_roles(id) ON DELETE CASCADE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (group_id, user_id, role_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS group_member_roles_member_idx
+      ON group_member_roles (group_id, user_id);
+
+    -- Tracks which members have completed the onboarding customization flow so
+    -- the required modal only blocks them until they pick their roles once.
+    CREATE TABLE IF NOT EXISTS group_onboarding_state (
+      group_id UUID NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+      user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      completed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (group_id, user_id)
+    );
 
     -- AI Chat: each chat stores its title and full message history encrypted
     -- per-user (aes-256-gcm), mirroring the virtual_storage approach.

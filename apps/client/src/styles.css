@@ -1229,6 +1229,15 @@ button {
   max-height: min(1400px, 92vh);
 }
 
+/* Inside the scrolling profile card, keep the save bar pinned at the bottom. */
+.profile-modal-card .app-save-bar {
+  position: sticky;
+  bottom: 12px;
+  margin: 12px 16px 0;
+  left: auto;
+  right: auto;
+}
+
 .profile-body {
   display: grid;
   grid-template-columns: 1fr;
@@ -1246,9 +1255,6 @@ button {
 }
 
 .profile-banner-friend-btn {
-  position: absolute;
-  top: 12px;
-  right: 12px;
   background: color-mix(in srgb, var(--panel) 72%, transparent) !important;
   backdrop-filter: blur(10px);
   border-color: rgba(255,255,255,0.25) !important;
@@ -1257,9 +1263,7 @@ button {
 
 /* Friend button + custom hover tooltip wrapper */
 .profile-friend-btn-wrap {
-  position: absolute;
-  top: 12px;
-  right: 12px;
+  position: relative;
   display: inline-flex;
 }
 
@@ -1567,6 +1571,160 @@ button {
 .profile-friend-btn:disabled {
   opacity: 0.6;
   cursor: default;
+}
+
+/* Banner action row: friend btn + more (⋯) btn */
+.profile-banner-actions {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.profile-more-wrap {
+  position: relative;
+}
+
+.profile-more-btn {
+  font-size: 20px;
+  letter-spacing: 1px;
+  line-height: 1;
+  font-weight: 700;
+}
+
+.profile-more-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: auto;
+  left: 0;
+  min-width: 200px;
+  background: var(--panel-strong, #1f2733);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.28);
+  padding: 6px;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.profile-more-menu > button,
+.profile-more-menu-item-wrap > button {
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+  transition: background 0.12s;
+}
+
+.profile-more-menu > button:hover,
+.profile-more-menu-item-wrap > button:hover {
+  background: var(--line);
+}
+
+.profile-more-menu-danger {
+  color: #e5484d !important;
+}
+
+.profile-more-menu-item-wrap {
+  position: relative;
+}
+
+.profile-more-submenu-trigger {
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+  transition: background 0.12s;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.profile-more-submenu-trigger:hover {
+  background: var(--line);
+}
+
+.profile-more-submenu {
+  position: absolute;
+  top: 0;
+  left: calc(100% + 6px);
+  min-width: 180px;
+  max-height: 240px;
+  overflow-y: auto;
+  background: var(--panel-strong, #1f2733);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.28);
+  padding: 6px;
+  z-index: 31;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.profile-more-submenu button {
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+  transition: background 0.12s;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.profile-more-submenu button:hover {
+  background: var(--line);
+}
+
+.profile-more-submenu button img {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+.profile-more-submenu button span {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.profile-more-sent-check {
+  color: #3ba55d;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.profile-more-submenu-loading {
+  padding: 10px 12px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.profile-more-submenu-sent {
+  opacity: 0.7;
 }
 
 .profile-link-row {
@@ -7630,7 +7788,8 @@ div.settings-music-row {
 
 .group-channels-panel {
   display: grid;
-  grid-template-rows: auto 1fr auto;
+  /* header | customize button | divider | channels list (fills remaining) */
+  grid-template-rows: auto auto auto 1fr;
   border-right: 1px solid var(--line);
   background: var(--panel);
   overflow: hidden;
@@ -8745,6 +8904,93 @@ div.settings-music-row {
 }
 
 /* ── Redesigned Roles tab ── */
+
+/* "Default role on join" row, pinned above the search + roles list. */
+.group-default-role-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 14px;
+  margin-bottom: 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg-soft);
+}
+.group-default-role-label {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+}
+.group-default-role-wrap {
+  position: relative;
+  flex-shrink: 0;
+}
+.group-default-role-trigger {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 180px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 14px;
+  cursor: pointer;
+  transition: border-color 120ms ease;
+}
+.group-default-role-trigger:hover {
+  border-color: var(--line-strong, var(--line));
+}
+.group-default-role-current {
+  flex: 1;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.group-default-role-caret {
+  font-size: 11px;
+  color: var(--muted);
+}
+.group-default-role-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  left: 0;
+  z-index: 30;
+  max-height: 260px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+}
+.group-default-role-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+}
+.group-default-role-option:hover {
+  background: var(--bg-soft);
+}
+.group-default-role-option.active {
+  background: color-mix(in srgb, var(--blue, #2aabee) 16%, transparent);
+  font-weight: 700;
+}
+
 .group-roles-toolbar {
   display: flex;
   gap: 8px;
@@ -8847,18 +9093,28 @@ div.settings-music-row {
   color: var(--danger, #e5484d);
 }
 
-/* Roles editor sub-view: sidebar list + settings panel */
-.group-roles-editor-view {
+/* Roles editor sub-view: sidebar list + settings panel.
+   The card fills the whole content area so its background reaches the bottom,
+   and is the positioning context for the slide-up save bar. */
+.group-settings-section.group-roles-editor-view {
+  position: relative;
   display: grid;
-  grid-template-columns: 200px minmax(0, 1fr);
-  gap: 18px;
-  align-items: start;
+  grid-template-columns: 240px minmax(0, 1fr);
+  gap: 22px;
+  align-items: stretch;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
 }
 .group-roles-editor-sidebar {
   display: flex;
   flex-direction: column;
   gap: 8px;
   min-width: 0;
+  min-height: 0;
+  padding-right: 18px;
+  border-right: 1px solid var(--line);
+  overflow-y: auto;
 }
 .group-roles-back-btn {
   align-self: flex-start;
@@ -8881,13 +9137,13 @@ div.settings-music-row {
 .group-roles-editor-list-item {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
+  gap: 10px;
+  padding: 10px 12px;
   border: none;
-  border-radius: 8px;
+  border-radius: 9px;
   background: transparent;
   cursor: pointer;
-  font-size: 13px;
+  font-size: 15px;
   color: var(--text);
   text-align: left;
 }
@@ -8901,16 +9157,22 @@ div.settings-music-row {
 .group-roles-editor-panel {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 14px;
   min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  /* Leave room so the slide-up save bar never covers the last control. */
+  padding-bottom: 72px;
+  font-size: 15px;
 }
 .group-roles-editor-meta {
   display: flex;
-  gap: 8px;
+  gap: 10px;
   align-items: center;
 }
 .group-roles-editor-meta .messenger-input {
   flex: 1;
+  font-size: 15px;
 }
 
 .group-settings-role {
@@ -9029,13 +9291,23 @@ div.settings-music-row {
 .group-role-permission-item {
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-size: 12px;
+  gap: 10px;
+  font-size: 15px;
+  padding: 8px 10px;
+  border-radius: 10px;
   cursor: pointer;
+  transition: background 120ms ease;
+}
+
+.group-role-permission-item:hover {
+  background: var(--bg-soft);
 }
 
 .group-role-permission-item input[type="checkbox"] {
   margin: 0;
+  width: 17px;
+  height: 17px;
+  flex-shrink: 0;
 }
 
 .group-settings-divider {
@@ -9437,6 +9709,7 @@ div.settings-music-row {
 }
 
 .group-settings-modal {
+  position: relative;
   display: flex;
   /* 1.5x the original 820x580, capped to the viewport so the whole window
      (and its content) stays visible on any screen. */
@@ -9447,6 +9720,32 @@ div.settings-music-row {
   background: var(--panel);
   box-shadow: var(--shadow);
   overflow: hidden;
+}
+
+/* Plain × close button pinned to the top-right corner of the settings modal. */
+.group-settings-close {
+  position: absolute;
+  top: 14px;
+  right: 16px;
+  z-index: 5;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--panel-strong, var(--bg-soft));
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease, border-color 140ms ease;
+}
+.group-settings-close:hover {
+  background: var(--bg-soft);
+  color: var(--text);
+  border-color: var(--line-strong, var(--line));
 }
 
 .group-settings-sidebar {
@@ -9565,14 +9864,16 @@ div.settings-music-row {
 }
 
 .group-settings-content {
+  position: relative;
   flex: 1;
   min-width: 0;
   min-height: 0;
-  padding: 26px 28px;
+  padding: 30px 34px 84px;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 26px;
+  font-size: 15px;
 }
 
 /* Card-like grouping for each settings section, Discord-style. */
@@ -9587,7 +9888,7 @@ div.settings-music-row {
 }
 
 .group-settings-section h3 {
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 800;
   text-transform: uppercase;
   letter-spacing: 0.6px;
@@ -9623,7 +9924,7 @@ div.settings-music-row {
 }
 
 .group-settings-section label {
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 700;
   color: var(--muted);
   display: block;
@@ -10560,6 +10861,10 @@ div.settings-music-row {
 }
 
 /* ===== Voice settings tab ===== */
+
+.voice-settings {
+  padding-bottom: 84px;
+}
 
 .voice-settings .field-label {
   margin-top: 12px;
@@ -12335,7 +12640,7 @@ div.settings-music-row {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 18px 20px;
+  padding: 18px 20px 84px;
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -13019,4 +13324,390 @@ div.settings-music-row {
   width: 100% !important;
   min-width: 0 !important;
 }
+
+/* ============================================================
+   Reusable slide-up "unsaved changes" save bar (<SaveBar />)
+   ============================================================ */
+.app-save-bar {
+  position: absolute;
+  left: 16px;
+  right: 16px;
+  bottom: 14px;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-strong, var(--panel));
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.28);
+  animation: app-save-bar-in 220ms cubic-bezier(0.2, 0.9, 0.3, 1.2);
+}
+@keyframes app-save-bar-in {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+/* Shake red when a close is blocked by unsaved changes. */
+.app-save-bar.shake {
+  animation: app-save-bar-shake 0.5s ease;
+  border-color: var(--danger, #e15b5b);
+}
+@keyframes app-save-bar-shake {
+  0%, 100% { transform: translateX(0); }
+  15%, 45%, 75% { transform: translateX(-7px); }
+  30%, 60%, 90% { transform: translateX(7px); }
+}
+.app-save-bar-text {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+.app-save-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+.app-save-bar-reset {
+  padding: 8px 16px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color 120ms ease;
+}
+.app-save-bar-reset:hover { text-decoration: underline; }
+.app-save-bar-reset:disabled { opacity: 0.5; cursor: default; }
+.app-save-bar-save {
+  padding: 8px 18px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--blue, #2aabee);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: filter 120ms ease;
+}
+.app-save-bar-save:hover { filter: brightness(1.08); }
+.app-save-bar-save:disabled { opacity: 0.6; cursor: default; }
+
+/* Small modals that host a save bar need bottom room + relative positioning. */
+.group-channel-modal.has-save-bar {
+  position: relative;
+  padding-bottom: 76px;
+}
+
+/* ============================================================
+   Reusable custom tooltip (<Tooltip />)
+   ============================================================ */
+.app-tooltip {
+  position: fixed;
+  z-index: 100000;
+  transform: translate(-50%, calc(-100% - 8px));
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--panel-strong, #1d2a3a);
+  color: var(--text);
+  border: 1px solid var(--line);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.2;
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+  animation: app-tooltip-in 120ms ease;
+}
+@keyframes app-tooltip-in {
+  from { opacity: 0; transform: translate(-50%, calc(-100% - 2px)); }
+  to { opacity: 1; transform: translate(-50%, calc(-100% - 8px)); }
+}
+
+/* ── Server profile customization ── */
+
+.group-customize-btn {
+  display: inline-flex;
+  align-self: flex-start;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  max-width: calc(100% - 16px);
+  margin: 8px 8px 0;
+  padding: 8px 14px;
+  border: 1px solid var(--line);
+  border-radius: 0;
+  background: linear-gradient(135deg, rgba(88, 101, 242, 0.16), rgba(42, 171, 238, 0.16));
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+.group-customize-btn:hover {
+  border-color: var(--accent, #5865f2);
+}
+/* Full-width divider under the button; channels start right below it. */
+.group-customize-divider {
+  height: 0;
+  margin: 8px 0 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+}
+
+.modal-backdrop.customization-backdrop,
+.customization-backdrop {
+  position: fixed;
+  inset: 0;
+  /* Portaled to <body>; must sit above app windows (which climb past 1013)
+     and the group settings modal, otherwise it opens behind the messenger.
+     Selector is doubled so it beats `.modal-backdrop.important` (z-index 20). */
+  z-index: 100002;
+  display: grid;
+  place-items: center;
+  padding: 22px;
+}
+.customization-modal {
+  width: min(560px, 94vw);
+  max-height: 86vh;
+  margin: auto;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.4);
+  overflow: hidden;
+}
+.customization-header {
+  position: relative;
+  padding: 22px 24px 14px;
+  border-bottom: 1px solid var(--line);
+  background: linear-gradient(135deg, rgba(88, 101, 242, 0.12), rgba(42, 171, 238, 0.1));
+}
+.customization-header h2 { margin: 0 0 4px; font-size: 20px; }
+.customization-subtitle { margin: 0; font-size: 13px; color: var(--muted); }
+.customization-close {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  width: 30px;
+  height: 30px;
+  border: none;
+  border-radius: 8px;
+  background: var(--bg-soft);
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 14px;
+}
+.customization-close:hover { color: var(--text); }
+.customization-body {
+  padding: 18px 24px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+.customization-category-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.customization-category-head h3 { margin: 0; font-size: 15px; }
+.customization-required-badge,
+.customization-type-badge {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+.customization-required-badge { background: rgba(237, 66, 69, 0.16); color: #ed4245; }
+.customization-type-badge { background: var(--bg-soft); color: var(--muted); margin-left: auto; }
+.customization-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.customization-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg-soft);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  transition: transform 120ms ease, border-color 120ms ease;
+}
+.customization-option:hover { transform: translateY(-1px); }
+.customization-option.active { background: var(--panel); }
+.customization-option-mark {
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--line-strong, var(--line));
+  flex-shrink: 0;
+}
+.customization-option-mark.radio { border-radius: 50%; }
+.customization-option-mark.check { border-radius: 5px; }
+.customization-option-emoji { display: inline-flex; }
+.customization-footer {
+  padding: 14px 24px;
+  border-top: 1px solid var(--line);
+  display: flex;
+  justify-content: flex-end;
+}
+
+.customization-constructor .customization-hint {
+  font-size: 13px;
+  color: var(--muted);
+  margin: 0 0 14px;
+}
+.customization-cat-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-bottom: 18px;
+}
+.customization-cat-card {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px;
+  background: var(--bg-soft);
+}
+.customization-cat-card-head {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+.customization-cat-name { flex: 1 1 200px; min-width: 160px; }
+.customization-cat-type { flex: 0 0 130px; width: 130px; }
+.customization-cat-delete,
+.customization-opt-delete {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 4px 6px;
+  border-radius: 6px;
+}
+.customization-cat-delete:hover,
+.customization-opt-delete:hover { color: #ed4245; background: rgba(237, 66, 69, 0.12); }
+.customization-cat-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin: 8px 0;
+}
+.customization-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+}
+.customization-opt-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+.customization-opt-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: var(--panel);
+}
+.customization-opt-label { flex: 1; font-size: 13px; }
+.customization-opt-add {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 4px;
+  flex-wrap: wrap;
+}
+.customization-opt-emoji-input { width: 56px; flex: 0 0 56px; text-align: center; }
+.customization-opt-color {
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: none;
+  cursor: pointer;
+}
+.customization-opt-name-input { flex: 1 1 140px; min-width: 120px; }
+.customization-opt-add .secondary-action { flex: 0 0 auto; white-space: nowrap; }
+.customization-create-cat {
+  border-top: 1px dashed var(--line);
+  padding-top: 16px;
+}
+.customization-create-cat h4 { margin: 0 0 10px; font-size: 14px; }
+.customization-create-row {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 8px;
+  flex-wrap: nowrap;
+  align-items: center;
+}
+.customization-create-row .messenger-input:first-child {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.customization-create-row select.messenger-input {
+  flex: 0 0 auto;
+  width: auto;
+}
+.customization-gate { position: relative; }
+.customization-gate-btn {
+  border: 1px solid var(--line);
+  background: var(--bg-soft);
+  border-radius: 8px;
+  padding: 3px 8px;
+  font-size: 12px;
+  cursor: pointer;
+  color: var(--muted);
+}
+.customization-gate-btn:hover { color: var(--text); }
+.customization-gate-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 30;
+  min-width: 160px;
+  max-height: 220px;
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.3);
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.customization-gate-menu button {
+  text-align: left;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.customization-gate-menu button:hover { background: var(--bg-soft); }
+
 

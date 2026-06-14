@@ -1,8 +1,10 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type DragEvent, type MouseEvent } from 'react';
 import { createPortal } from 'react-dom';
-import { io, type Socket } from 'socket.io-client';
-import { API_URL, api } from '../api/client';
-import type { ConversationPreview, FriendRequests, Group, GroupConversationPreview, GroupMessage, Language, MessengerMessage, PublicUser, StorageItem } from '../api/types';
+import type { Socket } from 'socket.io-client';
+import { api } from '../api/client';
+import { cacheUser, getOrFetchUser } from '../api/user-cache';
+import { useSocket } from '../hooks/use-socket';
+import type { ConversationPreview, FriendRequests, Group, GroupConversationPreview, GroupMessage, GroupRole, Language, MessengerMessage, PublicUser, StorageItem } from '../api/types';
 import { nameplateToCss } from '../api/types';
 import { readImageAsDataUrl } from '../auth/auth-file';
 import { LOCALES, t, getSavedTimeFormat } from '../i18n';
@@ -142,7 +144,9 @@ export function MessengerWindow({
   onUserChange,
   onEditProfile
 }: MessengerWindowProps) {
+  const sharedSocket = useSocket();
   const socketRef = useRef<Socket | null>(null);
+  socketRef.current = sharedSocket;
   const [socketInstance, setSocketInstance] = useState<Socket | null>(null);
   const [callChatCollapsed, setCallChatCollapsed] = useState(false);
   const messageInputRef = useRef<HTMLInputElement | null>(null);
@@ -192,6 +196,8 @@ export function MessengerWindow({
   const [userMenu, setUserMenu] = useState<{ x: number; y: number; user: PublicUser } | null>(null);
   const [profileUser, setProfileUser] = useState<PublicUser | null>(null);
   const [profileGroup, setProfileGroup] = useState<Group | undefined>(undefined);
+  // Preloaded roles passed from the group view so the profile shows them instantly.
+  const [profilePreload, setProfilePreload] = useState<{ groupRoles: GroupRole[]; userRoles: GroupRole[] } | undefined>(undefined);
   const [splitWidth, setSplitWidth] = useState<number | null>(() => {
     try {
       const stored = localStorage.getItem('notoc.messenger.splitWidth');
@@ -413,16 +419,15 @@ export function MessengerWindow({
     };
   }, [hasSearchQuery, language, query, token]);
 
+  // Use the shared socket from SocketProvider — no longer creates its own connection.
   useEffect(() => {
-    const socket = io(API_URL, { auth: { token } });
-    socketRef.current = socket;
+    const socket = sharedSocket;
+    if (!socket) return;
     setSocketInstance(socket);
 
-    socket.on('messenger:message', (payload: { message: MessengerMessage }) => {
+    function onMessage(payload: { message: MessengerMessage }) {
       const message = payload.message;
       upsertConversation(message);
-      // Keep the cached thread for the other participant up to date even when
-      // that chat is not currently open.
       const otherId = message.senderId === currentUser.id ? message.recipientId : message.senderId;
       const cached = messageCacheRef.current.get(otherId);
       if (cached && !cached.some((item) => item.id === message.id)) {
@@ -431,73 +436,60 @@ export function MessengerWindow({
       const selected = selectedUserRef.current;
       if (!selected || (message.senderId !== selected.id && message.recipientId !== selected.id)) return;
       setMessages((current) => (current.some((item) => item.id === message.id) ? current : [...current, message]));
-    });
+    }
 
-    socket.on('messenger:messageUpdated', (payload: { message: MessengerMessage }) => {
-      replaceMessage(payload.message);
-    });
+    function onMessageUpdated(payload: { message: MessengerMessage }) { replaceMessage(payload.message); }
+    function onMessageDeleted(payload: { message: MessengerMessage }) { replaceMessage(payload.message); }
+    function onMessagePinned(payload: { message: MessengerMessage }) { replaceMessage(payload.message); }
 
-    socket.on('messenger:messageDeleted', (payload: { message: MessengerMessage }) => {
-      replaceMessage(payload.message);
-    });
-
-    socket.on('messenger:messagePinned', (payload: { message: MessengerMessage }) => {
-      replaceMessage(payload.message);
-    });
-
-    socket.on('messenger:friendsChanged', (payload: FriendsChangedPayload) => {
+    function onFriendsChanged(payload: FriendsChangedPayload) {
+      payload.friends.forEach(cacheUser);
       setFriends(uniqueById(payload.friends));
       setRequests(payload.requests);
-    });
+    }
 
-    socket.on('desktop:userChanged', (payload: { user: PublicUser }) => {
+    function onUserChanged(payload: { user: PublicUser }) {
+      cacheUser(payload.user);
       replaceKnownUser(payload.user);
-    });
+    }
 
-    socket.on('presence:snapshot', (payload: { onlineUserIds: string[] }) => {
-      setOnlineUserIds(payload.onlineUserIds);
-    });
+    function onPresenceSnapshot(payload: { onlineUserIds: string[] }) { setOnlineUserIds(payload.onlineUserIds); }
 
-    socket.on('presence:changed', (payload: { userId: string; online: boolean }) => {
+    function onPresenceChanged(payload: { userId: string; online: boolean }) {
       setOnlineUserIds((current) => {
         if (payload.online) return current.includes(payload.userId) ? current : [...current, payload.userId];
         return current.filter((userId) => userId !== payload.userId);
       });
-    });
+    }
 
-    socket.on('messenger:typing', (payload: { userId: string; typing: boolean }) => {
+    function onTyping(payload: { userId: string; typing: boolean }) {
       setTypingUserIds((current) => {
         if (payload.typing) return current.includes(payload.userId) ? current : [...current, payload.userId];
         return current.filter((userId) => userId !== payload.userId);
       });
-    });
+    }
 
-    socket.on('messenger:groupCreated', (payload: { group: Group }) => {
+    function onGroupCreated(payload: { group: Group }) {
       setGroups((current) => current.some((g) => g.id === payload.group.id) ? current : [payload.group, ...current]);
-    });
-
-    socket.on('messenger:groupUpdated', (payload: { group: Group }) => {
+    }
+    function onGroupUpdated(payload: { group: Group }) {
       setGroups((current) => current.map((g) => g.id === payload.group.id ? payload.group : g));
       setSelectedGroup((current) => current?.id === payload.group.id ? payload.group : current);
-    });
-
-    socket.on('messenger:groupDeleted', (payload: { groupId: string }) => {
+    }
+    function onGroupDeleted(payload: { groupId: string }) {
       setGroups((current) => current.filter((g) => g.id !== payload.groupId));
       setGroupConversations((current) => current.filter((gc) => gc.group.id !== payload.groupId));
       setSelectedGroup((current) => current?.id === payload.groupId ? null : current);
-    });
-
-    socket.on('messenger:groupInvited', (payload: { group: Group }) => {
+    }
+    function onGroupInvited(payload: { group: Group }) {
       setGroups((current) => current.some((g) => g.id === payload.group.id) ? current : [payload.group, ...current]);
-    });
-
-    socket.on('messenger:groupRemoved', (payload: { groupId: string }) => {
+    }
+    function onGroupRemoved(payload: { groupId: string }) {
       setGroups((current) => current.filter((g) => g.id !== payload.groupId));
       setGroupConversations((current) => current.filter((gc) => gc.group.id !== payload.groupId));
       setSelectedGroup((current) => current?.id === payload.groupId ? null : current);
-    });
-
-    socket.on('messenger:groupMessage', (payload: { message: GroupMessage }) => {
+    }
+    function onGroupMessage(payload: { message: GroupMessage }) {
       const msg = payload.message;
       const inChat = selectedGroupRef.current?.id === msg.groupId;
       setGroupConversations((current) => {
@@ -508,27 +500,58 @@ export function MessengerWindow({
         const next = [{ group: known, message: msg, unreadCount }, ...current.filter((gc) => gc.group.id !== msg.groupId)];
         return next.slice(0, 50);
       });
-    });
-
-    socket.on('messenger:groupMessageUpdated', (payload: { message: GroupMessage }) => {
+    }
+    function onGroupMessageUpdated(payload: { message: GroupMessage }) {
       setGroupConversations((current) =>
         current.map((gc) => gc.message.id === payload.message.id ? { ...gc, message: payload.message } : gc)
       );
-    });
-
-    socket.on('messenger:groupMessageDeleted', (payload: { message: GroupMessage }) => {
+    }
+    function onGroupMessageDeleted(payload: { message: GroupMessage }) {
       setGroupConversations((current) =>
         current.map((gc) => gc.message.id === payload.message.id ? { ...gc, message: payload.message } : gc)
       );
-    });
+    }
+
+    socket.on('messenger:message', onMessage);
+    socket.on('messenger:messageUpdated', onMessageUpdated);
+    socket.on('messenger:messageDeleted', onMessageDeleted);
+    socket.on('messenger:messagePinned', onMessagePinned);
+    socket.on('messenger:friendsChanged', onFriendsChanged);
+    socket.on('desktop:userChanged', onUserChanged);
+    socket.on('presence:snapshot', onPresenceSnapshot);
+    socket.on('presence:changed', onPresenceChanged);
+    socket.on('messenger:typing', onTyping);
+    socket.on('messenger:groupCreated', onGroupCreated);
+    socket.on('messenger:groupUpdated', onGroupUpdated);
+    socket.on('messenger:groupDeleted', onGroupDeleted);
+    socket.on('messenger:groupInvited', onGroupInvited);
+    socket.on('messenger:groupRemoved', onGroupRemoved);
+    socket.on('messenger:groupMessage', onGroupMessage);
+    socket.on('messenger:groupMessageUpdated', onGroupMessageUpdated);
+    socket.on('messenger:groupMessageDeleted', onGroupMessageDeleted);
 
     return () => {
-      socketRef.current = null;
       setSocketInstance(null);
-      socket.disconnect();
+      socket.off('messenger:message', onMessage);
+      socket.off('messenger:messageUpdated', onMessageUpdated);
+      socket.off('messenger:messageDeleted', onMessageDeleted);
+      socket.off('messenger:messagePinned', onMessagePinned);
+      socket.off('messenger:friendsChanged', onFriendsChanged);
+      socket.off('desktop:userChanged', onUserChanged);
+      socket.off('presence:snapshot', onPresenceSnapshot);
+      socket.off('presence:changed', onPresenceChanged);
+      socket.off('messenger:typing', onTyping);
+      socket.off('messenger:groupCreated', onGroupCreated);
+      socket.off('messenger:groupUpdated', onGroupUpdated);
+      socket.off('messenger:groupDeleted', onGroupDeleted);
+      socket.off('messenger:groupInvited', onGroupInvited);
+      socket.off('messenger:groupRemoved', onGroupRemoved);
+      socket.off('messenger:groupMessage', onGroupMessage);
+      socket.off('messenger:groupMessageUpdated', onGroupMessageUpdated);
+      socket.off('messenger:groupMessageDeleted', onGroupMessageDeleted);
       if (typingTimerRef.current) window.clearTimeout(typingTimerRef.current);
     };
-  }, [token]);
+  }, [sharedSocket]);
 
   const resolveUserForCall = async (userId: string): Promise<PublicUser | null> => {
     const known = knownUser(userId);
@@ -1212,7 +1235,7 @@ export function MessengerWindow({
             <GroupChatView token={token} language={language} currentUser={currentUser} group={selectedGroup} onlineUserIds={onlineUserIds}
               voiceRoom={voiceRoom}
               onClose={() => { setSelectedGroup(null); setActiveView('directMessages'); setSelectedUser(null); setMessages([]); }}
-              onViewProfile={(user, group) => { setProfileUser(user); setProfileGroup(group); }}
+              onViewProfile={(user, group, preload) => { setProfileUser(user); setProfileGroup(group); setProfilePreload(preload); }}
               onViewDesktop={onViewDesktop}
               onGroupJoin={(group) => setGroups((prev) => prev.find((g) => g.id === group.id) ? prev : [...prev, group])}
               memberGroupIds={new Set(groups.map((g) => g.id))}
@@ -1577,11 +1600,13 @@ export function MessengerWindow({
             user={profileUser}
             currentUser={currentUser}
             group={profileGroup}
+            initialGroupRoles={profilePreload?.groupRoles}
+            initialUserRoles={profilePreload?.userRoles}
             onlineUserIds={onlineUserIds}
             language={language}
             token={token}
             zIndex={zIndex + 100}
-            onClose={() => { setProfileUser(null); setProfileGroup(undefined); }}
+            onClose={() => { setProfileUser(null); setProfileGroup(undefined); setProfilePreload(undefined); }}
             onUserChange={onUserChange}
             onOpenChat={(userId) => {
               const conversation = conversations.find((c) => c.user.id === userId);
@@ -1593,10 +1618,11 @@ export function MessengerWindow({
               if (friend) void chooseUser(friend);
             }}
             onOpenDesktop={onViewDesktop}
-            onOpenProfile={(nextUser) => setProfileUser(nextUser)}
+            onOpenProfile={(nextUser) => { setProfileUser(nextUser); setProfilePreload(undefined); }}
             onOpenGroup={(group) => {
               setProfileUser(null);
               setProfileGroup(undefined);
+              setProfilePreload(undefined);
               const known = groups.find((g) => g.id === group.id) ?? group;
               setGroups((prev) => prev.some((g) => g.id === known.id) ? prev : [...prev, known]);
               setSelectedGroup(known);

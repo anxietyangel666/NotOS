@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from './api/client';
+import { cacheUser } from './api/user-cache';
 import type { AuthenticatedResponse, Language, PublicUser, Theme } from './api/types';
 import type { AuthNotice } from './app-types';
 import { clearToken, getStoredToken, storeToken } from './auth/session';
@@ -7,6 +8,7 @@ import { AuthGate } from './components/AuthGate';
 import { Desktop } from './components/Desktop';
 import { Onboarding } from './components/Onboarding';
 import { PinLockScreen } from './components/PinLockScreen';
+import { SocketProvider } from './components/SocketProvider';
 import { TitleBar } from './components/TitleBar';
 import { WelcomeOverlay } from './components/WelcomeOverlay';
 import { getStoredLanguage, getStoredTheme, storeLanguage, storeTheme, t } from './i18n';
@@ -81,6 +83,7 @@ export function App() {
     storeToken(result.token, remember);
     setToken(result.token);
     setUser(result.user);
+    cacheUser(result.user);
     setLanguage(result.user.language);
     setTheme(result.user.theme);
     setNotice(nextNotice ?? null);
@@ -169,18 +172,20 @@ export function App() {
   return (
     <>
       <TitleBar language={language} />
-      <Desktop
-        token={token}
-        user={user}
-        language={language}
-        notice={notice}
-        onNoticeClose={() => setNotice(null)}
-        onUserChange={handleUserChange}
-        onLogout={handleLogout}
-      />
-      {showWelcome ? (
-        <WelcomeOverlay language={language} user={user} onDone={() => setShowWelcome(false)} />
-      ) : null}
+      <SocketProvider token={token}>
+        <Desktop
+          token={token}
+          user={user}
+          language={language}
+          notice={notice}
+          onNoticeClose={() => setNotice(null)}
+          onUserChange={handleUserChange}
+          onLogout={handleLogout}
+        />
+        {showWelcome ? (
+          <WelcomeOverlay language={language} user={user} onDone={() => setShowWelcome(false)} />
+        ) : null}
+      </SocketProvider>
     </>
   );
 }

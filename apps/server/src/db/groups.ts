@@ -10,6 +10,7 @@ export type GroupRecord = {
   invite_code: string;
   nameplate: NamePlate | null;
   description: string;
+  default_role_id: string | null;
   created_at: Date;
 };
 
@@ -49,6 +50,7 @@ export type GroupFolderRecord = {
   group_id: string;
   name: string;
   position: number;
+  required_role_id: string | null;
   created_at: Date;
 };
 
@@ -75,6 +77,7 @@ export type PublicGroup = {
   inviteCode: string;
   nameplate: NamePlate | null;
   description: string;
+  defaultRoleId: string | null;
   createdAt: string;
 };
 
@@ -82,6 +85,8 @@ export type PublicGroupMember = {
   user: UserRecord;
   role: string;
   roleId: string | null;
+  // Every role the member holds (primary + extra customization roles).
+  roleIds: string[];
   joinedAt: string;
 };
 
@@ -104,6 +109,8 @@ export type PublicGroupChannel = {
   folderId: string | null;
   type: 'text' | 'voice';
   userLimit: number | null;
+  // Role ids that gate visibility. Empty array = visible to everyone.
+  requiredRoleIds: string[];
 };
 
 export type PublicGroupFolder = {
@@ -111,6 +118,8 @@ export type PublicGroupFolder = {
   groupId: string;
   name: string;
   position: number;
+  // Role id that gates visibility (auto-created hidden folders). Null = public.
+  requiredRoleId: string | null;
 };
 
 export type PublicGroupMessage = {
@@ -137,6 +146,7 @@ export function toPublicGroup(group: GroupRecord): PublicGroup {
     inviteCode: group.invite_code,
     nameplate: group.nameplate ?? null,
     description: group.description ?? '',
+    defaultRoleId: group.default_role_id ?? null,
     createdAt: group.created_at.toISOString()
   };
 }
@@ -312,11 +322,42 @@ export async function addGroupMember(groupId: string, userId: string, roleId?: s
 }
 
 async function getDefaultRole(groupId: string) {
+  // Prefer the explicitly configured default role (if it still exists and is
+  // not the owner role); otherwise fall back to the lowest non-owner role.
+  const configured = await pool.query<{ id: string }>(
+    `
+      SELECT gr.id
+      FROM groups g
+      JOIN group_roles gr ON gr.id = g.default_role_id
+      WHERE g.id = $1 AND gr.group_id = $1 AND NOT gr.is_owner
+    `,
+    [groupId]
+  );
+  if (configured.rows[0]?.id) return configured.rows[0].id;
+
   const result = await pool.query<GroupRoleRecord>(
     'SELECT id FROM group_roles WHERE group_id = $1 AND NOT is_owner ORDER BY position ASC LIMIT 1',
     [groupId]
   );
   return result.rows[0]?.id ?? null;
+}
+
+// Configure (or clear with null) the role automatically assigned to members
+// when they join the group. Validates that the role belongs to the group and
+// is not the owner role.
+export async function setGroupDefaultRole(groupId: string, roleId: string | null) {
+  if (roleId) {
+    const role = await pool.query(
+      'SELECT id FROM group_roles WHERE id = $1 AND group_id = $2 AND NOT is_owner',
+      [roleId, groupId]
+    );
+    if (!role.rows[0]) return null;
+  }
+  const result = await pool.query<GroupRecord>(
+    'UPDATE groups SET default_role_id = $2 WHERE id = $1 RETURNING *',
+    [groupId, roleId]
+  );
+  return result.rows[0] ?? null;
 }
 
 export async function removeGroupMember(groupId: string, userId: string, requesterId: string) {
@@ -340,11 +381,29 @@ export async function removeGroupMember(groupId: string, userId: string, request
 }
 
 export async function listGroupMembers(groupId: string) {
-  const result = await pool.query<GroupMemberRecord & UserRecord & { role_color: string; role_position: number }>(
+  const result = await pool.query<GroupMemberRecord & UserRecord & { role_color: string; role_position: number; role_ids: string[]; account_role: string }>(
     `
       SELECT users.*, gm.user_id, gm.role, gm.role_id, gm.joined_at,
+        -- gm.role (the group role) overwrites users.role in the result row, so
+        -- expose the global account role separately for badges (e.g. 'dev').
+        users.role AS account_role,
         COALESCE(gr.color, '#8a8a8a') AS role_color,
-        COALESCE(gr.position, 999) AS role_position
+        COALESCE(gr.position, 999) AS role_position,
+        -- All roles the member holds: the primary role_id plus every extra
+        -- customization role from group_member_roles, de-duplicated.
+        COALESCE(
+          (
+            SELECT array_agg(DISTINCT rid)
+            FROM (
+              SELECT gm.role_id AS rid WHERE gm.role_id IS NOT NULL
+              UNION
+              SELECT gmr.role_id AS rid
+              FROM group_member_roles gmr
+              WHERE gmr.group_id = gm.group_id AND gmr.user_id = gm.user_id
+            ) all_roles
+          ),
+          '{}'
+        ) AS role_ids
       FROM group_members gm
       JOIN users ON users.id = gm.user_id
       LEFT JOIN group_roles gr ON gr.id = gm.role_id
@@ -701,7 +760,7 @@ export function toPublicGroupRole(role: GroupRoleRecord): PublicGroupRole {
   };
 }
 
-export function toPublicGroupChannel(channel: GroupChannelRecord): PublicGroupChannel {
+export function toPublicGroupChannel(channel: GroupChannelRecord, requiredRoleIds: string[] = []): PublicGroupChannel {
   return {
     id: channel.id,
     groupId: channel.group_id,
@@ -709,7 +768,8 @@ export function toPublicGroupChannel(channel: GroupChannelRecord): PublicGroupCh
     position: channel.position,
     folderId: channel.folder_id,
     type: channel.type === 'voice' ? 'voice' : 'text',
-    userLimit: channel.user_limit ?? null
+    userLimit: channel.user_limit ?? null,
+    requiredRoleIds
   };
 }
 
@@ -718,7 +778,8 @@ export function toPublicGroupFolder(folder: GroupFolderRecord): PublicGroupFolde
     id: folder.id,
     groupId: folder.group_id,
     name: folder.name,
-    position: folder.position
+    position: folder.position,
+    requiredRoleId: folder.required_role_id ?? null
   };
 }
 

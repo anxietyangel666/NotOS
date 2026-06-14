@@ -4,16 +4,22 @@ import { api } from '../api/client';
 import type { Group, GroupRole, Language, PublicUser } from '../api/types';
 import { LOCALES, t } from '../i18n';
 import { buildProfileLink } from '../utils/profile-link';
+import { InviteEmbed } from './InviteEmbed';
 import { nameStyleClass, nameStyleToCss } from '../utils/name-style';
 import { Twemoji } from './Twemoji';
 import { UserBadges } from './UserBadges';
 import { EmojiPicker } from './EmojiPicker';
 import { EmojiToggleIcon } from './ChatComposeIcons';
+import { SaveBar } from './SaveBar';
 
 export type ProfileModalProps = {
   user: PublicUser;
   currentUser: PublicUser;
   group?: Group;
+  /** Preloaded group roles (the full role list of the group). */
+  initialGroupRoles?: GroupRole[];
+  /** Preloaded roles held by the viewed member, shown instantly on open. */
+  initialUserRoles?: GroupRole[];
   onlineUserIds?: string[];
   language: Language;
   token: string;
@@ -44,6 +50,8 @@ export function ProfileModal({
   user,
   currentUser,
   group,
+  initialGroupRoles,
+  initialUserRoles,
   onlineUserIds,
   language,
   token,
@@ -71,30 +79,70 @@ export function ProfileModal({
   const [mutualGroups, setMutualGroups] = useState<Group[] | null>(null);
   const [avatarMenu, setAvatarMenu] = useState<{ x: number; y: number } | null>(null);
   const [mutualFriendMenu, setMutualFriendMenu] = useState<{ x: number; y: number; friend: PublicUser } | null>(null);
-  const [groupRoles, setGroupRoles] = useState<GroupRole[]>([]);
-  const [userRoles, setUserRoles] = useState<GroupRole[]>([]);
+  // Seed from preloaded data (passed by the group view) so roles show instantly
+  // instead of waiting ~2s for the network fetch; revalidated in the effect.
+  const [groupRoles, setGroupRoles] = useState<GroupRole[]>(initialGroupRoles ?? []);
+  const [userRoles, setUserRoles] = useState<GroupRole[]>(initialUserRoles ?? []);
   const [friendState, setFriendState] = useState<'none' | 'pending' | 'friends'>('none');
   const [friendBusy, setFriendBusy] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState(false);
+  const [confirmBlock, setConfirmBlock] = useState(false);
+  const [moreMenuOpen, setMoreMenuOpen] = useState(false);
+  const [moreMenuPos, setMoreMenuPos] = useState<{ x: number; y: number } | null>(null);
+  const [inviteMenuOpen, setInviteMenuOpen] = useState(false);
+  const [myGroups, setMyGroups] = useState<Group[] | null>(null);
+  const [inviteSentGroupId, setInviteSentGroupId] = useState<string | null>(null);
+  const moreMenuRef = useRef<HTMLDivElement | null>(null);
+  const moreBtnRef = useRef<HTMLButtonElement | null>(null);
   const [profileEmojiOpen, setProfileEmojiOpen] = useState(false);
   const profileEmojiAnchorRef = useRef<HTMLDivElement | null>(null);
+  // Bumped to shake the save bar when the user tries to close the profile
+  // card while the status editor has unsaved changes.
+  const [profileBarShake, setProfileBarShake] = useState(0);
+
+  const statusDirty = isSelf && editingStatus && statusDraft.trim() !== (user.status ?? '').trim();
+
+  function requestCloseProfile() {
+    if (statusDirty) {
+      setProfileBarShake((n) => n + 1);
+      return;
+    }
+    onClose();
+  }
 
   useEffect(() => {
     if (group) {
-      void api.getGroupRoles(token, group.id).then((payload) => {
-        setGroupRoles(payload.roles);
-        void api.getGroupMembers(token, group.id).then((memPayload) => {
-          const member = memPayload.members.find((m) => m.user.id === user.id);
-          if (member?.roleId) {
-            setUserRoles(payload.roles.filter((r) => r.id === member.roleId));
-          }
-        });
+      // Show preloaded roles immediately (if the opener provided them), then
+      // revalidate from the network in the background.
+      if (initialGroupRoles) setGroupRoles(initialGroupRoles);
+      if (initialUserRoles) setUserRoles(initialUserRoles);
+      // Fetch roles and members in parallel so the profile fills in quickly
+      // instead of waiting for two sequential round-trips.
+      void Promise.all([
+        api.getGroupRoles(token, group.id),
+        api.getGroupMembers(token, group.id)
+      ]).then(([rolePayload, memPayload]) => {
+        setGroupRoles(rolePayload.roles);
+        const member = memPayload.members.find((m) => m.user.id === user.id);
+        if (!member) return;
+        // Show every role the member holds (primary + customization roles),
+        // not just the single primary one. Fall back to roleId for safety.
+        const heldRoleIds = new Set(
+          member.roleIds && member.roleIds.length > 0
+            ? member.roleIds
+            : member.roleId ? [member.roleId] : []
+        );
+        setUserRoles(
+          rolePayload.roles
+            .filter((r) => heldRoleIds.has(r.id))
+            .sort((a, b) => a.position - b.position)
+        );
       });
     } else {
       setGroupRoles([]);
       setUserRoles([]);
     }
-  }, [token, group, user.id]);
+  }, [token, group, user.id, initialGroupRoles, initialUserRoles]);
 
   useEffect(() => {
     setStatusDraft(user.status ?? '');
@@ -188,6 +236,41 @@ export function ProfileModal({
   }, [expanded, token, user.id, isSelf]);
 
   useEffect(() => {
+    if (!moreMenuOpen) return;
+    function closeMore(event: globalThis.MouseEvent) {
+      const target = event.target as Element | null;
+      if (target?.closest?.('.profile-more-menu')) return;
+      if (target?.closest?.('.profile-more-wrap')) return;
+      setMoreMenuOpen(false);
+      setInviteMenuOpen(false);
+    }
+    const rafId = window.requestAnimationFrame(() => {
+      window.addEventListener('mousedown', closeMore);
+    });
+    return () => {
+      window.cancelAnimationFrame(rafId);
+      window.removeEventListener('mousedown', closeMore);
+    };
+  }, [moreMenuOpen]);
+
+  useEffect(() => {
+    if (!inviteMenuOpen || myGroups !== null) return;
+    api.getGroups(token)
+      .then((result) => setMyGroups(result.groups))
+      .catch(() => setMyGroups([]));
+  }, [inviteMenuOpen, token, myGroups]);
+
+  async function sendGroupInvite(group: Group) {
+    try {
+      await api.sendMessage(token, user.id, `notoc://invite/${group.inviteCode}`);
+      setInviteSentGroupId(group.id);
+      setTimeout(() => setInviteSentGroupId(null), 2000);
+    } catch {
+      // ignore
+    }
+  }
+
+  useEffect(() => {
     if (!avatarMenu && !mutualFriendMenu) return;
     function closeMenu(event: globalThis.MouseEvent) {
       const target = event.target as Node | null;
@@ -247,7 +330,7 @@ export function ProfileModal({
       className="modal-backdrop important"
       style={zIndex !== undefined ? { zIndex } : undefined}
       onClick={(event) => {
-        if (event.target === event.currentTarget) onClose();
+        if (event.target === event.currentTarget) requestCloseProfile();
       }}
     >
       <div
@@ -263,22 +346,41 @@ export function ProfileModal({
           style={{ backgroundImage: wallpaperToBackground(user.wallpaper, user.theme) }}
         >
           {!isSelf ? (
-            <div className="profile-friend-btn-wrap">
-              <button
-                className={friendState === 'friends' ? 'profile-friend-btn remove profile-banner-friend-btn' : 'profile-friend-btn add profile-banner-friend-btn'}
-                type="button"
-                disabled={friendBusy}
-                onClick={() => void toggleFriend()}
-              >
-                <Twemoji emoji={friendState === 'friends' ? '❌' : friendState === 'pending' ? '⏳' : '➕'} size={18} />
-              </button>
-              <span className="profile-friend-tooltip" role="tooltip">
-                {friendState === 'friends'
-                  ? t(language, 'removeFriend')
-                  : friendState === 'pending'
-                    ? t(language, 'cancelRequest')
-                    : t(language, 'addFriend')}
-              </span>
+            <div className="profile-banner-actions">
+              <div className="profile-friend-btn-wrap">
+                <button
+                  className={friendState === 'friends' ? 'profile-friend-btn remove profile-banner-friend-btn' : 'profile-friend-btn add profile-banner-friend-btn'}
+                  type="button"
+                  disabled={friendBusy}
+                  onClick={() => void toggleFriend()}
+                >
+                  <Twemoji emoji={friendState === 'friends' ? '❌' : friendState === 'pending' ? '⏳' : '➕'} size={18} />
+                </button>
+                <span className="profile-friend-tooltip" role="tooltip">
+                  {friendState === 'friends'
+                    ? t(language, 'removeFriend')
+                    : friendState === 'pending'
+                      ? t(language, 'cancelRequest')
+                      : t(language, 'addFriend')}
+                </span>
+              </div>
+
+              <div className="profile-more-wrap" ref={moreMenuRef}>
+                <button
+                  ref={moreBtnRef}
+                  className="profile-friend-btn profile-banner-friend-btn profile-more-btn"
+                  type="button"
+                  aria-label="More options"
+                  onClick={() => {
+                    const rect = moreBtnRef.current?.getBoundingClientRect();
+                    if (rect) setMoreMenuPos({ x: rect.left, y: rect.bottom + 8 });
+                    setMoreMenuOpen((v) => !v);
+                    setInviteMenuOpen(false);
+                  }}
+                >
+                  ···
+                </button>
+              </div>
             </div>
           ) : null}
         </div>
@@ -340,24 +442,6 @@ export function ProfileModal({
                         onChange={(event) => setStatusDraft(event.target.value)}
                       />
                       <span className="char-count" style={{ position: 'absolute', top: 6, right: 10, pointerEvents: 'none' }}>{statusDraft.length}/200</span>
-                    </div>
-                    <div className="profile-actions">
-                      <button
-                        className="primary-action"
-                        type="button"
-                        disabled={savingStatus || statusDraft.trim() === (user.status ?? '').trim()}
-                        onClick={() => void saveStatus()}
-                      >
-                        {savingStatus ? t(language, 'saving') : t(language, 'save')}
-                      </button>
-                      <button
-                        className="secondary-action"
-                        type="button"
-                        disabled={savingStatus}
-                        onClick={() => { setEditingStatus(false); setStatusDraft(user.status ?? ''); }}
-                      >
-                        {t(language, 'cancel')}
-                      </button>
                     </div>
                   </div>
                 ) : (
@@ -514,6 +598,17 @@ export function ProfileModal({
             </div>
           ) : null}
         </div>
+
+        {isSelf ? (
+          <SaveBar
+            language={language}
+            dirty={!!statusDirty}
+            shakeKey={profileBarShake}
+            saving={savingStatus}
+            onReset={() => { setEditingStatus(false); setStatusDraft(user.status ?? ''); }}
+            onSave={() => void saveStatus()}
+          />
+        ) : null}
       </div>
 
       {confirmRemove ? createPortal(
@@ -533,6 +628,95 @@ export function ProfileModal({
               </button>
             </div>
           </section>
+        </div>,
+        document.body
+      ) : null}
+
+      {confirmBlock ? createPortal(
+        <div
+          className="modal-backdrop important"
+          style={{ zIndex: (zIndex ?? 1000) + 5 }}
+          onClick={() => setConfirmBlock(false)}
+        >
+          <section className="confirm-dialog" onClick={(event) => event.stopPropagation()}>
+            <p>{t(language, 'confirmBlockUser')}</p>
+            <div className="confirm-actions">
+              <button className="secondary-action" type="button" onClick={() => setConfirmBlock(false)}>
+                {t(language, 'cancel')}
+              </button>
+              <button
+                className="primary-action danger-text"
+                type="button"
+                onClick={() => {
+                  // Block action placeholder — wire to API when endpoint is ready
+                  setConfirmBlock(false);
+                  onClose();
+                }}
+              >
+                {t(language, 'blockUser')}
+              </button>
+            </div>
+          </section>
+        </div>,
+        document.body
+      ) : null}
+
+      {moreMenuOpen && moreMenuPos ? createPortal(
+        <div
+          className="profile-more-menu"
+          style={{ position: 'fixed', left: moreMenuPos.x, top: moreMenuPos.y, zIndex: (zIndex ?? 1000) + 10 }}
+          onMouseDown={(event) => event.stopPropagation()}
+        >
+          <button
+            type="button"
+            onClick={() => {
+              navigator.clipboard.writeText(buildProfileLink(user.id)).catch(() => {});
+              setMoreMenuOpen(false);
+            }}
+          >
+            {t(language, 'copyProfileLink')}
+          </button>
+          <div
+            className="profile-more-menu-item-wrap"
+            onMouseEnter={() => setInviteMenuOpen(true)}
+            onMouseLeave={() => setInviteMenuOpen(false)}
+          >
+            <button type="button" className="profile-more-submenu-trigger">
+              {t(language, 'inviteToServer')} ▶
+            </button>
+            {inviteMenuOpen ? (
+              <div className="profile-more-submenu">
+                {myGroups === null ? (
+                  <div className="profile-more-submenu-loading">{t(language, 'loading')}</div>
+                ) : myGroups.length === 0 ? (
+                  <div className="profile-more-submenu-loading">{t(language, 'noGroups')}</div>
+                ) : (
+                  myGroups.map((group) => (
+                    <button
+                      key={group.id}
+                      type="button"
+                      className={inviteSentGroupId === group.id ? 'profile-more-submenu-sent' : ''}
+                      onClick={() => void sendGroupInvite(group)}
+                    >
+                      <img
+                        src={group.avatarData || `data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" fill="%23444" rx="20"/><text x="50" y="58" text-anchor="middle" fill="%23fff" font-size="28" font-family="sans-serif">${(group.name[0] || '?').toUpperCase()}</text></svg>`}
+                        alt=""
+                      />
+                      <span>{group.name}</span>
+                      {inviteSentGroupId === group.id ? <span className="profile-more-sent-check">✓</span> : null}
+                    </button>
+                  ))
+                )}
+              </div>
+            ) : null}
+          </div>
+          <button
+            type="button"
+            className="profile-more-menu-danger"
+            onClick={() => { setConfirmBlock(true); setMoreMenuOpen(false); }}
+          >
+            {t(language, 'blockUser')}
+          </button>
         </div>,
         document.body
       ) : null}

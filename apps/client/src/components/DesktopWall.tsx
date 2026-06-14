@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
-import { io } from 'socket.io-client';
-import { API_URL, api } from '../api/client';
+import { api } from '../api/client';
+import { cacheUser } from '../api/user-cache';
+import { useSocket } from '../hooks/use-socket';
 import type { DesktopWallMessage, Language, PublicUser } from '../api/types';
 import { LOCALES, t, getSavedTimeFormat } from '../i18n';
 import { EmojiPicker } from './EmojiPicker';
@@ -26,6 +27,7 @@ function formatWallTime(value: string, language: Language) {
 }
 
 export function DesktopWall({ token, language, owner, currentUser, onOpenProfile }: DesktopWallProps) {
+  const sharedSocket = useSocket();
   const wallRef = useRef<HTMLElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const emojiAnchorRef = useRef<HTMLDivElement | null>(null);
@@ -86,27 +88,35 @@ export function DesktopWall({ token, language, owner, currentUser, onOpenProfile
         if (alive) setError(loadError instanceof Error ? loadError.message : t(language, 'unknownError'));
       });
 
-    const socket = io(API_URL, { auth: { token } });
+    const socket = sharedSocket;
+    if (!socket) return () => { alive = false; };
 
-    socket.on('desktopWall:messageCreated', (payload: { ownerId: string; message: DesktopWallMessage }) => {
+    function onMessageCreated(payload: { ownerId: string; message: DesktopWallMessage }) {
       if (payload.ownerId !== owner.id) return;
       upsertMessage(payload.message);
-    });
+    }
 
-    socket.on('desktopWall:messageDeleted', (payload: { ownerId: string; messageId: string }) => {
+    function onMessageDeleted(payload: { ownerId: string; messageId: string }) {
       if (payload.ownerId !== owner.id) return;
       setMessages((current) => current.filter((message) => message.id !== payload.messageId));
-    });
+    }
 
-    socket.on('desktop:userChanged', (payload: { user: PublicUser }) => {
+    function onUserChanged(payload: { user: PublicUser }) {
+      cacheUser(payload.user);
       setMessages((current) => current.map((message) => (message.author.id === payload.user.id ? { ...message, author: payload.user } : message)));
-    });
+    }
+
+    socket.on('desktopWall:messageCreated', onMessageCreated);
+    socket.on('desktopWall:messageDeleted', onMessageDeleted);
+    socket.on('desktop:userChanged', onUserChanged);
 
     return () => {
       alive = false;
-      socket.disconnect();
+      socket.off('desktopWall:messageCreated', onMessageCreated);
+      socket.off('desktopWall:messageDeleted', onMessageDeleted);
+      socket.off('desktop:userChanged', onUserChanged);
     };
-  }, [language, owner.id, token]);
+  }, [language, owner.id, sharedSocket, token]);
 
   async function publishMessage() {
     const body = draft.trim();

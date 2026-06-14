@@ -153,6 +153,7 @@ export type Group = {
   inviteCode: string;
   nameplate: NamePlate | null;
   description: string;
+  defaultRoleId: string | null;
   createdAt: string;
 };
 
@@ -160,6 +161,8 @@ export type GroupMember = {
   user: PublicUser;
   role: string;
   roleId: string | null;
+  // Every role the member holds (primary + extra customization roles).
+  roleIds: string[];
   joinedAt: string;
 };
 
@@ -203,6 +206,29 @@ export type GroupChannel = {
   folderId: string | null;
   type: 'text' | 'voice';
   userLimit: number | null;
+  requiredRoleIds: string[];
+};
+
+export type CustomOption = {
+  id: string;
+  categoryId: string;
+  label: string;
+  emoji: string;
+  color: string;
+  roleId: string | null;
+  folderId: string | null;
+  position: number;
+};
+
+export type CustomCategory = {
+  id: string;
+  groupId: string;
+  name: string;
+  selectionType: 'multi' | 'single';
+  hideChannels: boolean;
+  required: boolean;
+  position: number;
+  options: CustomOption[];
 };
 
 export type VoiceParticipant = {
@@ -229,6 +255,7 @@ export type GroupFolder = {
   groupId: string;
   name: string;
   position: number;
+  requiredRoleId: string | null;
 };
 
 export type PublicAudioTrack = {

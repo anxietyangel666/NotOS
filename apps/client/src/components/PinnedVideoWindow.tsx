@@ -55,6 +55,10 @@ type PinnedVideoCardProps = {
   onClose?: (cardId: string) => void;
   readOnly?: boolean;
   initialPlacement?: PinnedVideoPlacement | null;
+  /** When set, overrides the card's own position (fractional 0..1) — used in remote desktop view. */
+  overridePosition?: { x: number; y: number } | null;
+  /** When set, overrides the card's own size — used in remote desktop view. */
+  overrideSize?: { width: number; height: number } | null;
   onMove?: (cardId: string, placement: PinnedVideoPlacement) => void;
   onMoveEnd?: (cardId: string, placement: PinnedVideoPlacement) => void;
 };
@@ -81,7 +85,7 @@ function dataUrlToObjectUrl(dataUrl: string): string | null {
   }
 }
 
-export function PinnedVideoCard({ cardId, language, videoUrl, videoName, onClose, readOnly = false, initialPlacement = null, onMove, onMoveEnd }: PinnedVideoCardProps) {
+export function PinnedVideoCard({ cardId, language, videoUrl, videoName, onClose, readOnly = false, initialPlacement = null, overridePosition = null, overrideSize = null, onMove, onMoveEnd }: PinnedVideoCardProps) {
   const [minimized, setMinimized] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [muted, setMuted] = useState(false);
@@ -145,6 +149,10 @@ export function PinnedVideoCard({ cardId, language, videoUrl, videoName, onClose
     x: Math.min(Math.max(0, position.x), window.innerWidth - 220),
     y: Math.min(Math.max(0, position.y), window.innerHeight - 240)
   };
+
+  const effectiveSize = overrideSize ?? size;
+  const left = overridePosition ? `${Math.min(96, Math.max(0, overridePosition.x * 100))}%` : clampedPosition.x;
+  const top = overridePosition ? `${Math.min(92, Math.max(0, overridePosition.y * 100))}%` : clampedPosition.y;
 
   function toPlacement(pos: { x: number; y: number }, dims: { width: number; height: number }): PinnedVideoPlacement {
     return {
@@ -227,7 +235,7 @@ export function PinnedVideoCard({ cardId, language, videoUrl, videoName, onClose
   }
 
   return (
-    <div className={readOnly ? 'pinned-image-card pinned-image-card--remote' : 'pinned-image-card'} style={{ left: clampedPosition.x, top: clampedPosition.y, width: size.width }} onContextMenu={(event) => event.stopPropagation()}>
+    <div className={readOnly ? 'pinned-image-card pinned-image-card--remote' : 'pinned-image-card'} style={{ left, top, width: effectiveSize.width }} onContextMenu={(event) => event.stopPropagation()}>
       <div className="pinned-image-bar" onMouseDown={readOnly ? undefined : startDrag} style={readOnly ? { cursor: 'default' } : undefined}>
         <div
           className="pinned-video-volume-wrap"
@@ -265,7 +273,7 @@ export function PinnedVideoCard({ cardId, language, videoUrl, videoName, onClose
         {onClose ? <button className="pinned-image-card-close" type="button" aria-label={t(language, 'close')} onClick={() => onClose(cardId)}>x</button> : null}
       </div>
       {!minimized ? (
-        <div className="pinned-image-card-img pinned-video-card-body" style={{ height: size.height }}>
+        <div className="pinned-image-card-img pinned-video-card-body" style={{ height: effectiveSize.height }}>
           {objectUrl ? (
             <video ref={videoRef} src={objectUrl} title={videoName} playsInline preload="metadata" onClick={togglePlay} onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} onTimeUpdate={(event) => setTime(event.currentTarget.currentTime)} onLoadedMetadata={(event) => setDuration(event.currentTarget.duration || 0)} onEnded={() => setPlaying(false)} />
           ) : null}

@@ -5,6 +5,7 @@ import type {
   AiSettings,
   AiChatSummary,
   ConversationPreview,
+  CustomCategory,
   DesktopIconPositions,
   DesktopIconSize,
   DesktopSort,
@@ -345,6 +346,92 @@ export const api = {
     return request<{ role: GroupRole }>(`/api/messenger/groups/${encodeURIComponent(groupId)}/roles/${encodeURIComponent(roleId)}`, {
       method: 'PATCH', token, body: data
     });
+  },
+  setGroupDefaultRole(token: string, groupId: string, roleId: string | null) {
+    return request<{ group: Group }>(`/api/messenger/groups/${encodeURIComponent(groupId)}/default-role`, {
+      method: 'PATCH', token, body: { roleId }
+    });
+  },
+
+  // ── Server profile customization ──
+  getGroupCustomization(token: string, groupId: string) {
+    return request<{ categories: CustomCategory[]; selectedOptionIds: string[]; onboardingRequired: boolean }>(
+      `/api/messenger/groups/${encodeURIComponent(groupId)}/customization`,
+      { token }
+    );
+  },
+  createCustomCategory(
+    token: string,
+    groupId: string,
+    data: { name: string; selectionType?: 'multi' | 'single'; hideChannels?: boolean; required?: boolean }
+  ) {
+    return request<{ categories: CustomCategory[] }>(
+      `/api/messenger/groups/${encodeURIComponent(groupId)}/customization/categories`,
+      { method: 'POST', token, body: data }
+    );
+  },
+  updateCustomCategory(
+    token: string,
+    groupId: string,
+    categoryId: string,
+    data: { name?: string; selectionType?: 'multi' | 'single'; hideChannels?: boolean; required?: boolean; position?: number }
+  ) {
+    return request<{ categories: CustomCategory[] }>(
+      `/api/messenger/groups/${encodeURIComponent(groupId)}/customization/categories/${encodeURIComponent(categoryId)}`,
+      { method: 'PATCH', token, body: data }
+    );
+  },
+  deleteCustomCategory(token: string, groupId: string, categoryId: string) {
+    return request<{ categories: CustomCategory[] }>(
+      `/api/messenger/groups/${encodeURIComponent(groupId)}/customization/categories/${encodeURIComponent(categoryId)}`,
+      { method: 'DELETE', token }
+    );
+  },
+  createCustomOption(
+    token: string,
+    groupId: string,
+    categoryId: string,
+    data: { label: string; emoji?: string; color?: string }
+  ) {
+    return request<{ categories: CustomCategory[] }>(
+      `/api/messenger/groups/${encodeURIComponent(groupId)}/customization/categories/${encodeURIComponent(categoryId)}/options`,
+      { method: 'POST', token, body: data }
+    );
+  },
+  updateCustomOption(
+    token: string,
+    groupId: string,
+    optionId: string,
+    data: { label?: string; emoji?: string; color?: string }
+  ) {
+    return request<{ categories: CustomCategory[] }>(
+      `/api/messenger/groups/${encodeURIComponent(groupId)}/customization/options/${encodeURIComponent(optionId)}`,
+      { method: 'PATCH', token, body: data }
+    );
+  },
+  deleteCustomOption(token: string, groupId: string, optionId: string) {
+    return request<{ categories: CustomCategory[] }>(
+      `/api/messenger/groups/${encodeURIComponent(groupId)}/customization/options/${encodeURIComponent(optionId)}`,
+      { method: 'DELETE', token }
+    );
+  },
+  toggleCustomOption(token: string, groupId: string, optionId: string) {
+    return request<{ selectedOptionIds: string[]; channels: GroupChannel[]; folders: GroupFolder[] }>(
+      `/api/messenger/groups/${encodeURIComponent(groupId)}/customization/options/${encodeURIComponent(optionId)}/toggle`,
+      { method: 'POST', token }
+    );
+  },
+  completeCustomization(token: string, groupId: string) {
+    return request<{ success: boolean }>(
+      `/api/messenger/groups/${encodeURIComponent(groupId)}/customization/complete`,
+      { method: 'POST', token }
+    );
+  },
+  setChannelRoles(token: string, groupId: string, channelId: string, roleIds: string[]) {
+    return request<{ success: boolean }>(
+      `/api/messenger/groups/${encodeURIComponent(groupId)}/channels/${encodeURIComponent(channelId)}/roles`,
+      { method: 'PUT', token, body: { roleIds } }
+    );
   },
   editGroupMessage(token: string, messageId: string, body: string) {
     return request<{ message: GroupMessage }>(`/api/messenger/groups/messages/${encodeURIComponent(messageId)}`, {

@@ -28,6 +28,7 @@ import {
   createGroupRole,
   deleteGroupRole,
   updateGroupRole,
+  setGroupDefaultRole,
   listGroupChannels,
   createGroupChannel,
   deleteGroupChannel,
@@ -38,6 +39,23 @@ import {
   updateGroupFolder,
   deleteGroupFolder
 } from '../../db/groups.js';
+import {
+  listCustomCategories,
+  createCustomCategory,
+  updateCustomCategory,
+  deleteCustomCategory,
+  createCustomOption,
+  updateCustomOption,
+  deleteCustomOption,
+  toggleCustomOption,
+  getSelectedOptionIds,
+  getMemberRoleIds,
+  getChannelRoleGates,
+  getFolderRoleGates,
+  setChannelRoleGates,
+  needsOnboarding,
+  markOnboardingComplete
+} from '../../db/customization.js';
 import { findUserById, toPublicUser } from '../../db/users.js';
 import { asyncHandler } from '../../http/async-handler.js';
 import { HttpError } from '../../http/errors.js';
@@ -69,14 +87,79 @@ const updateGroupSchema = z.object({
     .optional()
 });
 
+// Owner-tier permission set, granted to the group creator and the Owner role.
+const OWNER_PERMISSIONS = ['ManageRoles', 'DeleteAnyMessage', 'ManageChannels', 'ManageInvites', 'KickMembers'];
+
 async function getMemberPermissions(groupId: string, userId: string) {
   const member = (await listGroupMembers(groupId)).find((m) => m.user_id === userId);
   if (!member) return null;
-  if (member.role === 'Owner') return { isOwner: true, permissions: ['ManageRoles', 'DeleteAnyMessage', 'ManageChannels', 'ManageInvites', 'KickMembers'] };
+  // The group creator is always an owner/admin, even if they hold no role or a
+  // non-admin custom role.
+  const group = await getGroupById(groupId);
+  if (group?.owner_id === userId) return { isOwner: true, permissions: OWNER_PERMISSIONS };
+  if (member.role === 'Owner') return { isOwner: true, permissions: OWNER_PERMISSIONS };
   if (!member.role_id) return { isOwner: false, permissions: [] };
   const roleRow = (await pool.query('SELECT gr.is_owner, gr.permissions FROM group_roles gr WHERE gr.id = $1', [member.role_id])).rows[0];
   if (!roleRow) return { isOwner: false, permissions: [] };
   return { isOwner: roleRow.is_owner, permissions: roleRow.permissions ?? [] };
+}
+
+// Shared mapper so every endpoint returns members with the same shape,
+// including the full role list (primary + customization roles).
+function mapMember(m: Awaited<ReturnType<typeof listGroupMembers>>[number]) {
+  // The query's `m.role` is the group role; pass the global account role to
+  // toPublicUser so account-level badges (e.g. the 'dev' badge) still render.
+  return {
+    user: toPublicUser({ ...m, role: m.account_role ?? m.role }),
+    role: m.role,
+    roleId: m.role_id,
+    roleIds: m.role_ids ?? [],
+    joinedAt: m.joined_at.toISOString()
+  };
+}
+
+// Returns channels visible to a member: public channels plus role-gated ones
+// the member can access. Staff (owner / ManageChannels) always see everything
+// so they can manage hidden channels.
+async function visibleChannels(groupId: string, userId: string) {
+  const [channels, gates, perms] = await Promise.all([
+    listGroupChannels(groupId),
+    getChannelRoleGates(groupId),
+    getMemberPermissions(groupId, userId)
+  ]);
+  const isStaff = Boolean(perms?.isOwner || perms?.permissions?.includes('ManageChannels'));
+  const memberRoles = isStaff ? null : await getMemberRoleIds(groupId, userId);
+
+  return channels
+    .filter((channel) => {
+      const required = gates.get(channel.id);
+      if (!required || required.size === 0) return true;
+      if (isStaff) return true;
+      for (const roleId of required) if (memberRoles!.has(roleId)) return true;
+      return false;
+    })
+    .map((channel) => toPublicGroupChannel(channel, Array.from(gates.get(channel.id) ?? [])));
+}
+
+// Returns folders visible to a member, honouring required_role_id on hidden
+// (auto-created) folders. Staff always see everything.
+async function visibleFolders(groupId: string, userId: string) {
+  const [folders, gates, perms] = await Promise.all([
+    listGroupFolders(groupId),
+    getFolderRoleGates(groupId),
+    getMemberPermissions(groupId, userId)
+  ]);
+  const isStaff = Boolean(perms?.isOwner || perms?.permissions?.includes('ManageChannels'));
+  const memberRoles = isStaff ? null : await getMemberRoleIds(groupId, userId);
+
+  return folders
+    .filter((folder) => {
+      const required = gates.get(folder.id);
+      if (!required) return true;
+      if (isStaff) return true;
+      return memberRoles!.has(required);
+    })
+    .map(toPublicGroupFolder);
 }
 
 const groupMessageSchema = z.object({
@@ -194,14 +277,7 @@ export function createGroupRouter(io: Server) {
       if (!(await isGroupMember(groupId, req.auth.userId))) throw new HttpError(403, 'Not a member', 'NOT_GROUP_MEMBER');
 
       const members = await listGroupMembers(groupId);
-      res.json({
-        members: members.map((m) => ({
-          user: toPublicUser(m),
-          role: m.role,
-          roleId: m.role_id,
-          joinedAt: m.joined_at.toISOString()
-        }))
-      });
+      res.json({ members: members.map(mapMember) });
     })
   );
 
@@ -226,14 +302,7 @@ export function createGroupRouter(io: Server) {
       io.to(input.userId).emit('messenger:groupInvited', { group: toPublicGroup(group) });
 
       const members = await listGroupMembers(groupId);
-      res.json({
-        members: members.map((m) => ({
-          user: toPublicUser(m),
-          role: m.role,
-          roleId: m.role_id,
-          joinedAt: m.joined_at.toISOString()
-        }))
-      });
+      res.json({ members: members.map(mapMember) });
     })
   );
 
@@ -290,12 +359,7 @@ export function createGroupRouter(io: Server) {
       }
 
       const members = await listGroupMembers(groupId);
-      const membersList = members.map((m) => ({
-        user: toPublicUser(m),
-        role: m.role,
-        roleId: m.role_id,
-        joinedAt: m.joined_at.toISOString()
-      }));
+      const membersList = members.map(mapMember);
 
       await Promise.all(members.map((m) => io.to(m.user_id).emit('messenger:groupMemberRoleChanged', {
         groupId,
@@ -365,8 +429,8 @@ export function createGroupRouter(io: Server) {
     asyncHandler<AuthenticatedRequest>(async (req, res) => {
       const groupId = z.string().uuid().parse(req.params.groupId);
       if (!(await isGroupMember(groupId, req.auth.userId))) throw new HttpError(403, 'Not a member', 'NOT_GROUP_MEMBER');
-      const channels = await listGroupChannels(groupId);
-      res.json({ channels: channels.map(toPublicGroupChannel) });
+      const channels = await visibleChannels(groupId, req.auth.userId);
+      res.json({ channels });
     })
   );
 
@@ -446,7 +510,7 @@ export function createGroupRouter(io: Server) {
       const perms = await getMemberPermissions(groupId, req.auth.userId);
       const canManageChannels = perms?.isOwner || perms?.permissions?.includes('ManageChannels');
       if (!canManageChannels) throw new HttpError(403, 'Not allowed to manage channels', 'CHANNEL_REORDER_FORBIDDEN');
-      const channels = (await reorderGroupChannels(groupId, input.items)).map(toPublicGroupChannel);
+      const channels = (await reorderGroupChannels(groupId, input.items)).map((c) => toPublicGroupChannel(c));
       const members = await listGroupMembers(groupId);
       await Promise.all(members.map((m) => io.to(m.user_id).emit('messenger:groupChannelsReordered', { groupId, channels })));
       res.json({ channels });
@@ -461,8 +525,8 @@ export function createGroupRouter(io: Server) {
     asyncHandler<AuthenticatedRequest>(async (req, res) => {
       const groupId = z.string().uuid().parse(req.params.groupId);
       if (!(await isGroupMember(groupId, req.auth.userId))) throw new HttpError(403, 'Not a member', 'NOT_GROUP_MEMBER');
-      const folders = await listGroupFolders(groupId);
-      res.json({ folders: folders.map(toPublicGroupFolder) });
+      const folders = await visibleFolders(groupId, req.auth.userId);
+      res.json({ folders });
     })
   );
 
@@ -519,7 +583,7 @@ export function createGroupRouter(io: Server) {
       const deleted = await deleteGroupFolder(folderId, groupId);
       if (!deleted) throw new HttpError(404, 'Folder not found', 'FOLDER_NOT_FOUND');
       // channels detached from this folder need a refresh on clients
-      const channels = (await listGroupChannels(groupId)).map(toPublicGroupChannel);
+      const channels = (await listGroupChannels(groupId)).map((c) => toPublicGroupChannel(c));
       const members = await listGroupMembers(groupId);
       await Promise.all(members.map((m) => io.to(m.user_id).emit('messenger:groupFolderDeleted', { folderId, groupId, channels })));
       res.json({ success: true });
@@ -536,6 +600,31 @@ export function createGroupRouter(io: Server) {
       if (!(await isGroupMember(groupId, req.auth.userId))) throw new HttpError(403, 'Not a member', 'NOT_GROUP_MEMBER');
       const roles = await listGroupRoles(groupId);
       res.json({ roles: roles.map(toPublicGroupRole) });
+    })
+  );
+
+  // Configure the role automatically granted when a member joins the server.
+  router.patch(
+    '/groups/:groupId/default-role',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      const input = z.object({ roleId: z.string().uuid().nullable() }).parse(req.body);
+
+      const requester = (await listGroupMembers(groupId)).find((m) => m.user_id === req.auth.userId);
+      if (!requester) throw new HttpError(403, 'Not a member', 'NOT_GROUP_MEMBER');
+
+      const perms = await getMemberPermissions(groupId, req.auth.userId);
+      const canManageRoles = perms?.isOwner || perms?.permissions?.includes('ManageRoles');
+      if (!canManageRoles) throw new HttpError(403, 'Not allowed to manage roles', 'ROLE_FORBIDDEN');
+
+      const updated = await setGroupDefaultRole(groupId, input.roleId);
+      if (!updated) throw new HttpError(400, 'Invalid role', 'ROLE_INVALID');
+
+      const group = toPublicGroup(updated);
+      const members = await listGroupMembers(groupId);
+      await Promise.all(members.map((m) => io.to(m.user_id).emit('messenger:groupUpdated', { group })));
+      res.json({ group });
     })
   );
 
@@ -606,6 +695,230 @@ export function createGroupRouter(io: Server) {
       res.json({ success: true });
     })
   );
+
+  // ── Server profile customization ──
+
+  // Helper: only owners or members with ManageRoles may edit the constructor.
+  async function requireCustomizationAdmin(groupId: string, userId: string) {
+    const perms = await getMemberPermissions(groupId, userId);
+    if (!perms?.isOwner && !perms?.permissions?.includes('ManageRoles')) {
+      throw new HttpError(403, 'Not allowed to manage customization', 'CUSTOMIZATION_FORBIDDEN');
+    }
+  }
+
+  // Member-facing: list categories + which options the caller has selected, and
+  // whether they still need to complete a required onboarding flow.
+  router.get(
+    '/groups/:groupId/customization',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      if (!(await isGroupMember(groupId, req.auth.userId))) throw new HttpError(403, 'Not a member', 'NOT_GROUP_MEMBER');
+      const [categories, selectedOptionIds, onboardingRequired] = await Promise.all([
+        listCustomCategories(groupId),
+        getSelectedOptionIds(groupId, req.auth.userId),
+        needsOnboarding(groupId, req.auth.userId)
+      ]);
+      res.json({ categories, selectedOptionIds, onboardingRequired });
+    })
+  );
+
+  router.post(
+    '/groups/:groupId/customization/categories',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      await requireCustomizationAdmin(groupId, req.auth.userId);
+      const input = z.object({
+        name: z.string().trim().min(1).max(60),
+        selectionType: z.enum(['multi', 'single']).optional(),
+        hideChannels: z.boolean().optional(),
+        required: z.boolean().optional()
+      }).parse(req.body);
+
+      await createCustomCategory(groupId, {
+        name: input.name,
+        selectionType: input.selectionType ?? 'multi',
+        hideChannels: input.hideChannels ?? false,
+        required: input.required ?? false
+      });
+
+      await broadcastCustomization(groupId);
+      res.json({ categories: await listCustomCategories(groupId) });
+    })
+  );
+
+  router.patch(
+    '/groups/:groupId/customization/categories/:categoryId',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      const categoryId = z.string().uuid().parse(req.params.categoryId);
+      await requireCustomizationAdmin(groupId, req.auth.userId);
+      const input = z.object({
+        name: z.string().trim().min(1).max(60).optional(),
+        selectionType: z.enum(['multi', 'single']).optional(),
+        hideChannels: z.boolean().optional(),
+        required: z.boolean().optional(),
+        position: z.number().int().optional()
+      }).parse(req.body);
+
+      const updated = await updateCustomCategory(categoryId, groupId, input);
+      if (!updated) throw new HttpError(404, 'Category not found', 'CATEGORY_NOT_FOUND');
+
+      await broadcastCustomization(groupId);
+      res.json({ categories: await listCustomCategories(groupId) });
+    })
+  );
+
+  router.delete(
+    '/groups/:groupId/customization/categories/:categoryId',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      const categoryId = z.string().uuid().parse(req.params.categoryId);
+      await requireCustomizationAdmin(groupId, req.auth.userId);
+
+      const deleted = await deleteCustomCategory(categoryId, groupId);
+      if (!deleted) throw new HttpError(404, 'Category not found', 'CATEGORY_NOT_FOUND');
+
+      await broadcastCustomization(groupId);
+      // Deleting a category removes generated roles -> tell clients to refresh.
+      const members = await listGroupMembers(groupId);
+      await Promise.all(members.map((m) => io.to(m.user_id).emit('messenger:groupRolesChanged', { groupId })));
+      res.json({ categories: await listCustomCategories(groupId) });
+    })
+  );
+
+  router.post(
+    '/groups/:groupId/customization/categories/:categoryId/options',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      const categoryId = z.string().uuid().parse(req.params.categoryId);
+      await requireCustomizationAdmin(groupId, req.auth.userId);
+      const input = z.object({
+        label: z.string().trim().min(1).max(60),
+        emoji: z.string().trim().max(16).optional(),
+        color: z.string().regex(/^#[0-9A-Fa-f]{6}$/).optional()
+      }).parse(req.body);
+
+      const option = await createCustomOption(categoryId, groupId, input);
+      if (!option) throw new HttpError(404, 'Category not found', 'CATEGORY_NOT_FOUND');
+
+      await broadcastCustomization(groupId);
+      const members = await listGroupMembers(groupId);
+      await Promise.all(members.map((m) => io.to(m.user_id).emit('messenger:groupRolesChanged', { groupId })));
+      res.json({ categories: await listCustomCategories(groupId) });
+    })
+  );
+
+  router.patch(
+    '/groups/:groupId/customization/options/:optionId',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      const optionId = z.string().uuid().parse(req.params.optionId);
+      await requireCustomizationAdmin(groupId, req.auth.userId);
+      const input = z.object({
+        label: z.string().trim().min(1).max(60).optional(),
+        emoji: z.string().trim().max(16).optional(),
+        color: z.string().regex(/^#[0-9A-Fa-f]{6}$/).optional()
+      }).parse(req.body);
+
+      const updated = await updateCustomOption(optionId, groupId, input);
+      if (!updated) throw new HttpError(404, 'Option not found', 'OPTION_NOT_FOUND');
+
+      await broadcastCustomization(groupId);
+      const members = await listGroupMembers(groupId);
+      await Promise.all(members.map((m) => io.to(m.user_id).emit('messenger:groupRolesChanged', { groupId })));
+      res.json({ categories: await listCustomCategories(groupId) });
+    })
+  );
+
+  router.delete(
+    '/groups/:groupId/customization/options/:optionId',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      const optionId = z.string().uuid().parse(req.params.optionId);
+      await requireCustomizationAdmin(groupId, req.auth.userId);
+
+      const deleted = await deleteCustomOption(optionId, groupId);
+      if (!deleted) throw new HttpError(404, 'Option not found', 'OPTION_NOT_FOUND');
+
+      await broadcastCustomization(groupId);
+      const members = await listGroupMembers(groupId);
+      await Promise.all(members.map((m) => io.to(m.user_id).emit('messenger:groupRolesChanged', { groupId })));
+      res.json({ categories: await listCustomCategories(groupId) });
+    })
+  );
+
+  // Set which roles gate visibility of a channel (used to wire channels into
+  // hidden customization folders, or any role-based private channel).
+  router.put(
+    '/groups/:groupId/channels/:channelId/roles',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      const channelId = z.string().uuid().parse(req.params.channelId);
+      await requireCustomizationAdmin(groupId, req.auth.userId);
+      const input = z.object({ roleIds: z.array(z.string().uuid()) }).parse(req.body);
+
+      await setChannelRoleGates(channelId, input.roleIds);
+      const members = await listGroupMembers(groupId);
+      await Promise.all(members.map((m) => io.to(m.user_id).emit('messenger:groupChannelsReordered', { groupId, channels: [] })));
+      res.json({ success: true });
+    })
+  );
+
+  // Member-facing: toggle an option's role on/off (radio logic for 'single').
+  router.post(
+    '/groups/:groupId/customization/options/:optionId/toggle',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      const optionId = z.string().uuid().parse(req.params.optionId);
+      if (!(await isGroupMember(groupId, req.auth.userId))) throw new HttpError(403, 'Not a member', 'NOT_GROUP_MEMBER');
+
+      const selectedOptionIds = await toggleCustomOption(groupId, req.auth.userId, optionId);
+      if (selectedOptionIds === null) throw new HttpError(404, 'Option not found', 'OPTION_NOT_FOUND');
+
+      // The caller's channel/folder visibility may have changed.
+      const [channels, folders] = await Promise.all([
+        visibleChannels(groupId, req.auth.userId),
+        visibleFolders(groupId, req.auth.userId)
+      ]);
+      io.to(req.auth.userId).emit('messenger:groupCustomizationApplied', { groupId, channels, folders });
+
+      // Toggling also updates the member's displayed role, so tell everyone in
+      // the group to refresh the member list (name colour / role grouping).
+      const groupMembers = await listGroupMembers(groupId);
+      await Promise.all(
+        groupMembers.map((m) => io.to(m.user_id).emit('messenger:groupRolesChanged', { groupId }))
+      );
+
+      res.json({ selectedOptionIds, channels, folders });
+    })
+  );
+
+  // Member-facing: finish the required onboarding flow.
+  router.post(
+    '/groups/:groupId/customization/complete',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      if (!(await isGroupMember(groupId, req.auth.userId))) throw new HttpError(403, 'Not a member', 'NOT_GROUP_MEMBER');
+      await markOnboardingComplete(groupId, req.auth.userId);
+      res.json({ success: true });
+    })
+  );
+
+  async function broadcastCustomization(groupId: string) {
+    const categories = await listCustomCategories(groupId);
+    const members = await listGroupMembers(groupId);
+    await Promise.all(members.map((m) => io.to(m.user_id).emit('messenger:groupCustomizationChanged', { groupId, categories })));
+  }
 
   // ── Messages ──
 

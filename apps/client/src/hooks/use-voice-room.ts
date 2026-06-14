@@ -279,6 +279,17 @@ export function useVoiceRoom({ socket, currentUser }: UseVoiceRoomArgs) {
     peersRef.current.forEach((_entry, peerId) => destroyPeer(peerId));
     peersRef.current.clear();
     cleanupLocal();
+    // Optimistically drop ourselves from the left channel's cached list so the
+    // x/N badge updates instantly instead of waiting for the server snapshot.
+    if (channelId) {
+      const cached = channelParticipantsRef.current.get(channelId);
+      if (cached) {
+        const next = cached.filter((p) => p.userId !== currentUser.id);
+        if (next.length > 0) channelParticipantsRef.current.set(channelId, next);
+        else channelParticipantsRef.current.delete(channelId);
+        setChannelParticipants(new Map(channelParticipantsRef.current));
+      }
+    }
     // Clear the live ref immediately so any in-flight signaling/state events for
     // the old channel are ignored before the next render syncs the ref.
     channelRef.current = null;
@@ -292,7 +303,7 @@ export function useVoiceRoom({ socket, currentUser }: UseVoiceRoomArgs) {
     setLocalScreenStream(null);
     setTalkingIds(new Set());
     setError('');
-  }, []);
+  }, [currentUser]);
 
   const join = useCallback(async (channelId: string) => {
     if (!socketRef.current) return;
@@ -306,6 +317,23 @@ export function useVoiceRoom({ socket, currentUser }: UseVoiceRoomArgs) {
       await buildLocalAudio();
       channelRef.current = channelId;
       setActiveChannelId(channelId);
+      // Optimistically add ourselves to the participant list so we appear in
+      // the channel immediately, without waiting for the server's
+      // `voice:participants` round-trip. The server snapshot replaces this list
+      // once it arrives (and will include the authoritative self entry).
+      const selfParticipant: VoiceParticipant = {
+        userId: currentUser.id,
+        user: currentUser,
+        muted: mutedRef.current,
+        screen: false,
+        talking: false,
+        joinedAt: Date.now()
+      };
+      const existing = channelParticipantsRef.current.get(channelId) ?? [];
+      const merged = existing.some((p) => p.userId === currentUser.id)
+        ? existing
+        : [...existing, selfParticipant];
+      setParticipantsForChannel(channelId, merged);
       socketRef.current.emit('voice:join', { channelId });
     } catch {
       setError('micFailed');
@@ -315,7 +343,7 @@ export function useVoiceRoom({ socket, currentUser }: UseVoiceRoomArgs) {
     } finally {
       setJoining(false);
     }
-  }, [buildLocalAudio, leave]);
+  }, [buildLocalAudio, leave, currentUser]);
 
   const toggleMute = useCallback(() => {
     setMuted((prev) => {

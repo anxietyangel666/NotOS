@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent } from 'react';
-import { io } from 'socket.io-client';
-import { API_URL, api } from '../api/client';
+import { api } from '../api/client';
+import { cacheUser } from '../api/user-cache';
+import { useSocket } from '../hooks/use-socket';
 import type { Language, PublicAudioTrack, PublicUser, Theme } from '../api/types';
 import { LOCALES, t } from '../i18n';
 import { useClock } from '../hooks/use-clock';
@@ -140,7 +141,9 @@ export function RemoteDesktopWindow({ token, language, owner: initialOwner, curr
   const [remoteCardPlacements, setRemoteCardPlacements] = useState<Record<string, { x: number; y: number; width: number; height: number }>>({});
   const [remoteCursors, setRemoteCursors] = useState<Record<string, { nickname: string; x: number; y: number }>>({});
   const canvasRef = useRef<HTMLDivElement | null>(null);
-  const remoteSocketRef = useRef<ReturnType<typeof io> | null>(null);
+  const sharedSocket = useSocket();
+  const remoteSocketRef = useRef(sharedSocket);
+  remoteSocketRef.current = sharedSocket;
   const cursorEmitRef = useRef(0);
   const stageRef = useRef<HTMLDivElement | null>(null);
   const [ownerScreen, setOwnerScreen] = useState<{ width: number; height: number } | null>(null);
@@ -160,33 +163,31 @@ export function RemoteDesktopWindow({ token, language, owner: initialOwner, curr
     }
 
     void loadTracks();
-    const socket = io(API_URL, { auth: { token } });
-    remoteSocketRef.current = socket;
 
-    socket.on('system:ready', () => {
-      socket.emit('desktop:watch', { ownerId: initialOwner.id });
-    });
+    // Use the shared socket — no longer creates its own io() connection.
+    const socket = sharedSocket;
+    if (!socket) return () => { alive = false; };
 
-    socket.on('desktop:screen', (payload: { ownerId: string; width: number; height: number }) => {
+    function onReady() {
+      socket!.emit('desktop:watch', { ownerId: initialOwner.id });
+    }
+    function onScreen(payload: { ownerId: string; width: number; height: number }) {
       if (payload.ownerId !== initialOwner.id) return;
       setOwnerScreen({ width: payload.width, height: payload.height });
-    });
-
-    socket.on('desktop:pinnedCards', (payload: { ownerId: string; cards: { id: string; x: number; y: number; width: number; height: number }[] }) => {
+    }
+    function onPinnedCards(payload: { ownerId: string; cards: { id: string; x: number; y: number; width: number; height: number }[] }) {
       if (payload.ownerId !== initialOwner.id || !Array.isArray(payload.cards)) return;
       const placements: Record<string, { x: number; y: number; width: number; height: number }> = {};
       for (const card of payload.cards) {
         placements[card.id] = { x: card.x, y: card.y, width: card.width, height: card.height };
       }
       setRemoteCardPlacements(placements);
-    });
-
-    socket.on('desktop:cursor', (payload: { ownerId: string; userId: string; nickname: string; x: number; y: number }) => {
+    }
+    function onCursor(payload: { ownerId: string; userId: string; nickname: string; x: number; y: number }) {
       if (payload.ownerId !== initialOwner.id || payload.userId === currentUser.id) return;
       setRemoteCursors((current) => ({ ...current, [payload.userId]: { nickname: payload.nickname, x: payload.x, y: payload.y } }));
-    });
-
-    socket.on('desktop:cursorLeave', (payload: { ownerId: string; userId: string }) => {
+    }
+    function onCursorLeave(payload: { ownerId: string; userId: string }) {
       if (payload.ownerId !== initialOwner.id) return;
       setRemoteCursors((current) => {
         if (!(payload.userId in current)) return current;
@@ -194,26 +195,40 @@ export function RemoteDesktopWindow({ token, language, owner: initialOwner, curr
         delete next[payload.userId];
         return next;
       });
-    });
-
-    socket.on('storage:publicChanged', (payload: { userId: string }) => {
+    }
+    function onStoragePublicChanged(payload: { userId: string }) {
       if (payload.userId === initialOwner.id) void loadTracks();
-    });
-
-    socket.on('desktop:userChanged', (payload: { user: PublicUser }) => {
+    }
+    function onUserChanged(payload: { user: PublicUser }) {
       if (payload.user.id === initialOwner.id) {
-        // Sync the owner's pinned cards so add/remove is reflected live.
+        cacheUser(payload.user);
         setOwner((current) => ({ ...current, pinnedCards: Array.isArray(payload.user.pinnedCards) ? payload.user.pinnedCards : [] }));
       }
-    });
+    }
+
+    // Start watching immediately (in case 'system:ready' already fired).
+    socket.emit('desktop:watch', { ownerId: initialOwner.id });
+
+    socket.on('system:ready', onReady);
+    socket.on('desktop:screen', onScreen);
+    socket.on('desktop:pinnedCards', onPinnedCards);
+    socket.on('desktop:cursor', onCursor);
+    socket.on('desktop:cursorLeave', onCursorLeave);
+    socket.on('storage:publicChanged', onStoragePublicChanged);
+    socket.on('desktop:userChanged', onUserChanged);
 
     return () => {
       alive = false;
       socket.emit('desktop:unwatch', { ownerId: initialOwner.id });
-      remoteSocketRef.current = null;
-      socket.disconnect();
+      socket.off('system:ready', onReady);
+      socket.off('desktop:screen', onScreen);
+      socket.off('desktop:pinnedCards', onPinnedCards);
+      socket.off('desktop:cursor', onCursor);
+      socket.off('desktop:cursorLeave', onCursorLeave);
+      socket.off('storage:publicChanged', onStoragePublicChanged);
+      socket.off('desktop:userChanged', onUserChanged);
     };
-  }, [initialOwner.id, token]);
+  }, [initialOwner.id, sharedSocket, token]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -325,7 +340,8 @@ export function RemoteDesktopWindow({ token, language, owner: initialOwner, curr
                 videoUrl={card.imageData}
                 videoName={card.name}
                 readOnly
-                initialPlacement={placement}
+                overridePosition={{ x: placement.x, y: placement.y }}
+                overrideSize={{ width: placement.width, height: placement.height }}
               />
             );
           }

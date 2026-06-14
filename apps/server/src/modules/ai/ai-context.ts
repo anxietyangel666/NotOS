@@ -238,7 +238,10 @@ export function buildSystemPrompt(user: UserRecord, client: ClientContext = {}):
 
   return [
     'You are the built-in AI assistant of NotOS, a friendly desktop environment.',
-    'Answer clearly. Reply in the same language the user writes in.',
+    'You are a general-purpose AI with broad knowledge from your training data — you can answer questions on any topic: science, history, programming, math, culture, language, and more.',
+    'You do NOT have real-time internet access, but your training knowledge is extensive and up to date as of your training cutoff.',
+    'Answer clearly and helpfully. Reply in the same language the user writes in.',
+    'Only mention NotOS-specific context when it is relevant to the user\'s question.',
     '',
     buildPersonaBlock(client.settings),
     '',
@@ -256,8 +259,8 @@ export function buildSystemPrompt(user: UserRecord, client: ClientContext = {}):
     '',
     INTERFACE_MAP,
     '',
-    'When the user asks where a setting is, point them to the exact section above.',
-    'Never invent settings or sections that are not listed.'
+    'When the user asks where a NotOS setting is, point them to the exact section above.',
+    'For all other questions, answer from your general knowledge without restricting yourself to NotOS topics.'
   ]
     .filter(Boolean)
     .join('\n');

@@ -1,10 +1,11 @@
-import { Fragment, useEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api/client';
 import type { AiChat, AiChatSummary, AiQuota, AiSettings, Language } from '../api/types';
 import { LOCALES, t, getSavedTimeFormat } from '../i18n';
 import { getMusicTracks } from '../music-library';
 import { formatMessageDate, shouldShowDateDivider } from '../utils/message-date';
 import { AiPersonaForm } from './AiPersonaForm';
+import { SaveBar } from './SaveBar';
 import { EmojiPicker } from './EmojiPicker';
 import { EmojiToggleIcon } from './ChatComposeIcons';
 import { WindowFrame } from './WindowFrame';
@@ -83,6 +84,8 @@ export function AiChatWindow({
   const [personaDraft, setPersonaDraft] = useState<AiSettings>(DEFAULT_SETTINGS);
   const [savingPersona, setSavingPersona] = useState(false);
   const [personaSaved, setPersonaSaved] = useState(false);
+  // Bumped to shake the persona save bar on a blocked close attempt.
+  const [personaBarShake, setPersonaBarShake] = useState(0);
   const [quota, setQuota] = useState<AiQuota | null>(null);
   const [showQuota, setShowQuota] = useState(false);
   // First-run onboarding: shown the very first time before a persona is set.
@@ -122,6 +125,12 @@ export function AiChatWindow({
       setSavingPersona(false);
     }
   }
+
+  // True when the persona form has unsaved edits versus the saved settings.
+  const personaDirty = useMemo(
+    () => JSON.stringify(personaDraft) !== JSON.stringify(settings),
+    [personaDraft, settings]
+  );
 
   async function completeOnboarding(persist: boolean) {
     try {
@@ -284,7 +293,13 @@ export function AiChatWindow({
       onFocus={onFocus}
       onMinimize={onMinimize}
       onToggleMaximize={onToggleMaximize}
-      onClose={onClose}
+      onClose={() => {
+        if (tab === 'persona' && personaDirty) {
+          setPersonaBarShake((n) => n + 1);
+          return;
+        }
+        onClose();
+      }}
     >
       <div className="ai-chat-tabs" role="tablist">
         <button
@@ -321,16 +336,14 @@ export function AiChatWindow({
         <div className="ai-panel">
           <p className="ai-panel-intro">{t(language, 'aiPersonaIntro')}</p>
           <AiPersonaForm token={token} language={language} draft={personaDraft} onChange={(patch) => setPersonaDraft((prev) => ({ ...prev, ...patch }))} />
-          <div className="ai-panel-actions">
-            <button
-              type="button"
-              className="primary-action"
-              disabled={savingPersona}
-              onClick={() => void savePersona()}
-            >
-              {personaSaved ? t(language, 'aiPersonaSaved') : t(language, 'aiPersonaSave')}
-            </button>
-          </div>
+          <SaveBar
+            language={language}
+            dirty={personaDirty}
+            shakeKey={personaBarShake}
+            saving={savingPersona}
+            onReset={() => setPersonaDraft(settings)}
+            onSave={() => void savePersona()}
+          />
         </div>
       ) : (
       <div className="ai-chat-body">

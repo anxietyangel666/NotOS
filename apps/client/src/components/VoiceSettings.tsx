@@ -1,38 +1,69 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Language } from '../api/types';
 import { t } from '../i18n';
 import { describeKey, loadCallSettings, saveCallSettings, type CallSettings } from '../utils/call-settings';
+import { SaveBar } from './SaveBar';
 
 type VoiceSettingsProps = {
   language: Language;
   onChange?: (settings: CallSettings) => void;
+  /** Notifies the parent whenever the unsaved-changes state flips. */
+  onDirtyChange?: (dirty: boolean) => void;
 };
 
 type DeviceOption = { deviceId: string; label: string };
 
-export function VoiceSettings({ language, onChange }: VoiceSettingsProps) {
+export function VoiceSettings({ language, onChange, onDirtyChange }: VoiceSettingsProps) {
   const [settings, setSettings] = useState<CallSettings>(loadCallSettings);
+  // Last-persisted baseline used to detect unsaved changes.
+  const [savedSettings, setSavedSettings] = useState<CallSettings>(loadCallSettings);
   const [inputs, setInputs] = useState<DeviceOption[]>([]);
   const [outputs, setOutputs] = useState<DeviceOption[]>([]);
   const [capturingKey, setCapturingKey] = useState(false);
   const [testing, setTesting] = useState(false);
   const [level, setLevel] = useState(0);
   const [permissionError, setPermissionError] = useState(false);
+  const [barShake, setBarShake] = useState(0);
 
   const testStreamRef = useRef<MediaStream | null>(null);
   const testCtxRef = useRef<AudioContext | null>(null);
   const rafRef = useRef<number | null>(null);
 
+  // Edit the local draft only. Changes are persisted via the save bar so they
+  // do not take effect until the user explicitly saves.
   function update(patch: Partial<CallSettings>) {
-    setSettings((prev) => {
-      const next = { ...prev, ...patch };
-      saveCallSettings(next);
-      onChange?.(next);
-      // Notify any live call/voice room so settings apply immediately.
-      window.dispatchEvent(new CustomEvent('notoc:callSettingsChanged'));
-      return next;
-    });
+    setSettings((prev) => ({ ...prev, ...patch }));
   }
+
+  const dirty = useMemo(
+    () => JSON.stringify(settings) !== JSON.stringify(savedSettings),
+    [settings, savedSettings]
+  );
+
+  function saveVoiceSettings() {
+    saveCallSettings(settings);
+    setSavedSettings(settings);
+    onChange?.(settings);
+    // Notify any live call/voice room so settings apply immediately.
+    window.dispatchEvent(new CustomEvent('notoc:callSettingsChanged'));
+  }
+
+  function resetVoiceSettings() {
+    setSettings(savedSettings);
+  }
+
+  // Keep the parent informed of unsaved changes so it can block window close.
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+    return () => onDirtyChange?.(false);
+  }, [dirty, onDirtyChange]);
+
+  // The parent dispatches this when a close is blocked by unsaved changes.
+  useEffect(() => {
+    const onShake = () => setBarShake((n) => n + 1);
+    window.addEventListener('notoc:voiceSettingsShake', onShake);
+    return () => window.removeEventListener('notoc:voiceSettingsShake', onShake);
+  }, []);
 
   async function loadDevices() {
     try {
@@ -198,6 +229,14 @@ export function VoiceSettings({ language, onChange }: VoiceSettingsProps) {
         <input type="checkbox" checked={settings.autoGainControl} onChange={(e) => update({ autoGainControl: e.target.checked })} />
         <span>{t(language, 'autoGainControl')}</span>
       </label>
+
+      <SaveBar
+        language={language}
+        dirty={dirty}
+        shakeKey={barShake}
+        onReset={resetVoiceSettings}
+        onSave={saveVoiceSettings}
+      />
     </div>
   );
 }

@@ -18,7 +18,7 @@ export function WelcomeOverlay({ language, user, onDone }: WelcomeOverlayProps) 
   useEffect(() => {
     const audio = new Audio(`${import.meta.env.BASE_URL}Audio/Welcome.mp3`);
     audioRef.current = audio;
-    audio.volume = 0.8;
+    audio.volume = 0.15;
     // Playback can be blocked by autoplay policies; ignore failures silently.
     void audio.play().catch(() => undefined);
 

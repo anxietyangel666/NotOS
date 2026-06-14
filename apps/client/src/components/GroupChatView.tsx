@@ -3,7 +3,9 @@ import { createPortal } from 'react-dom';
 import { io } from 'socket.io-client';
 import { api } from '../api/client';
 import { readImageAsDataUrl } from '../auth/auth-file';
-import type { Group, GroupChannel, GroupFolder, GroupMember, GroupMessage, GroupRole, Language, NamePlate, PublicUser } from '../api/types';
+import type { CustomCategory, Group, GroupChannel, GroupFolder, GroupMember, GroupMessage, GroupRole, Language, NamePlate, PublicUser } from '../api/types';
+import { CustomizationConstructor } from './CustomizationConstructor';
+import { CustomizationModal } from './CustomizationModal';
 import { DEFAULT_NAMEPLATE, nameplateToCss } from '../api/types';
 import type { VoiceRoom } from '../hooks/use-voice-room';
 import { VoiceStage } from './VoiceStage';
@@ -16,6 +18,8 @@ import { MessageText, Twemoji } from './Twemoji';
 import { EmojiToggleIcon, AttachIcon } from './ChatComposeIcons';
 import { UserName } from './UserName';
 import { MicMuteIcon, ScreenShareIcon } from './PlayerIcons';
+import { SaveBar } from './SaveBar';
+import { Tooltip } from './Tooltip';
 import { API_URL } from '../api/client';
 import { formatMessageDate, shouldShowDateDivider } from '../utils/message-date';
 
@@ -26,6 +30,29 @@ const CHANNEL_PANEL_MIN = 200;
 const CHANNEL_PANEL_MAX = 460;
 const MEMBER_PANEL_MIN = 240;
 const MEMBER_PANEL_MAX = 500;
+
+// Module-level cache of per-group data so reopening a group renders its
+// channels/roles/members/folders and last-viewed messages instantly while the
+// network revalidates in the background (stale-while-revalidate). Lives for the
+// app session; socket events and fetches keep it fresh.
+type GroupDataCacheEntry = {
+  channels: GroupChannel[];
+  roles: GroupRole[];
+  members: GroupMember[];
+  folders: GroupFolder[];
+  activeChannel: string | null;
+  messages: Map<string, GroupMessage[]>; // channelId -> messages
+};
+const groupDataCache = new Map<string, GroupDataCacheEntry>();
+
+function getGroupCache(groupId: string): GroupDataCacheEntry {
+  let entry = groupDataCache.get(groupId);
+  if (!entry) {
+    entry = { channels: [], roles: [], members: [], folders: [], activeChannel: null, messages: new Map() };
+    groupDataCache.set(groupId, entry);
+  }
+  return entry;
+}
 
 function panelWidthKey(panel: 'channel' | 'member') {
   return `notoc.groupChat.${panel}PanelWidth`;
@@ -61,7 +88,7 @@ type GroupChatViewProps = {
   group: Group;
   onlineUserIds?: string[];
   onClose: () => void;
-  onViewProfile?: (user: PublicUser, group?: Group) => void;
+  onViewProfile?: (user: PublicUser, group?: Group, preload?: { groupRoles: GroupRole[]; userRoles: GroupRole[] }) => void;
   onViewDesktop?: (user: PublicUser) => void;
   onGroupJoin?: (group: Group) => void;
   memberGroupIds?: Set<string>;
@@ -94,6 +121,8 @@ export function GroupChatView({ token, language, currentUser, group, onlineUserI
   const [editTarget, setEditTarget] = useState<{ kind: 'channel' | 'folder'; id: string } | null>(null);
   const [editNameDraft, setEditNameDraft] = useState('');
   const [editLimitDraft, setEditLimitDraft] = useState<string>('');
+  // Bumped to shake the channel/folder edit save bar on a blocked close.
+  const [editBarShake, setEditBarShake] = useState(0);
   // When the user is connected to a voice channel and clicks it again, the
   // voice stage (chat + screen share) opens inline above the chat.
   const [voiceStageOpen, setVoiceStageOpen] = useState(false);
@@ -111,7 +140,24 @@ export function GroupChatView({ token, language, currentUser, group, onlineUserI
   const [roleEditorId, setRoleEditorId] = useState<string | null>(null);
   const [roleMenuOpen, setRoleMenuOpen] = useState<string | null>(null);
   const [roleIdCopied, setRoleIdCopied] = useState<string | null>(null);
-  const [settingsTab, setSettingsTab] = useState<'overview' | 'invite' | 'roles' | 'members'>('overview');
+  // The role auto-assigned when a member joins the server, plus its dropdown.
+  const [defaultRoleId, setDefaultRoleId] = useState<string | null>(group.defaultRoleId ?? null);
+  const [defaultRoleMenuOpen, setDefaultRoleMenuOpen] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<'overview' | 'invite' | 'roles' | 'members' | 'customization'>('overview');
+  // Server profile customization: admin-defined categories, the caller's
+  // selected option ids, whether a required onboarding flow is pending, and
+  // whether the member-facing "Настроить профиль" modal is open.
+  const [customCategories, setCustomCategories] = useState<CustomCategory[]>([]);
+  const [selectedOptionIds, setSelectedOptionIds] = useState<string[]>([]);
+  // Monotonic counter of customization toggles in flight. Used to ignore stale
+  // out-of-order server responses so rapid clicking doesn't make the checkmark
+  // flicker on/off.
+  const toggleSeqRef = useRef(0);
+  const [onboardingRequired, setOnboardingRequired] = useState(false);
+  const [customizeOpen, setCustomizeOpen] = useState(false);
+  // Bumped to shake the save bar (red) when the user tries to close settings
+  // while there are unsaved changes in the role editor.
+  const [saveBarShake, setSaveBarShake] = useState(0);
 
   // Leaving the Roles tab (or closing settings) returns the role editor to the
   // list view and dismisses any open "..." menu.
@@ -133,6 +179,18 @@ export function GroupChatView({ token, language, currentUser, group, onlineUserI
     window.addEventListener('mousedown', onDocClick);
     return () => window.removeEventListener('mousedown', onDocClick);
   }, [roleMenuOpen]);
+
+  // Close the "default role on join" dropdown on any outside click.
+  useEffect(() => {
+    if (!defaultRoleMenuOpen) return;
+    const onDocClick = (event: globalThis.MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest?.('.group-default-role-wrap')) return;
+      setDefaultRoleMenuOpen(false);
+    };
+    window.addEventListener('mousedown', onDocClick);
+    return () => window.removeEventListener('mousedown', onDocClick);
+  }, [defaultRoleMenuOpen]);
   const [draggedItem, setDraggedItem] = useState<{ type: 'channel' | 'folder'; id: string } | null>(null);
   const [pendingImage, setPendingImage] = useState<{ dataUrl: string; name: string; spoiler: boolean } | null>(null);
   const [imageCaptionDraft, setImageCaptionDraft] = useState('');
@@ -287,6 +345,14 @@ export function GroupChatView({ token, language, currentUser, group, onlineUserI
   const [copied, setCopied] = useState(false);
   const [newAvatar, setNewAvatar] = useState<string | null>(null);
   const [nameplateDraft, setNameplateDraft] = useState<NonNullable<NamePlate>>(group.nameplate ?? DEFAULT_NAMEPLATE);
+  // Baseline of the persisted overview values. Updated when the group prop
+  // changes and after a successful save so the save bar clears immediately.
+  const [savedOverview, setSavedOverview] = useState(() => ({
+    name: group.name,
+    description: group.description ?? '',
+    avatarData: group.avatarData,
+    nameplate: JSON.stringify(group.nameplate ?? DEFAULT_NAMEPLATE)
+  }));
   const [cropSource, setCropSource] = useState<string | null>(null);
   // Quick nameplate popup opened directly under the group title.
   const [platePopupOpen, setPlatePopupOpen] = useState(false);
@@ -297,6 +363,33 @@ export function GroupChatView({ token, language, currentUser, group, onlineUserI
   const [settingsError, setSettingsError] = useState('');
   const [confirmDeleteGroup, setConfirmDeleteGroup] = useState(false);
   const [editingRoleMeta, setEditingRoleMeta] = useState<{ id: string; name: string; color: string } | null>(null);
+  // True when the open role editor has unsaved edits (permissions, hoist,
+  // name or color differ from the persisted role). Drives the slide-up
+  // save/reset bar and the "block close" flash on the × button.
+  const roleEditorDirty = useMemo(() => {
+    if (roleEditorId === null) return false;
+    const role = roles.find((r) => r.id === roleEditorId);
+    if (!role) return false;
+    const permsChanged =
+      draftPermissions.length !== role.permissions.length ||
+      [...draftPermissions].sort().join('|') !== [...role.permissions].sort().join('|');
+    const hoistChanged = draftHoist !== role.hoist;
+    const meta = editingRoleMeta && editingRoleMeta.id === role.id ? editingRoleMeta : null;
+    const nameChanged = meta ? meta.name.trim() !== role.name : false;
+    const colorChanged = meta ? meta.color !== role.color : false;
+    return permsChanged || hoistChanged || nameChanged || colorChanged;
+  }, [roleEditorId, roles, draftPermissions, draftHoist, editingRoleMeta]);
+
+  // True when the Overview tab (name / description / avatar / nameplate) has
+  // unsaved edits versus the persisted group.
+  const overviewDirty = useMemo(() => {
+    const nameChanged = newName.trim() !== savedOverview.name && newName.trim().length > 0;
+    const descChanged = newDescription.trim() !== savedOverview.description.trim();
+    const avatarChanged = newAvatar !== null && newAvatar !== savedOverview.avatarData;
+    const plateChanged = JSON.stringify(nameplateDraft) !== savedOverview.nameplate;
+    return nameChanged || descChanged || avatarChanged || plateChanged;
+  }, [newName, newDescription, newAvatar, nameplateDraft, savedOverview]);
+
   const menuRef = useRef<HTMLDivElement | null>(null);
   const threadRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -326,7 +419,12 @@ export function GroupChatView({ token, language, currentUser, group, onlineUserI
     return roles.find((r) => r.id === currentMember.roleId);
   }, [roles, currentMember]);
   const ownerRoleId = useMemo(() => roles.find((r) => r.isOwner)?.id, [roles]);
-  const isOwner = useMemo(() => currentRole?.isOwner ?? currentMember?.role === 'Owner', [currentRole, currentMember]);
+  // The group creator is always treated as owner/admin, even when their current
+  // role has no admin permissions (or they hold a plain custom role).
+  const isOwner = useMemo(
+    () => currentUser.id === group.ownerId || (currentRole?.isOwner ?? currentMember?.role === 'Owner'),
+    [currentUser.id, group.ownerId, currentRole, currentMember]
+  );
   const canManageRoles = useMemo(() => isOwner || (currentRole?.permissions?.includes('ManageRoles') ?? false), [isOwner, currentRole]);
   const canManageChannels = useMemo(() => isOwner || (currentRole?.permissions?.includes('ManageChannels') ?? false), [isOwner, currentRole]);
   const canKickMembers = useMemo(() => isOwner || (currentRole?.permissions?.includes('KickMembers') ?? false), [isOwner, currentRole]);
@@ -344,20 +442,27 @@ export function GroupChatView({ token, language, currentUser, group, onlineUserI
     setNewDescription(group.description ?? '');
     setInviteCode(group.inviteCode);
     setNameplateDraft(group.nameplate ?? DEFAULT_NAMEPLATE);
-  }, [group.id, group.name, group.inviteCode, group.nameplate, group.description]);
+    setSavedOverview({
+      name: group.name,
+      description: group.description ?? '',
+      avatarData: group.avatarData,
+      nameplate: JSON.stringify(group.nameplate ?? DEFAULT_NAMEPLATE)
+    });
+    setDefaultRoleId(group.defaultRoleId ?? null);
+  }, [group.id, group.name, group.inviteCode, group.nameplate, group.description, group.avatarData, group.defaultRoleId]);
 
   // Load initial data
   useEffect(() => {
-    // Clear the previous group's data immediately so switching groups does not
-    // briefly show the old group's channels, messages and members for the 1-2s
-    // it takes the new group's data to load. Without this reset the stale state
-    // from the previous group lingers until the async requests below resolve.
-    setChannels([]);
-    setMessages([]);
-    setMembers([]);
-    setRoles([]);
-    setFolders([]);
-    setActiveChannel(null);
+    // Seed from the session cache so a previously-opened group renders instantly
+    // instead of flashing empty for the 1-2s the network takes. For a group we
+    // have never opened, the cache is empty (renders blank, same as before).
+    const cache = getGroupCache(group.id);
+    setChannels(cache.channels);
+    setRoles(cache.roles);
+    setMembers(cache.members);
+    setFolders(cache.folders);
+    setActiveChannel(cache.activeChannel);
+    setMessages(cache.activeChannel ? (cache.messages.get(cache.activeChannel) ?? []) : []);
 
     let cancelled = false;
     void Promise.all([
@@ -372,9 +477,20 @@ export function GroupChatView({ token, language, currentUser, group, onlineUserI
       setRoles(rolePayload.roles);
       setMembers(memPayload.members);
       setFolders(folderPayload.folders);
+      // Write fresh data back to the cache for the next time this group opens.
+      const entry = getGroupCache(group.id);
+      entry.channels = chanPayload.channels;
+      entry.roles = rolePayload.roles;
+      entry.members = memPayload.members;
+      entry.folders = folderPayload.folders;
       if (chanPayload.channels.length > 0) {
+        // Keep the cached active channel if it still exists, otherwise pick the
+        // first text channel. Avoids resetting the user's channel on revalidate.
+        const cachedStillValid = cache.activeChannel && chanPayload.channels.some((c) => c.id === cache.activeChannel);
         const firstText = chanPayload.channels.find((c) => c.type !== 'voice') ?? chanPayload.channels[0];
-        setActiveChannel(firstText.id);
+        const nextActive = cachedStillValid ? cache.activeChannel : firstText.id;
+        entry.activeChannel = nextActive;
+        setActiveChannel(nextActive);
       }
     });
     // Ask the server who is currently in this group's voice channels so the
@@ -386,17 +502,59 @@ export function GroupChatView({ token, language, currentUser, group, onlineUserI
     };
   }, [token, group.id]);
 
+  // Load server profile customization (categories + the caller's selections).
+  // If a required onboarding flow is pending, open the member modal at once.
+  useEffect(() => {
+    let cancelled = false;
+    void api.getGroupCustomization(token, group.id).then((payload) => {
+      if (cancelled) return;
+      setCustomCategories(payload.categories);
+      setSelectedOptionIds(payload.selectedOptionIds);
+      setOnboardingRequired(payload.onboardingRequired);
+      if (payload.onboardingRequired) setCustomizeOpen(true);
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [token, group.id]);
+
   // Load messages for active channel
   useEffect(() => {
     if (!activeChannel) return;
+    // Show cached messages for this channel immediately, then revalidate.
+    const cache = getGroupCache(group.id);
+    const cachedMessages = cache.messages.get(activeChannel);
+    if (cachedMessages) setMessages(cachedMessages);
+    cache.activeChannel = activeChannel;
+
+    let cancelled = false;
     void api.getGroupMessages(token, group.id, activeChannel).then((payload) => {
+      if (cancelled) return;
       setMessages(payload.messages);
+      getGroupCache(group.id).messages.set(activeChannel, payload.messages);
     });
+    return () => { cancelled = true; };
   }, [token, group.id, activeChannel]);
 
   useEffect(() => {
     if (threadRef.current) threadRef.current.scrollTop = threadRef.current.scrollHeight;
   }, [messages.length]);
+
+  // Mirror live state into the session cache so socket-driven updates (new
+  // messages, channel/member/role changes) are reflected the next time this
+  // group is reopened, keeping the instant-render cache fresh.
+  useEffect(() => {
+    const entry = getGroupCache(group.id);
+    entry.channels = channels;
+    entry.roles = roles;
+    entry.members = members;
+    entry.folders = folders;
+  }, [group.id, channels, roles, members, folders]);
+
+  useEffect(() => {
+    if (!activeChannel) return;
+    const entry = getGroupCache(group.id);
+    entry.activeChannel = activeChannel;
+    entry.messages.set(activeChannel, messages);
+  }, [group.id, activeChannel, messages]);
 
   // Listen for real-time group messages via direct socket connection
   useEffect(() => {
@@ -460,6 +618,17 @@ export function GroupChatView({ token, language, currentUser, group, onlineUserI
       if (payload.groupId !== group.id) return;
       setMembers(payload.members);
     }
+    function handleCustomizationChanged(payload: { groupId: string; categories: CustomCategory[] }) {
+      if (payload.groupId !== group.id) return;
+      setCustomCategories(payload.categories);
+    }
+    // Sent only to the affected member after they toggle an option: refresh the
+    // channel/folder lists so newly unlocked (or hidden) ones appear instantly.
+    function handleCustomizationApplied(payload: { groupId: string; channels: GroupChannel[]; folders: GroupFolder[] }) {
+      if (payload.groupId !== group.id) return;
+      setChannels(payload.channels);
+      setFolders(payload.folders);
+    }
     socket.on('messenger:groupMessage', handleNewMessage);
     socket.on('messenger:groupMessageUpdated', handleUpdateMessage);
     socket.on('messenger:groupMessageDeleted', handleUpdateMessage);
@@ -473,6 +642,8 @@ export function GroupChatView({ token, language, currentUser, group, onlineUserI
     socket.on('messenger:groupRolesChanged', handleRolesChanged);
     socket.on('messenger:groupMemberRoleChanged', handleMemberRoleChanged);
     socket.on('messenger:groupMemberJoined', handleMemberJoined);
+    socket.on('messenger:groupCustomizationChanged', handleCustomizationChanged);
+    socket.on('messenger:groupCustomizationApplied', handleCustomizationApplied);
     return () => {
       socket.disconnect();
     };
@@ -599,6 +770,21 @@ export function GroupChatView({ token, language, currentUser, group, onlineUserI
     return knownSenders.get(senderId)?.nickname ?? senderId.slice(0, 8);
   }
 
+  // Build the roles a member holds from already-loaded state so the profile can
+  // render them instantly (no network wait) when opened from this group view.
+  function buildProfilePreload(userId: string): { groupRoles: GroupRole[]; userRoles: GroupRole[] } {
+    const member = members.find((m) => m.user.id === userId);
+    const heldRoleIds = new Set(
+      member?.roleIds && member.roleIds.length > 0
+        ? member.roleIds
+        : member?.roleId ? [member.roleId] : []
+    );
+    const userRoles = roles
+      .filter((r) => heldRoleIds.has(r.id))
+      .sort((a, b) => a.position - b.position);
+    return { groupRoles: roles, userRoles };
+  }
+
   function formatTime(value: string) {
     return new Intl.DateTimeFormat(language === 'ru' ? 'ru-RU' : language === 'uk' ? 'uk-UA' : 'en-US', {
       hour: '2-digit', minute: '2-digit', hour12: getSavedTimeFormat() === '12h'
@@ -696,16 +882,23 @@ export function GroupChatView({ token, language, currentUser, group, onlineUserI
 
   async function handleSaveSettings() {
     const updates: { name?: string; avatarData?: string; nameplate?: NamePlate; description?: string } = {};
-    if (newName.trim() && newName.trim() !== group.name) updates.name = newName.trim();
+    if (newName.trim() && newName.trim() !== savedOverview.name) updates.name = newName.trim();
     if (newAvatar !== null) updates.avatarData = newAvatar;
-    if (newDescription.trim() !== (group.description ?? '').trim()) updates.description = newDescription.trim();
+    if (newDescription.trim() !== savedOverview.description.trim()) updates.description = newDescription.trim();
     // Always send the nameplate so changes (including clearing to "none") persist.
     updates.nameplate = nameplateDraft;
     try {
       if (Object.keys(updates).length > 0) await api.updateGroup(token, group.id, updates);
+      // Adopt the just-saved values as the new baseline so the save bar clears
+      // even though the parent `group` prop may not refresh immediately.
+      setSavedOverview((prev) => ({
+        name: updates.name ?? prev.name,
+        description: updates.description ?? prev.description,
+        avatarData: newAvatar ?? prev.avatarData,
+        nameplate: JSON.stringify(nameplateDraft)
+      }));
       setNewAvatar(null);
       setSettingsError('');
-      setShowSettings(false);
     } catch {
       setSettingsError(t(language, 'unknownError'));
     }
@@ -837,6 +1030,44 @@ export function GroupChatView({ token, language, currentUser, group, onlineUserI
     } catch { }
   }
 
+  // True when the channel/folder edit dialog has unsaved name/limit changes.
+  function isEditTargetDirty() {
+    if (!editTarget) return false;
+    if (editTarget.kind === 'channel') {
+      const channel = channels.find((c) => c.id === editTarget.id);
+      if (!channel) return false;
+      const nameChanged = editNameDraft.trim() !== channel.name;
+      const currentLimit = channel.userLimit != null ? String(channel.userLimit) : '';
+      const limitChanged = channel.type === 'voice' && editLimitDraft.trim() !== currentLimit;
+      return nameChanged || limitChanged;
+    }
+    const folder = folders.find((f) => f.id === editTarget.id);
+    return !!folder && editNameDraft.trim() !== folder.name;
+  }
+
+  // Restore the edit dialog drafts to the persisted channel/folder values.
+  function resetEditTarget() {
+    if (!editTarget) return;
+    if (editTarget.kind === 'channel') {
+      const channel = channels.find((c) => c.id === editTarget.id);
+      if (!channel) return;
+      setEditNameDraft(channel.name);
+      setEditLimitDraft(channel.userLimit != null ? String(channel.userLimit) : '');
+    } else {
+      const folder = folders.find((f) => f.id === editTarget.id);
+      if (folder) setEditNameDraft(folder.name);
+    }
+  }
+
+  // Close the edit dialog, but shake the save bar if there are unsaved changes.
+  function requestCloseEditTarget() {
+    if (isEditTargetDirty()) {
+      setEditBarShake((n) => n + 1);
+      return;
+    }
+    setEditTarget(null);
+  }
+
   // Click a voice channel: join it (or re-open the voice view if already here).
   function handleVoiceChannelClick(channelId: string) {
     if (!voiceRoom) return;
@@ -903,6 +1134,40 @@ export function GroupChatView({ token, language, currentUser, group, onlineUserI
     setEditingRoleMeta(null);
   }
 
+  // Discard unsaved role-editor edits, restoring the drafts to the persisted role.
+  function resetRoleDrafts() {
+    const role = roles.find((r) => r.id === roleEditorId);
+    if (!role) return;
+    setDraftPermissions([...role.permissions]);
+    setDraftHoist(role.hoist);
+    setEditingRoleMeta({ id: role.id, name: role.name, color: role.color });
+  }
+
+  // Restore the Overview drafts to the last-saved baseline values.
+  function resetOverviewDrafts() {
+    setNewName(savedOverview.name);
+    setNewDescription(savedOverview.description);
+    setNewAvatar(null);
+    try {
+      setNameplateDraft(JSON.parse(savedOverview.nameplate));
+    } catch {
+      setNameplateDraft(group.nameplate ?? DEFAULT_NAMEPLATE);
+    }
+  }
+
+  // Whole-modal dirty flag across whichever surface is currently editable.
+  const settingsDirty = roleEditorDirty || overviewDirty;
+
+  // Close the whole settings modal. If anything has unsaved changes, block the
+  // close and shake the save bar instead.
+  function requestCloseSettings() {
+    if (settingsDirty) {
+      setSaveBarShake((n) => n + 1);
+      return;
+    }
+    setShowSettings(false);
+  }
+
   // Create a fresh role and immediately open it in the editor for tweaking.
   async function handleCreateRole() {
     if (!canManageRoles) return;
@@ -943,6 +1208,64 @@ export function GroupChatView({ token, language, currentUser, group, onlineUserI
       const rolePayload = await api.getGroupRoles(token, group.id);
       setRoles(rolePayload.roles);
     } catch { }
+  }
+
+  // Set (or clear) the role automatically granted to members on joining.
+  async function handleSetDefaultRole(roleId: string | null) {
+    setDefaultRoleMenuOpen(false);
+    const previous = defaultRoleId;
+    setDefaultRoleId(roleId); // optimistic
+    try {
+      await api.setGroupDefaultRole(token, group.id, roleId);
+    } catch {
+      setDefaultRoleId(previous);
+    }
+  }
+
+  // Member self-service: toggle a customization option. Applies an optimistic
+  // update so the checkmark flips instantly, then reconciles with the server
+  // (which also runs the radio logic for 'single' categories).
+  async function handleToggleOption(optionId: string) {
+    const category = customCategories.find((c) => c.options.some((o) => o.id === optionId));
+    const seq = ++toggleSeqRef.current;
+
+    // Optimistic update via a functional setState so it always builds on the
+    // latest state, never a stale closure captured at click time.
+    setSelectedOptionIds((current) => {
+      if (current.includes(optionId)) return current.filter((id) => id !== optionId);
+      if (category?.selectionType === 'single') {
+        // Radio: drop the other options in this category, add the new one.
+        const siblingIds = new Set(category.options.map((o) => o.id));
+        return [...current.filter((id) => !siblingIds.has(id)), optionId];
+      }
+      return [...current, optionId];
+    });
+
+    try {
+      const result = await api.toggleCustomOption(token, group.id, optionId);
+      // Only the most recent toggle may reconcile UI state. Older, out-of-order
+      // responses are ignored so the checkmark stops flickering.
+      if (seq !== toggleSeqRef.current) return;
+      setSelectedOptionIds(result.selectedOptionIds);
+      setChannels(result.channels);
+      setFolders(result.folders);
+    } catch {
+      // Re-sync from the server only if this was the latest request.
+      if (seq !== toggleSeqRef.current) return;
+      try {
+        const fresh = await api.getGroupCustomization(token, group.id);
+        if (seq === toggleSeqRef.current) setSelectedOptionIds(fresh.selectedOptionIds);
+      } catch { }
+    }
+  }
+
+  // Finish the required onboarding flow and unlock the server.
+  async function handleCompleteOnboarding() {
+    try {
+      await api.completeCustomization(token, group.id);
+    } catch { }
+    setOnboardingRequired(false);
+    setCustomizeOpen(false);
   }
 
   async function handleRemoveMember(userId: string) {
@@ -1184,6 +1507,10 @@ export function GroupChatView({ token, language, currentUser, group, onlineUserI
             document.body
           ) : null}
         </div>
+        <button type="button" className="group-customize-btn" onClick={() => setCustomizeOpen(true)}>
+          {t(language, 'customizeProfile')}
+        </button>
+        <hr className="group-customize-divider" />
         <div className="group-channels-list">
           {folders.map((folder) => {
             const collapsed = collapsedFolders.has(folder.id);
@@ -1323,7 +1650,7 @@ export function GroupChatView({ token, language, currentUser, group, onlineUserI
                   if (message.deletedAt) return;
                   setMessageMenu({ x: Math.min(event.clientX, window.innerWidth - 190), y: Math.min(event.clientY, window.innerHeight - 90), message });
                 }}>
-                <img className="message-avatar" src={senderAvatar} alt="" draggable={false} style={{ cursor: 'pointer' }} onClick={() => onViewProfile?.(knownSenders.get(message.senderId) as PublicUser, group)} />
+                <img className="message-avatar" src={senderAvatar} alt="" draggable={false} style={{ cursor: 'pointer' }} onClick={() => onViewProfile?.(knownSenders.get(message.senderId) as PublicUser, group, buildProfilePreload(message.senderId))} />
                 <div className="message-body">
                   {isStartOfGroup ? (
                     <div className="message-meta">
@@ -1504,7 +1831,7 @@ export function GroupChatView({ token, language, currentUser, group, onlineUserI
 
       {memberMenu ? createPortal(
         <div className="context-menu" style={{ left: memberMenu.x, top: memberMenu.y }} onMouseDown={(event) => event.stopPropagation()}>
-          <button type="button" onClick={() => { onViewProfile?.(memberMenu.user, group); setMemberMenu(null); }}>
+          <button type="button" onClick={() => { onViewProfile?.(memberMenu.user, group, buildProfilePreload(memberMenu.user.id)); setMemberMenu(null); }}>
             {t(language, 'viewProfile')}
           </button>
           {onViewDesktop ? (
@@ -1532,8 +1859,16 @@ export function GroupChatView({ token, language, currentUser, group, onlineUserI
       ) : null}
 
       {showSettings ? (
-        <div className="messenger-inline-modal" onClick={() => setShowSettings(false)}>
+        <div className="messenger-inline-modal" onClick={requestCloseSettings}>
           <div className="group-settings-modal" onClick={(event) => event.stopPropagation()}>
+            <button
+              type="button"
+              className="group-settings-close"
+              aria-label={t(language, 'close')}
+              onClick={requestCloseSettings}
+            >
+              ✕
+            </button>
             <div className="group-settings-sidebar">
               <div className="group-settings-sidebar-header">
                 <img className="group-settings-sidebar-avatar" src={group.avatarData || `data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" fill="%23444" rx="20"/><text x="50" y="58" text-anchor="middle" fill="%23fff" font-size="32" font-family="sans-serif">${(group.name[0]||'?').toUpperCase()}</text></svg>`} alt="" />
@@ -1554,6 +1889,11 @@ export function GroupChatView({ token, language, currentUser, group, onlineUserI
                 {canManageRoles ? (
                   <button type="button" className={'group-settings-tab' + (settingsTab === 'members' ? ' active' : '')} onClick={() => setSettingsTab('members')}>
                     {t(language, 'members')}
+                  </button>
+                ) : null}
+                {canManageRoles ? (
+                  <button type="button" className={'group-settings-tab' + (settingsTab === 'customization' ? ' active' : '')} onClick={() => setSettingsTab('customization')}>
+                    {t(language, 'customization')}
                   </button>
                 ) : null}
               </div>
@@ -1709,6 +2049,55 @@ export function GroupChatView({ token, language, currentUser, group, onlineUserI
                 roleEditorId === null ? (
                   /* ── Roles: list view ── */
                   <div className="group-settings-section group-roles-list-view">
+                    {/* Role automatically granted when a member joins the server. */}
+                    {(() => {
+                      const assignable = roles.filter((r) => !r.isOwner);
+                      const selected = assignable.find((r) => r.id === defaultRoleId) ?? null;
+                      return (
+                        <div className="group-default-role-row">
+                          <span className="group-default-role-label">{t(language, 'defaultRoleOnJoin')}</span>
+                          <div className="group-default-role-wrap">
+                            <button
+                              type="button"
+                              className="group-default-role-trigger"
+                              onClick={() => setDefaultRoleMenuOpen((v) => !v)}
+                            >
+                              {selected ? (
+                                <>
+                                  <span className="group-settings-role-dot" style={{ backgroundColor: selected.color }} />
+                                  <span className="group-default-role-current">{selected.name}</span>
+                                </>
+                              ) : (
+                                <span className="group-default-role-current muted-line">{t(language, 'defaultRoleNone')}</span>
+                              )}
+                              <span className="group-default-role-caret">▾</span>
+                            </button>
+                            {defaultRoleMenuOpen ? (
+                              <div className="group-default-role-menu">
+                                <button
+                                  type="button"
+                                  className={'group-default-role-option' + (defaultRoleId === null ? ' active' : '')}
+                                  onClick={() => void handleSetDefaultRole(null)}
+                                >
+                                  <span className="group-default-role-current muted-line">{t(language, 'defaultRoleNone')}</span>
+                                </button>
+                                {assignable.map((role) => (
+                                  <button
+                                    key={role.id}
+                                    type="button"
+                                    className={'group-default-role-option' + (defaultRoleId === role.id ? ' active' : '')}
+                                    onClick={() => void handleSetDefaultRole(role.id)}
+                                  >
+                                    <span className="group-settings-role-dot" style={{ backgroundColor: role.color }} />
+                                    <span>{role.name}</span>
+                                  </button>
+                                ))}
+                              </div>
+                            ) : null}
+                          </div>
+                        </div>
+                      );
+                    })()}
                     <div className="group-roles-toolbar">
                       <input
                         type="search"
@@ -1738,9 +2127,13 @@ export function GroupChatView({ token, language, currentUser, group, onlineUserI
                                   <span className="group-roles-row-count">{memberCount} {t(language, 'members')}</span>
                                   {!role.isOwner ? (
                                     <>
-                                      <button type="button" className="group-roles-icon-btn" title={t(language, 'editRole')} onClick={() => openRoleEditor(role)}>✏</button>
+                                      <Tooltip label={t(language, 'editRole')}>
+                                        <button type="button" className="group-roles-icon-btn" onClick={() => openRoleEditor(role)}>✏</button>
+                                      </Tooltip>
                                       <div className="group-roles-menu-wrap">
-                                        <button type="button" className="group-roles-icon-btn" title="" onClick={() => setRoleMenuOpen((cur) => (cur === role.id ? null : role.id))}>⋯</button>
+                                        <Tooltip label={t(language, 'roleOptions')}>
+                                          <button type="button" className="group-roles-icon-btn" onClick={() => setRoleMenuOpen((cur) => (cur === role.id ? null : role.id))}>⋯</button>
+                                        </Tooltip>
                                         {roleMenuOpen === role.id ? (
                                           <div className="group-roles-menu">
                                             <button type="button" className="group-roles-menu-item danger" onClick={() => void handleDeleteRole(role.id)}>{t(language, 'deleteRole')}</button>
@@ -1802,15 +2195,26 @@ export function GroupChatView({ token, language, currentUser, group, onlineUserI
                                 {t(language, perm as any) || perm}
                               </label>
                             ))}
-                            <label className="group-role-permission-item group-role-hoist" title={t(language, 'roleDisplayHint')}>
-                              <input type="checkbox" checked={draftHoist} onChange={(e) => setDraftHoist(e.target.checked)} />
-                              {t(language, 'roleDisplaySeparately')}
-                            </label>
-                            <button type="button" className="primary-action group-settings-add-role" onClick={() => void handleSaveRolePermissions(role.id)}>{t(language, 'save')}</button>
+                            <Tooltip as="div" label={t(language, 'roleDisplayHint')}>
+                              <label className="group-role-permission-item group-role-hoist">
+                                <input type="checkbox" checked={draftHoist} onChange={(e) => setDraftHoist(e.target.checked)} />
+                                {t(language, 'roleDisplaySeparately')}
+                              </label>
+                            </Tooltip>
                           </>
                         );
                       })()}
                     </div>
+
+                    {/* Slide-up save/reset bar: appears with animation when the
+                        role editor has unsaved changes. */}
+                    <SaveBar
+                      language={language}
+                      dirty={roleEditorDirty}
+                      shakeKey={saveBarShake}
+                      onReset={resetRoleDrafts}
+                      onSave={() => roleEditorId && void handleSaveRolePermissions(roleEditorId)}
+                    />
                   </div>
                 )
               ) : null}
@@ -1840,7 +2244,9 @@ export function GroupChatView({ token, language, currentUser, group, onlineUserI
                             ))}
                           </select>
                           {canKickMembers && member.user.id !== currentUser.id ? (
-                            <button type="button" className="group-settings-member-kick" onClick={() => void handleRemoveMember(member.user.id)}>✕</button>
+                            <Tooltip label={t(language, 'kickMember')}>
+                              <button type="button" className="group-settings-member-kick" onClick={() => void handleRemoveMember(member.user.id)}>✕</button>
+                            </Tooltip>
                           ) : null}
                         </div>
                       );
@@ -1849,17 +2255,36 @@ export function GroupChatView({ token, language, currentUser, group, onlineUserI
                 </div>
               ) : null}
 
+              {settingsTab === 'customization' && canManageRoles ? (
+                <CustomizationConstructor
+                  token={token}
+                  language={language}
+                  groupId={group.id}
+                  categories={customCategories}
+                  channels={channels}
+                  onCategoriesChange={setCustomCategories}
+                />
+              ) : null}
+
               {settingsError ? <div className="inline-error">{settingsError}</div> : null}
-              <div className="group-settings-actions">
-                {isOwner ? (
-                  <button type="button" className="primary-action" onClick={() => void handleSaveSettings()}>{t(language, 'save')}</button>
-                ) : null}
-                {!isOwner ? (
+              {!isOwner ? (
+                <div className="group-settings-actions">
                   <button type="button" className="secondary-action" onClick={() => void handleLeaveGroup()}>{t(language, 'leaveGroup')}</button>
-                ) : null}
-                <button type="button" className="secondary-action" onClick={() => setShowSettings(false)}>{t(language, 'close')}</button>
-              </div>
+                </div>
+              ) : null}
             </div>
+
+            {/* Overview save bar (owner-only). The roles editor renders its own
+                save bar inside the roles tab. */}
+            {isOwner && settingsTab === 'overview' ? (
+              <SaveBar
+                language={language}
+                dirty={overviewDirty}
+                shakeKey={saveBarShake}
+                onReset={resetOverviewDrafts}
+                onSave={() => void handleSaveSettings()}
+              />
+            ) : null}
           </div>
 
           {confirmDeleteGroup ? createPortal(
@@ -1921,8 +2346,9 @@ export function GroupChatView({ token, language, currentUser, group, onlineUserI
         const channel = editTarget.kind === 'channel' ? channels.find((c) => c.id === editTarget.id) : null;
         const isVoice = channel?.type === 'voice';
         return (
-          <div className="messenger-inline-modal" onClick={() => setEditTarget(null)}>
-            <div className="group-channel-modal" onClick={(e) => e.stopPropagation()}>
+          <div className="messenger-inline-modal" onClick={requestCloseEditTarget}>
+            <div className="group-channel-modal has-save-bar" onClick={(e) => e.stopPropagation()}>
+              <button type="button" className="group-settings-close" aria-label={t(language, 'close')} onClick={requestCloseEditTarget}>✕</button>
               <h3>{t(language, editTarget.kind === 'folder' ? 'folderSettings' : 'channelSettings')}</h3>
               <label>{t(language, editTarget.kind === 'folder' ? 'renameFolder' : 'renameChannel')}</label>
               <input type="text" className="messenger-input" value={editNameDraft}
@@ -1938,10 +2364,13 @@ export function GroupChatView({ token, language, currentUser, group, onlineUserI
                     onKeyDown={(e) => { if (e.key === 'Enter') void saveEditTarget(); }} />
                 </>
               ) : null}
-              <div className="group-channel-modal-actions">
-                <button type="button" className="primary-action" onClick={() => void saveEditTarget()}>{t(language, 'save')}</button>
-                <button type="button" className="secondary-action" onClick={() => setEditTarget(null)}>{t(language, 'close')}</button>
-              </div>
+              <SaveBar
+                language={language}
+                dirty={isEditTargetDirty()}
+                shakeKey={editBarShake}
+                onReset={resetEditTarget}
+                onSave={() => void saveEditTarget()}
+              />
             </div>
           </div>
         );
@@ -2031,6 +2460,19 @@ export function GroupChatView({ token, language, currentUser, group, onlineUserI
           </figure>
           <button type="button" className="chat-image-viewer-close" aria-label={t(language, 'close')} onClick={() => { setImageViewer(null); setImageZoom(1); setImageZoomOrigin({ x: 50, y: 50 }); }} />
         </div>
+      ) : null}
+
+      {customizeOpen ? (
+        <CustomizationModal
+          language={language}
+          group={group}
+          categories={customCategories}
+          selectedOptionIds={selectedOptionIds}
+          onboardingRequired={onboardingRequired}
+          onToggle={handleToggleOption}
+          onComplete={handleCompleteOnboarding}
+          onClose={() => setCustomizeOpen(false)}
+        />
       ) : null}
     </div>
   );

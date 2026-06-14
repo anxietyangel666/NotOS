@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent } from 'react';
 import { createPortal } from 'react-dom';
-import { io, type Socket } from 'socket.io-client';
-import { API_URL, api } from '../api/client';
+import type { Socket } from 'socket.io-client';
+import { api } from '../api/client';
+import { cacheUser, getOrFetchUser } from '../api/user-cache';
+import { useSocket } from '../hooks/use-socket';
 import type { DesktopIconSize, DesktopSort, Language, MessengerMessage, NameStyle, NamePlate, PinnedCard, PublicUser, StoragePayload, Theme } from '../api/types';
 import { DEFAULT_NAMEPLATE, nameplateToCss } from '../api/types';
 import type { StorageItem } from '../api/types';
@@ -18,6 +20,7 @@ import { callMessageLabel, formatCallDuration } from '../utils/call-messages';
 import { MusicPlayerWindow } from './MusicPlayerWindow';
 import { PlayPauseIcon, PrevTrackIcon, NextTrackIcon, VolumeIcon } from './PlayerIcons';
 import { ProfileModal } from './ProfileModal';
+import { SaveBar } from './SaveBar';
 import { NameStyleModal } from './NameStyleModal';
 import { UserBadges } from './UserBadges';
 import { UserName } from './UserName';
@@ -265,6 +268,20 @@ function notificationMessage(message: Pick<MessengerMessage, 'body' | 'imageData
   return message.body || (message.imageData ? t(language, 'imageMessage') : '');
 }
 
+// Field-by-field nameplate comparison — avoids JSON.stringify on every render.
+function nameplateIsDirty(
+  draft: NonNullable<NamePlate>,
+  saved: NonNullable<NamePlate>
+): boolean {
+  return (
+    draft.type !== saved.type ||
+    draft.color !== saved.color ||
+    draft.gradientFrom !== saved.gradientFrom ||
+    draft.gradientTo !== saved.gradientTo ||
+    draft.image !== saved.image
+  );
+}
+
 export function Desktop({ token, user, language, notice, onNoticeClose, onUserChange, onLogout }: DesktopProps) {
   const desktopRef = useRef<HTMLElement | null>(null);
   const [contextMenu, setContextMenu] = useState<DesktopContextMenu | null>(null);
@@ -322,7 +339,10 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
   const [pinnedCards, setPinnedCards] = useState<PinnedCard[]>(() => (Array.isArray(user.pinnedCards) ? user.pinnedCards : []));
   const [desktopWatcherCount, setDesktopWatcherCount] = useState(0);
   const [viewerCursors, setViewerCursors] = useState<Record<string, { nickname: string; x: number; y: number }>>({});
+  // Use the shared socket from SocketProvider instead of creating a new one.
+  const sharedSocket = useSocket();
   const socketRef = useRef<Socket | null>(null);
+  socketRef.current = sharedSocket;
   const pinnedCardsRef = useRef<PinnedCard[]>(Array.isArray(user.pinnedCards) ? user.pinnedCards : []);
   const pinnedBroadcastRef = useRef(0);
 
@@ -341,6 +361,14 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
   const [dragDelta, setDragDelta] = useState({ x: 0, y: 0 });
   const [settingsError, setSettingsError] = useState('');
   const [saving, setSaving] = useState(false);
+  // Bumped to shake the settings save bar when the user tries to close the
+  // window while there are unsaved changes.
+  const [settingsBarShake, setSettingsBarShake] = useState(0);
+  // Tracks unsaved changes inside the self-contained Voice settings tab.
+  const voiceDirtyRef = useRef(false);
+  const handleVoiceDirtyChange = useCallback((dirty: boolean) => {
+    voiceDirtyRef.current = dirty;
+  }, []);
   const [confirmLogout, setConfirmLogout] = useState(false);
   const [settingsSearch, setSettingsSearch] = useState('');
   const [legalContent, setLegalContent] = useState<'privacy' | 'terms' | null>(null);
@@ -410,18 +438,23 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
     localStorage.setItem(RECENT_WALLPAPERS_KEY, JSON.stringify(recentWallpapers));
   }, [recentWallpapers]);
 
+  // Debounced: write to localStorage at most once per 300 ms instead of on
+  // every individual window maximize/restore event.
   useEffect(() => {
-    saveWindowMaximized({
-      settings: settingsMaximized,
-      explorer: storageMaximized,
-      messenger: messengerMaximized,
-      'remote-desktop': remoteDesktopMaximized,
-      notepad: notepadMaximized,
-      'music-player': musicPlayerMaximized,
-      'image-viewer': imageViewerMaximized,
-      'ai-chat': aiChatMaximized,
-      'video-viewer': videoViewerMaximized
-    });
+    const timer = window.setTimeout(() => {
+      saveWindowMaximized({
+        settings: settingsMaximized,
+        explorer: storageMaximized,
+        messenger: messengerMaximized,
+        'remote-desktop': remoteDesktopMaximized,
+        notepad: notepadMaximized,
+        'music-player': musicPlayerMaximized,
+        'image-viewer': imageViewerMaximized,
+        'ai-chat': aiChatMaximized,
+        'video-viewer': videoViewerMaximized
+      });
+    }, 300);
+    return () => window.clearTimeout(timer);
   }, [settingsMaximized, storageMaximized, messengerMaximized, remoteDesktopMaximized, notepadMaximized, musicPlayerMaximized, imageViewerMaximized, aiChatMaximized, videoViewerMaximized]);
 
   useEffect(() => {
@@ -476,6 +509,26 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
   const imageViewerItem = useMemo(() => storageItems.find((item) => item.id === imageViewerItemId) ?? null, [imageViewerItemId, storageItems]);
   const videoViewerItem = useMemo(() => storageItems.find((item) => item.id === videoViewerItemId) ?? null, [videoViewerItemId, storageItems]);
 
+  // Restore every settings draft to the persisted user values. Used both when
+  // `user` changes and when the user clicks "Reset" in the save bar.
+  function resetSettingsDrafts() {
+    setNicknameDraft(user.nickname);
+    setNameStyleDraft(user.nameStyle ?? null);
+    setProfilePrimaryDraft(user.profilePrimaryColor || '#2AABEE');
+    setProfileAccentDraft(user.profileAccentColor || '#5865F2');
+    setNameplateDraft(user.nameplate ?? DEFAULT_NAMEPLATE);
+    setStatusDraft(user.status ?? '');
+    setAvatarDraft(user.avatarData);
+    setWallpaperDraft(user.wallpaper);
+    setLanguageDraft(user.language);
+    setThemeDraft(user.theme);
+    setAccentColorDraft(user.accentColor);
+    setTransparencyDraft(user.transparencyEnabled);
+    setIconSizeDraft(user.desktopIconSize);
+    setHideIconsDraft(user.hideDesktopIcons);
+    setTimeFormat(getSavedTimeFormat());
+  }
+
   useEffect(() => {
     setNicknameDraft(user.nickname);
     setNameStyleDraft(user.nameStyle ?? null);
@@ -493,6 +546,42 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
     setPinnedCards(Array.isArray(user.pinnedCards) ? user.pinnedCards : []);
     setIconPositions(normalizeIconPositions(user.desktopIcons));
   }, [user.accentColor, user.avatarData, user.desktopIconSize, user.desktopIcons, user.hideDesktopIcons, user.language, user.nickname, user.nameStyle, user.pinnedCards, user.profilePrimaryColor, user.profileAccentColor, user.theme, user.transparencyEnabled, user.wallpaper]);
+
+  // True when any settings draft differs from the persisted user values.
+  const settingsDirty = useMemo(() => {
+    return (
+      nicknameDraft.trim() !== user.nickname ||
+      statusDraft.trim() !== (user.status ?? '').trim() ||
+      avatarDraft !== user.avatarData ||
+      wallpaperDraft !== user.wallpaper ||
+      languageDraft !== user.language ||
+      themeDraft !== user.theme ||
+      accentColorDraft !== user.accentColor ||
+      transparencyDraft !== user.transparencyEnabled ||
+      iconSizeDraft !== user.desktopIconSize ||
+      hideIconsDraft !== user.hideDesktopIcons ||
+      (nameStyleDraft ?? null) !== (user.nameStyle ?? null) ||
+      profilePrimaryDraft !== (user.profilePrimaryColor || '#2AABEE') ||
+      profileAccentDraft !== (user.profileAccentColor || '#5865F2') ||
+      // Compare nameplate field-by-field to avoid JSON.stringify on every render.
+      nameplateIsDirty(nameplateDraft, user.nameplate ?? DEFAULT_NAMEPLATE) ||
+      timeFormat !== getSavedTimeFormat()
+    );
+  }, [nicknameDraft, statusDraft, avatarDraft, wallpaperDraft, languageDraft, themeDraft, accentColorDraft, transparencyDraft, iconSizeDraft, hideIconsDraft, nameStyleDraft, profilePrimaryDraft, profileAccentDraft, nameplateDraft, timeFormat, user]);
+
+  // Close the settings window, shaking the relevant save bar if there are
+  // unsaved edits (either the main settings draft or the Voice tab).
+  function requestCloseSettingsWindow() {
+    if (activeTab === 'voice' && voiceDirtyRef.current) {
+      window.dispatchEvent(new CustomEvent('notoc:voiceSettingsShake'));
+      return;
+    }
+    if (settingsDirty) {
+      setSettingsBarShake((n) => n + 1);
+      return;
+    }
+    setSettingsWindow('closed');
+  }
 
   useEffect(() => {
     let alive = true;
@@ -591,29 +680,29 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
     window.setTimeout(() => setNotifications((current) => current.filter((item) => item.id !== id)), 5200);
   }
 
+  // Register socket event listeners on the shared socket from SocketProvider.
+  // No longer creates its own io() connection — that is handled by SocketProvider.
   useEffect(() => {
-    const socket = io(API_URL, {
-      auth: { token }
-    });
-    socketRef.current = socket;
+    const socket = sharedSocket;
+    if (!socket) return;
 
-    socket.on('system:ready', () => {
-      socket.emit('desktop:screen', { width: window.innerWidth, height: window.innerHeight });
+    function onReady() {
+      socket!.emit('desktop:screen', { width: window.innerWidth, height: window.innerHeight });
       const cards = pinnedCardsRef.current;
       if (!cards.length) return;
       broadcastPinnedCards(cards.map(currentCardPlacement), true);
-    });
+    }
 
-    socket.on('desktop:watchers', (payload: { ownerId: string; count: number }) => {
+    function onWatchers(payload: { ownerId: string; count: number }) {
       if (payload.ownerId === user.id) setDesktopWatcherCount(payload.count);
-    });
+    }
 
-    socket.on('desktop:cursor', (payload: { ownerId: string; userId: string; nickname: string; x: number; y: number }) => {
+    function onCursor(payload: { ownerId: string; userId: string; nickname: string; x: number; y: number }) {
       if (payload.ownerId !== user.id || payload.userId === user.id) return;
       setViewerCursors((current) => ({ ...current, [payload.userId]: { nickname: payload.nickname, x: payload.x, y: payload.y } }));
-    });
+    }
 
-    socket.on('desktop:cursorLeave', (payload: { ownerId: string; userId: string }) => {
+    function onCursorLeave(payload: { ownerId: string; userId: string }) {
       if (payload.ownerId !== user.id) return;
       setViewerCursors((current) => {
         if (!(payload.userId in current)) return current;
@@ -621,50 +710,53 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
         delete next[payload.userId];
         return next;
       });
-    });
+    }
 
-    socket.on('desktop:settingsChanged', (payload: { user: PublicUser }) => {
+    function onSettingsChanged(payload: { user: PublicUser }) {
+      cacheUser(payload.user);
       onUserChange(payload.user);
       setPinnedCards(Array.isArray(payload.user.pinnedCards) ? payload.user.pinnedCards : []);
-    });
+    }
 
-    socket.on('desktop:userChanged', (payload: { user: PublicUser }) => {
+    function onUserChanged(payload: { user: PublicUser }) {
+      cacheUser(payload.user);
       setRemoteDesktopUser((current) => (current?.id === payload.user.id ? payload.user : current));
-    });
+    }
 
-    socket.on('storage:changed', (payload: StoragePayload) => {
+    function onStorageChanged(payload: StoragePayload) {
       const items = ensureDesktopFolder(payload.items);
       setStorageItems(items);
       setStorageAudioFiles(items.filter(isAudioStorageItem));
-    });
+    }
 
-    socket.on('messenger:message', (payload: { message: MessengerMessage }) => {
+    function onMessengerMessage(payload: { message: MessengerMessage }) {
       if (payload.message.senderId === user.id) return;
       if (messengerWindow === 'open' && activeChatUserId === payload.message.senderId) return;
-      void api.getPublicUser(token, payload.message.senderId).then((result) => {
+      void getOrFetchUser(payload.message.senderId, (id) =>
+        api.getPublicUser(token, id).then((r) => r.user)
+      ).then((sender) => {
         const callLabel = callMessageLabel(payload.message, user.id, language);
         pushNotification({
           title: t(language, 'newMessage'),
-          message: `${result.user.nickname}: ${callLabel ? `\u{1F4DE} ${callLabel}` : notificationMessage(payload.message, language)}`,
-          avatarData: result.user.avatarData,
+          message: `${sender.nickname}: ${callLabel ? `\u{1F4DE} ${callLabel}` : notificationMessage(payload.message, language)}`,
+          avatarData: sender.avatarData,
           onOpen: () => openMessengerChat(payload.message.senderId)
         });
       });
-    });
+    }
 
-    socket.on('presence:snapshot', (payload: { onlineUserIds: string[] }) => {
+    function onPresenceSnapshot(payload: { onlineUserIds: string[] }) {
       setOnlineUserIds(payload.onlineUserIds);
-    });
+    }
 
-    // Desktop-level incoming call badge. The messenger's call hook drives the
-    // actual WebRTC; this toast just surfaces the call and opens the chat.
-    socket.on('call:incoming', (payload: { callId: string; callerId: string; callerNickname: string }) => {
-      void api.getPublicUser(token, payload.callerId).then((result) => {
-        // The call may have been accepted/cancelled while the user fetch was in flight.
+    function onCallIncoming(payload: { callId: string; callerId: string; callerNickname: string }) {
+      void getOrFetchUser(payload.callerId, (id) =>
+        api.getPublicUser(token, id).then((r) => r.user)
+      ).then((caller) => {
         if (dismissedCallsRef.current.has(payload.callId)) return;
-        setIncomingCallToast({ callId: payload.callId, caller: result.user });
+        setIncomingCallToast({ callId: payload.callId, caller });
       }).catch(() => undefined);
-    });
+    }
 
     const dismissCallToast = (payload?: { callId?: string }) => {
       if (payload?.callId) {
@@ -673,26 +765,51 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
       }
       setIncomingCallToast((current) => {
         if (!current) return null;
-        // Only dismiss the toast of the affected call, keep others intact.
         if (payload?.callId && current.callId !== payload.callId) return current;
         return null;
       });
     };
-    socket.on('call:ended', dismissCallToast);
-    socket.on('call:accepted', dismissCallToast);
 
-    socket.on('presence:changed', (payload: { userId: string; online: boolean }) => {
+    function onPresenceChanged(payload: { userId: string; online: boolean }) {
       setOnlineUserIds((current) => {
         if (payload.online) return current.includes(payload.userId) ? current : [...current, payload.userId];
         return current.filter((userId) => userId !== payload.userId);
       });
-    });
+    }
+
+    socket.on('system:ready', onReady);
+    socket.on('desktop:watchers', onWatchers);
+    socket.on('desktop:cursor', onCursor);
+    socket.on('desktop:cursorLeave', onCursorLeave);
+    socket.on('desktop:settingsChanged', onSettingsChanged);
+    socket.on('desktop:userChanged', onUserChanged);
+    socket.on('storage:changed', onStorageChanged);
+    socket.on('messenger:message', onMessengerMessage);
+    socket.on('presence:snapshot', onPresenceSnapshot);
+    socket.on('call:incoming', onCallIncoming);
+    socket.on('call:ended', dismissCallToast);
+    socket.on('call:accepted', dismissCallToast);
+    socket.on('presence:changed', onPresenceChanged);
+
+    // Emit screen size immediately in case 'system:ready' already fired.
+    socket.emit('desktop:screen', { width: window.innerWidth, height: window.innerHeight });
 
     return () => {
-      socketRef.current = null;
-      socket.disconnect();
+      socket.off('system:ready', onReady);
+      socket.off('desktop:watchers', onWatchers);
+      socket.off('desktop:cursor', onCursor);
+      socket.off('desktop:cursorLeave', onCursorLeave);
+      socket.off('desktop:settingsChanged', onSettingsChanged);
+      socket.off('desktop:userChanged', onUserChanged);
+      socket.off('storage:changed', onStorageChanged);
+      socket.off('messenger:message', onMessengerMessage);
+      socket.off('presence:snapshot', onPresenceSnapshot);
+      socket.off('call:incoming', onCallIncoming);
+      socket.off('call:ended', dismissCallToast);
+      socket.off('call:accepted', dismissCallToast);
+      socket.off('presence:changed', onPresenceChanged);
     };
-  }, [activeChatUserId, language, messengerWindow, onUserChange, token, user.id]);
+  }, [activeChatUserId, language, messengerWindow, onUserChange, sharedSocket, token, user.id]);
 
   useEffect(() => {
     if (desktopWatcherCount <= 0) return;
@@ -1747,7 +1864,7 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
           defaultPosition={{ x: Math.max(32, window.innerWidth / 2 - 380), y: 64 }}
           storageKey="settings"
           onFocus={() => bringToFront('settings')}
-          onClose={() => setSettingsWindow('closed')}
+          onClose={requestCloseSettingsWindow}
           onMinimize={() => setSettingsWindow('minimized')}
           onToggleMaximize={() => setSettingsMaximized((value) => !value)}
         >
@@ -2283,7 +2400,7 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
                 ) : null}
 
                 {activeTab === 'voice' ? (
-                  <VoiceSettings language={language} />
+                  <VoiceSettings language={language} onDirtyChange={handleVoiceDirtyChange} />
                 ) : null}
 
                 {activeTab === 'security' ? (
@@ -2347,9 +2464,14 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
             </div>
 
             {activeTab !== 'premium' && activeTab !== 'security' ? (
-              <button className="primary-action save-bottom-btn" type="button" disabled={saving} onClick={() => void saveSettings()}>
-                {saving ? t(language, 'saving') : t(language, 'save')}
-              </button>
+              <SaveBar
+                language={language}
+                dirty={settingsDirty}
+                shakeKey={settingsBarShake}
+                saving={saving}
+                onReset={resetSettingsDrafts}
+                onSave={() => void saveSettings()}
+              />
             ) : null}
 
             {settingsError ? <div className="inline-error settings-error">{settingsError}</div> : null}
