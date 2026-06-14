@@ -152,6 +152,7 @@ export type Group = {
   ownerId: string;
   inviteCode: string;
   nameplate: NamePlate | null;
+  description: string;
   createdAt: string;
 };
 

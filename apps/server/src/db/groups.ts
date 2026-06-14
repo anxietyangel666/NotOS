@@ -9,6 +9,7 @@ export type GroupRecord = {
   owner_id: string;
   invite_code: string;
   nameplate: NamePlate | null;
+  description: string;
   created_at: Date;
 };
 
@@ -73,6 +74,7 @@ export type PublicGroup = {
   ownerId: string;
   inviteCode: string;
   nameplate: NamePlate | null;
+  description: string;
   createdAt: string;
 };
 
@@ -134,6 +136,7 @@ export function toPublicGroup(group: GroupRecord): PublicGroup {
     ownerId: group.owner_id,
     inviteCode: group.invite_code,
     nameplate: group.nameplate ?? null,
+    description: group.description ?? '',
     createdAt: group.created_at.toISOString()
   };
 }
@@ -244,7 +247,7 @@ export async function getGroupById(groupId: string) {
 export async function updateGroup(
   groupId: string,
   userId: string,
-  updates: { name?: string; avatarData?: string; nameplate?: NamePlate | null }
+  updates: { name?: string; avatarData?: string; nameplate?: NamePlate | null; description?: string }
 ) {
   const member = await pool.query(
     "SELECT gm.role_id, COALESCE(gr.is_owner, FALSE) AS is_owner FROM group_members gm LEFT JOIN group_roles gr ON gr.id = gm.role_id WHERE gm.group_id = $1 AND gm.user_id = $2",
@@ -263,6 +266,10 @@ export async function updateGroup(
   if (updates.avatarData !== undefined) {
     setClauses.push(`avatar_data = $${paramIdx++}`);
     values.push(updates.avatarData);
+  }
+  if (updates.description !== undefined) {
+    setClauses.push(`description = $${paramIdx++}`);
+    values.push(updates.description);
   }
   // `nameplate` accepts an explicit null to clear the saved plate.
   if (Object.prototype.hasOwnProperty.call(updates, 'nameplate')) {

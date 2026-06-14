@@ -71,6 +71,9 @@ export function InviteEmbed({ token, language, inviteCode, currentUserId, member
           <span className="group-embed-meta">{preview.memberCount} {t(language, 'members')}</span>
         </div>
       </div>
+      {preview.group.description ? (
+        <p className="group-embed-description">{preview.group.description}</p>
+      ) : null}
       <div className="group-embed-actions">
         {isMember ? (
           <button className="primary-action" type="button" onClick={handleNavigate}>

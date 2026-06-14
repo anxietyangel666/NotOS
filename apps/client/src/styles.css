@@ -4915,6 +4915,45 @@ div.settings-music-row {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.group-embed-description {
+  margin: 0;
+  padding: 4px 18px 0;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+.group-settings-overview-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 24px;
+  align-items: start;
+}
+.group-settings-overview-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.group-settings-overview-preview {
+  position: sticky;
+  top: 0;
+}
+.group-settings-overview-preview h3 {
+  margin: 0 0 12px;
+}
+.group-embed-preview {
+  max-width: 320px;
+}
+@media (max-width: 880px) {
+  .group-settings-overview-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .group-settings-overview-preview {
+    position: static;
+  }
+}
 .group-embed-actions {
   display: flex;
   align-items: center;

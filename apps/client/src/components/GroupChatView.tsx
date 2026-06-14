@@ -259,6 +259,7 @@ export function GroupChatView({ token, language, currentUser, group, onlineUserI
   };
   const [inviteCode, setInviteCode] = useState(group.inviteCode);
   const [newName, setNewName] = useState(group.name);
+  const [newDescription, setNewDescription] = useState(group.description ?? '');
   const [copied, setCopied] = useState(false);
   const [newAvatar, setNewAvatar] = useState<string | null>(null);
   const [nameplateDraft, setNameplateDraft] = useState<NonNullable<NamePlate>>(group.nameplate ?? DEFAULT_NAMEPLATE);
@@ -316,9 +317,10 @@ export function GroupChatView({ token, language, currentUser, group, onlineUserI
 
   useEffect(() => {
     setNewName(group.name);
+    setNewDescription(group.description ?? '');
     setInviteCode(group.inviteCode);
     setNameplateDraft(group.nameplate ?? DEFAULT_NAMEPLATE);
-  }, [group.id, group.name, group.inviteCode, group.nameplate]);
+  }, [group.id, group.name, group.inviteCode, group.nameplate, group.description]);
 
   // Load initial data
   useEffect(() => {
@@ -669,9 +671,10 @@ export function GroupChatView({ token, language, currentUser, group, onlineUserI
   }
 
   async function handleSaveSettings() {
-    const updates: { name?: string; avatarData?: string; nameplate?: NamePlate } = {};
+    const updates: { name?: string; avatarData?: string; nameplate?: NamePlate; description?: string } = {};
     if (newName.trim() && newName.trim() !== group.name) updates.name = newName.trim();
     if (newAvatar !== null) updates.avatarData = newAvatar;
+    if (newDescription.trim() !== (group.description ?? '').trim()) updates.description = newDescription.trim();
     // Always send the nameplate so changes (including clearing to "none") persist.
     updates.nameplate = nameplateDraft;
     try {
@@ -1519,7 +1522,8 @@ export function GroupChatView({ token, language, currentUser, group, onlineUserI
             </div>
             <div className="group-settings-content">
               {settingsTab === 'overview' ? (
-                <>
+                <div className="group-settings-overview-grid">
+                 <div className="group-settings-overview-main">
                   <div className="group-settings-section">
                     <h3>{t(language, 'overview')}</h3>
                     <div className="group-settings-avatar-row">
@@ -1535,6 +1539,17 @@ export function GroupChatView({ token, language, currentUser, group, onlineUserI
                     </div>
                     <label>{t(language, 'groupName')}</label>
                     <input type="text" className="messenger-input" value={newName} onChange={(e) => setNewName(e.target.value)} />
+                    <label style={{ marginTop: 12 }}>{t(language, 'groupDescription')}</label>
+                    <textarea
+                      className="messenger-input"
+                      rows={3}
+                      maxLength={200}
+                      value={newDescription}
+                      readOnly={!isOwner}
+                      placeholder={t(language, 'groupDescriptionHint')}
+                      onChange={(e) => setNewDescription(e.target.value.slice(0, 200))}
+                    />
+                    <small className="muted-line" style={{ alignSelf: 'flex-end' }}>{newDescription.length}/200</small>
                   </div>
                   <div className="group-settings-section">
                     <h3>{t(language, 'nameplate')}</h3>
@@ -1594,7 +1609,39 @@ export function GroupChatView({ token, language, currentUser, group, onlineUserI
                       ) : null}
                     </div>
                   </div>
-                </>
+                 </div>
+                 <div className="group-settings-overview-preview">
+                   <h3>{t(language, 'embedPreview')}</h3>
+                   <div className="group-embed group-embed-preview">
+                     <div
+                       className="group-embed-banner"
+                       style={{ background: nameplateToCss(nameplateDraft) ?? 'linear-gradient(135deg, var(--blue) 0%, color-mix(in srgb, var(--blue) 55%, #000) 100%)', backgroundSize: 'cover', backgroundPosition: 'center' }}
+                     />
+                     <div className="group-embed-head">
+                       <div className="group-embed-avatar-wrap">
+                         <img
+                           className="group-embed-avatar"
+                           src={(newAvatar ?? group.avatarData) || `data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" fill="%23444" rx="20"/><text x="50" y="58" text-anchor="middle" fill="%23fff" font-size="28" font-family="sans-serif">${((newName || group.name)[0] || '?').toUpperCase()}</text></svg>`}
+                           alt=""
+                         />
+                       </div>
+                       <div className="group-embed-info">
+                         <span className="group-embed-eyebrow">{t(language, 'groupInvite')}</span>
+                         <strong className="group-embed-name">{newName || group.name}</strong>
+                         <span className="group-embed-meta">{members.length} {t(language, 'members')}</span>
+                       </div>
+                     </div>
+                     {newDescription.trim() ? (
+                       <p className="group-embed-description">{newDescription}</p>
+                     ) : (
+                       <p className="group-embed-description muted-line">{t(language, 'groupDescriptionEmpty')}</p>
+                     )}
+                     <div className="group-embed-actions">
+                       <button className="primary-action" type="button" disabled>{t(language, 'openChat')}</button>
+                     </div>
+                   </div>
+                 </div>
+                </div>
               ) : null}
 
               {settingsTab === 'invite' ? (

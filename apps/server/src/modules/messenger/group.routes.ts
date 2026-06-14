@@ -51,6 +51,7 @@ const createGroupSchema = z.object({
 const updateGroupSchema = z.object({
   name: z.string().trim().min(1).max(100).optional(),
   avatarData: z.string().max(1_000_000).optional(),
+  description: z.string().trim().max(200).optional(),
   nameplate: z
     .object({
       type: z.enum(['none', 'color', 'gradient', 'image']),

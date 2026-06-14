@@ -174,6 +174,11 @@ export async function migrate() {
     ALTER TABLE groups
       ADD COLUMN IF NOT EXISTS nameplate JSONB;
 
+    -- Optional short group description (max 200 chars, enforced in the API)
+    -- shown in the group invite embed and editable from group settings.
+    ALTER TABLE groups
+      ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT '';
+
     CREATE INDEX IF NOT EXISTS groups_owner_idx
       ON groups (owner_id);
 

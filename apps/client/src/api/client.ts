@@ -237,7 +237,7 @@ export const api = {
   getGroup(token: string, groupId: string) {
     return request<{ group: Group }>(`/api/messenger/groups/${encodeURIComponent(groupId)}`, { token });
   },
-  updateGroup(token: string, groupId: string, input: { name?: string; avatarData?: string; nameplate?: NamePlate | null }) {
+  updateGroup(token: string, groupId: string, input: { name?: string; avatarData?: string; nameplate?: NamePlate | null; description?: string }) {
     return request<{ group: Group }>(`/api/messenger/groups/${encodeURIComponent(groupId)}`, {
       method: 'PATCH', token, body: input
     });
