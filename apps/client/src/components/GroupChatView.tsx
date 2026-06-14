@@ -1611,7 +1611,6 @@ export function GroupChatView({ token, language, currentUser, group, onlineUserI
                   </div>
                  </div>
                  <div className="group-settings-overview-preview">
-                   <h3>{t(language, 'embedPreview')}</h3>
                    <div className="group-embed group-embed-preview">
                      <div
                        className="group-embed-banner"

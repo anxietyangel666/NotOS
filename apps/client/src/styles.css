@@ -4934,6 +4934,7 @@ div.settings-music-row {
 .group-settings-overview-main {
   display: flex;
   flex-direction: column;
+  gap: 26px;
   min-width: 0;
 }
 .group-settings-overview-preview {
@@ -9644,7 +9645,10 @@ div.settings-music-row {
   display: flex;
   gap: 8px;
   justify-content: flex-end;
-  margin-top: 8px;
+  /* Push the Save / Close buttons to the very bottom of the settings panel
+     regardless of how short the active tab's content is. */
+  margin-top: auto;
+  padding-top: 8px;
 }
 
 .group-settings-actions .primary-action,
