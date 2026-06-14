@@ -560,7 +560,22 @@ export function useVoiceRoom({ socket, currentUser }: UseVoiceRoomArgs) {
 
   // Ask the server for the current occupancy of all voice channels in a group.
   // Used when opening a group so participants/badges show before you join.
+  //
+  // We first drop the cached participant lists for every channel except the one
+  // we are actively connected to. Without this, switching from group A to group
+  // B briefly shows A's voice rooms (and their members) in B's channel list
+  // until the server's fresh snapshot arrives ~1-2s later. Clearing up front
+  // makes the stale rooms disappear immediately; the server response then
+  // repopulates only the rooms that are actually occupied in the new group.
   const requestGroupRooms = useCallback((groupId: string) => {
+    const active = channelRef.current;
+    const next = new Map<string, VoiceParticipant[]>();
+    if (active) {
+      const current = channelParticipantsRef.current.get(active);
+      if (current) next.set(active, current);
+    }
+    channelParticipantsRef.current = next;
+    setChannelParticipants(new Map(next));
     socketRef.current?.emit('voice:requestRooms', { groupId });
   }, []);
 

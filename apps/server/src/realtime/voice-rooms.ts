@@ -30,8 +30,41 @@ const rooms = new Map<string, Map<string, Participant>>();
 const roomChats = new Map<string, EphemeralMessage[]>();
 // socketId -> channelId (so a disconnect can clean up the right room)
 const socketChannel = new Map<string, string>();
+// channelId -> groupId. Cached so the hot paths (voice:state, requestRooms,
+// broadcasts) don't re-query the channel row on every mute/screen toggle.
+const channelGroup = new Map<string, string>();
 
 const MAX_CHAT_HISTORY = 200;
+
+// Short-lived cache of a group's member ids. Mute/screen toggles fan out to
+// every group member, and previously each toggle hit the DB (often twice).
+// Caching for a few seconds collapses bursts of toggles into a single query
+// while staying fresh enough for membership changes.
+const GROUP_MEMBERS_TTL_MS = 5000;
+const groupMembersCache = new Map<string, { ids: string[]; at: number }>();
+
+async function getGroupMemberIds(groupId: string): Promise<string[]> {
+  const cached = groupMembersCache.get(groupId);
+  const now = Date.now();
+  if (cached && now - cached.at < GROUP_MEMBERS_TTL_MS) return cached.ids;
+  const members = await listGroupMembers(groupId);
+  const ids = members.map((m) => m.user_id);
+  groupMembersCache.set(groupId, { ids, at: now });
+  return ids;
+}
+
+// Resolve a channel's group id, using the cache and falling back to the DB
+// (and populating the cache) on a miss.
+async function resolveGroupId(channelId: string): Promise<string | undefined> {
+  const cached = channelGroup.get(channelId);
+  if (cached) return cached;
+  const channel = await getGroupChannelById(channelId);
+  if (channel?.group_id) {
+    channelGroup.set(channelId, channel.group_id);
+    return channel.group_id;
+  }
+  return undefined;
+}
 
 function publicParticipants(channelId: string) {
   const room = rooms.get(channelId);
@@ -49,9 +82,9 @@ function publicParticipants(channelId: string) {
 function broadcastParticipants(io: Server, groupId: string, channelId: string) {
   // Everyone in the group should see live counts (for the x/N badge) and the
   // bottom participant list, so broadcast to all group members.
-  void listGroupMembers(groupId).then((members) => {
+  void getGroupMemberIds(groupId).then((ids) => {
     const payload = { groupId, channelId, participants: publicParticipants(channelId) };
-    for (const m of members) io.to(m.user_id).emit('voice:participants', payload);
+    for (const id of ids) io.to(id).emit('voice:participants', payload);
   });
 }
 
@@ -85,13 +118,16 @@ export function registerVoiceHandlers(io: Server, socket: Socket, userId: string
     if (participant.sockets.size > 0) return;
 
     room.delete(userId);
-    const groupId = (await getGroupChannelById(channelId))?.group_id;
+    const groupId = await resolveGroupId(channelId);
     io.to(`voice:${channelId}`).emit('voice:peerLeft', { channelId, userId });
 
     if (room.size === 0) {
       rooms.delete(channelId);
       // Ephemeral chat is destroyed when the room empties.
       roomChats.delete(channelId);
+      // The room is gone; drop its group mapping so the cache cannot grow
+      // unbounded. It is re-populated on the next join.
+      channelGroup.delete(channelId);
       if (groupId) io.to(`voice:${channelId}`).emit('voice:chatCleared', { channelId });
     }
     if (groupId) broadcastParticipants(io, groupId, channelId);
@@ -106,6 +142,9 @@ export function registerVoiceHandlers(io: Server, socket: Socket, userId: string
       return;
     }
     const groupId = channel.group_id;
+    // Cache the channel->group mapping so later mute/screen toggles and room
+    // queries don't have to hit the DB again.
+    channelGroup.set(channelId, groupId);
     if (!(await isGroupMember(groupId, userId))) {
       socket.emit('voice:error', { channelId, code: 'NOT_MEMBER' });
       return;
@@ -175,10 +214,13 @@ export function registerVoiceHandlers(io: Server, socket: Socket, userId: string
     if (typeof payload?.groupId !== 'string') return;
     const groupId = payload.groupId;
     if (!(await isGroupMember(groupId, userId))) return;
+    // Iterate the in-memory rooms and resolve each channel's group from the
+    // cache (falling back to a single DB lookup only on a cache miss) instead
+    // of querying every active channel's row every time a group is opened.
     for (const [channelId, room] of rooms.entries()) {
       if (room.size === 0) continue;
-      const channel = await getGroupChannelById(channelId);
-      if (channel?.group_id !== groupId) continue;
+      const roomGroupId = await resolveGroupId(channelId);
+      if (roomGroupId !== groupId) continue;
       socket.emit('voice:participants', { groupId, channelId, participants: publicParticipants(channelId) });
     }
   });
@@ -217,17 +259,30 @@ export function registerVoiceHandlers(io: Server, socket: Socket, userId: string
     // Also tell every group member (their left-side channel list shows the
     // mic/screen icons even when they are not currently in the channel).
     // Skip the 'talking' updates here to avoid flooding non-room sockets.
+    //
+    // This used to do up to three DB queries per toggle (getGroupChannelById +
+    // listGroupMembers, plus another listGroupMembers inside
+    // broadcastParticipants), which is what made the mic/screen icons appear
+    // with a visible delay. Now the group id and member list both come from the
+    // in-memory caches. We resolve the member ids once and reuse them for both
+    // the full participants snapshot and the incremental state fan-out.
     if (typeof payload.muted === 'boolean' || typeof payload.screen === 'boolean') {
-      const channel = await getGroupChannelById(payload.channelId);
-      if (channel) {
-        // Broadcast a full participants snapshot in addition to the incremental
-        // state event. This guarantees the left-side channel list updates the
-        // mic/screen icons in real time for every group member, even if their
-        // client had not yet cached this channel's participants (otherwise the
-        // icon would only appear after they refresh or join the channel).
-        broadcastParticipants(io, channel.group_id, payload.channelId);
-        const members = await listGroupMembers(channel.group_id);
-        for (const m of members) io.to(m.user_id).emit('voice:state', statePayload);
+      const groupId = await resolveGroupId(payload.channelId);
+      if (groupId) {
+        const memberIds = await getGroupMemberIds(groupId);
+        const participantsPayload = {
+          groupId,
+          channelId: payload.channelId,
+          participants: publicParticipants(payload.channelId)
+        };
+        // A full participants snapshot guarantees the left-side channel list
+        // updates the mic/screen icons even for members whose client had not
+        // yet cached this channel's participants, plus the incremental state
+        // event for clients that track it directly.
+        for (const id of memberIds) {
+          io.to(id).emit('voice:participants', participantsPayload);
+          io.to(id).emit('voice:state', statePayload);
+        }
       }
     }
   });
