@@ -102,13 +102,37 @@ export function GroupChatView({ token, language, currentUser, group, onlineUserI
   const [showCreateFolder, setShowCreateFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [groupMenuOpen, setGroupMenuOpen] = useState(false);
-  const [showCreateRole, setShowCreateRole] = useState(false);
-  const [newRoleName, setNewRoleName] = useState('');
-  const [newRoleColor, setNewRoleColor] = useState('#8a8a8a');
-  const [editingRolePermissions, setEditingRolePermissions] = useState<string | null>(null);
   const [draftPermissions, setDraftPermissions] = useState<string[]>([]);
   const [draftHoist, setDraftHoist] = useState(false);
+  // Roles tab: search query, the role currently open in the editor sub-view
+  // (null = the list view), which role's "..." menu popup is open, and a flag
+  // for the transient "ID copied" feedback.
+  const [roleSearch, setRoleSearch] = useState('');
+  const [roleEditorId, setRoleEditorId] = useState<string | null>(null);
+  const [roleMenuOpen, setRoleMenuOpen] = useState<string | null>(null);
+  const [roleIdCopied, setRoleIdCopied] = useState<string | null>(null);
   const [settingsTab, setSettingsTab] = useState<'overview' | 'invite' | 'roles' | 'members'>('overview');
+
+  // Leaving the Roles tab (or closing settings) returns the role editor to the
+  // list view and dismisses any open "..." menu.
+  useEffect(() => {
+    if (settingsTab !== 'roles' || !showSettings) {
+      setRoleEditorId(null);
+      setRoleMenuOpen(null);
+    }
+  }, [settingsTab, showSettings]);
+
+  // Close the role "..." popup menu when clicking anywhere outside of it.
+  useEffect(() => {
+    if (!roleMenuOpen) return;
+    const onDocClick = (event: globalThis.MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest?.('.group-roles-menu-wrap')) return;
+      setRoleMenuOpen(null);
+    };
+    window.addEventListener('mousedown', onDocClick);
+    return () => window.removeEventListener('mousedown', onDocClick);
+  }, [roleMenuOpen]);
   const [draggedItem, setDraggedItem] = useState<{ type: 'channel' | 'folder'; id: string } | null>(null);
   const [pendingImage, setPendingImage] = useState<{ dataUrl: string; name: string; spoiler: boolean } | null>(null);
   const [imageCaptionDraft, setImageCaptionDraft] = useState('');
@@ -862,14 +886,32 @@ export function GroupChatView({ token, language, currentUser, group, onlineUserI
     } catch { }
   }
 
+  // Load a role into the editor drafts and open the editor sub-view.
+  function openRoleEditor(role: GroupRole) {
+    setRoleEditorId(role.id);
+    setDraftPermissions([...role.permissions]);
+    setDraftHoist(role.hoist);
+    setEditingRoleMeta({ id: role.id, name: role.name, color: role.color });
+    setRoleMenuOpen(null);
+  }
+
+  // Leave the editor sub-view and return to the role list.
+  function closeRoleEditor() {
+    setRoleEditorId(null);
+    setDraftPermissions([]);
+    setDraftHoist(false);
+    setEditingRoleMeta(null);
+  }
+
+  // Create a fresh role and immediately open it in the editor for tweaking.
   async function handleCreateRole() {
-    if (!newRoleName.trim() || !canManageRoles) return;
+    if (!canManageRoles) return;
     try {
-      await api.createGroupRole(token, group.id, newRoleName.trim(), newRoleColor);
+      const { role } = await api.createGroupRole(token, group.id, t(language, 'newRoleName'), '#8a8a8a');
       const rolePayload = await api.getGroupRoles(token, group.id);
       setRoles(rolePayload.roles);
-      setNewRoleName('');
-      setShowCreateRole(false);
+      const created = rolePayload.roles.find((r) => r.id === role.id) ?? role;
+      openRoleEditor(created);
     } catch { }
   }
 
@@ -880,6 +922,17 @@ export function GroupChatView({ token, language, currentUser, group, onlineUserI
       setRoles(rolePayload.roles);
       const memPayload = await api.getGroupMembers(token, group.id);
       setMembers(memPayload.members);
+      setRoleMenuOpen(null);
+      if (roleEditorId === roleId) closeRoleEditor();
+    } catch { }
+  }
+
+  async function handleCopyRoleId(roleId: string) {
+    try {
+      await navigator.clipboard.writeText(roleId);
+      setRoleIdCopied(roleId);
+      setRoleMenuOpen(null);
+      window.setTimeout(() => setRoleIdCopied((cur) => (cur === roleId ? null : cur)), 1500);
     } catch { }
   }
 
@@ -889,10 +942,6 @@ export function GroupChatView({ token, language, currentUser, group, onlineUserI
       await api.updateGroupRole(token, group.id, roleId, { permissions: draftPermissions, hoist: draftHoist, name: meta && meta.name.trim() ? meta.name.trim() : undefined, color: meta ? meta.color : undefined });
       const rolePayload = await api.getGroupRoles(token, group.id);
       setRoles(rolePayload.roles);
-      setEditingRolePermissions(null);
-      setDraftPermissions([]);
-      setDraftHoist(false);
-      setEditingRoleMeta(null);
     } catch { }
   }
 
@@ -1657,36 +1706,86 @@ export function GroupChatView({ token, language, currentUser, group, onlineUserI
               ) : null}
 
               {settingsTab === 'roles' && canManageRoles ? (
-                <div className="group-settings-section">
-                  <h3>{t(language, 'roles')}</h3>
-                  <div className="group-settings-roles">
-                    {roles.map((role) => (
-                      <div className="group-settings-role" key={role.id}>
-                        <span className="group-settings-role-dot" style={{ backgroundColor: role.color }} />
-                        <span className="group-settings-role-name">{role.name}</span>
-                        {!role.isOwner ? (
-                          <div className="group-settings-role-actions">
-                            <button type="button" className="group-settings-role-btn" title={t(language, 'editRole')}
-                              onClick={() => {
-                                if (editingRolePermissions === role.id) {
-                                  setEditingRolePermissions(null);
-                                  setEditingRoleMeta(null);
-                                } else {
-                                  setEditingRolePermissions(role.id);
-                                  setDraftPermissions([...role.permissions]);
-                                  setDraftHoist(role.hoist);
-                                  setEditingRoleMeta({ id: role.id, name: role.name, color: role.color });
-                                }
-                              }}>
-                              {editingRolePermissions === role.id ? '✕' : '⚙'}
-                            </button>
-                            <button type="button" className="group-settings-role-btn danger" title={t(language, 'deleteRole')}
-                              onClick={() => void handleDeleteRole(role.id)}>🗑</button>
+                roleEditorId === null ? (
+                  /* ── Roles: list view ── */
+                  <div className="group-settings-section group-roles-list-view">
+                    <div className="group-roles-toolbar">
+                      <input
+                        type="search"
+                        className="messenger-input group-roles-search"
+                        value={roleSearch}
+                        placeholder={t(language, 'searchRoles')}
+                        onChange={(e) => setRoleSearch(e.target.value)}
+                      />
+                      <button type="button" className="primary-action group-roles-create-btn" onClick={() => void handleCreateRole()}>
+                        {t(language, 'createRole')}
+                      </button>
+                    </div>
+                    {(() => {
+                      const filtered = roles.filter((r) => r.name.toLowerCase().includes(roleSearch.trim().toLowerCase()));
+                      return (
+                        <>
+                          <div className="group-roles-list-header">
+                            {t(language, 'roles')} — {filtered.length}
                           </div>
-                        ) : null}
-                        {editingRolePermissions === role.id ? (
-                          <div className="group-role-permissions">
-                            <div className="group-settings-role-create">
+                          <div className="group-roles-list">
+                            {filtered.map((role) => {
+                              const memberCount = members.filter((m) => m.roleId === role.id).length;
+                              return (
+                                <div className="group-roles-row" key={role.id}>
+                                  <span className="group-settings-role-dot" style={{ backgroundColor: role.color }} />
+                                  <span className="group-roles-row-name">{role.name}</span>
+                                  <span className="group-roles-row-count">{memberCount} {t(language, 'members')}</span>
+                                  {!role.isOwner ? (
+                                    <>
+                                      <button type="button" className="group-roles-icon-btn" title={t(language, 'editRole')} onClick={() => openRoleEditor(role)}>✏</button>
+                                      <div className="group-roles-menu-wrap">
+                                        <button type="button" className="group-roles-icon-btn" title="" onClick={() => setRoleMenuOpen((cur) => (cur === role.id ? null : role.id))}>⋯</button>
+                                        {roleMenuOpen === role.id ? (
+                                          <div className="group-roles-menu">
+                                            <button type="button" className="group-roles-menu-item danger" onClick={() => void handleDeleteRole(role.id)}>{t(language, 'deleteRole')}</button>
+                                            <button type="button" className="group-roles-menu-item" onClick={() => void handleCopyRoleId(role.id)}>
+                                              {roleIdCopied === role.id ? t(language, 'copied') : t(language, 'copyRoleId')}
+                                            </button>
+                                          </div>
+                                        ) : null}
+                                      </div>
+                                    </>
+                                  ) : null}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </>
+                      );
+                    })()}
+                  </div>
+                ) : (
+                  /* ── Roles: editor sub-view (sidebar list + settings) ── */
+                  <div className="group-settings-section group-roles-editor-view">
+                    <div className="group-roles-editor-sidebar">
+                      <button type="button" className="group-roles-back-btn" onClick={closeRoleEditor}>← {t(language, 'back')}</button>
+                      <div className="group-roles-editor-list">
+                        {roles.map((role) => (
+                          <button
+                            key={role.id}
+                            type="button"
+                            className={'group-roles-editor-list-item' + (roleEditorId === role.id ? ' active' : '')}
+                            onClick={() => openRoleEditor(role)}
+                          >
+                            <span className="group-settings-role-dot" style={{ backgroundColor: role.color }} />
+                            <span className="group-roles-row-name">{role.name}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="group-roles-editor-panel">
+                      {(() => {
+                        const role = roles.find((r) => r.id === roleEditorId);
+                        if (!role) return null;
+                        return (
+                          <>
+                            <div className="group-roles-editor-meta">
                               <input type="text" className="messenger-input" value={editingRoleMeta?.name ?? role.name} onChange={(e) => setEditingRoleMeta((prev) => ({ id: role.id, name: e.target.value, color: prev?.color ?? role.color }))} />
                               <input type="color" value={editingRoleMeta?.color ?? role.color} onChange={(e) => setEditingRoleMeta((prev) => ({ id: role.id, name: prev?.name ?? role.name, color: e.target.value }))} />
                             </div>
@@ -1707,25 +1806,13 @@ export function GroupChatView({ token, language, currentUser, group, onlineUserI
                               <input type="checkbox" checked={draftHoist} onChange={(e) => setDraftHoist(e.target.checked)} />
                               {t(language, 'roleDisplaySeparately')}
                             </label>
-                            <button type="button" className="group-settings-add-role" onClick={() => void handleSaveRolePermissions(role.id)}>{t(language, 'save')}</button>
-                          </div>
-                        ) : null}
-                      </div>
-                    ))}
-                    {showCreateRole ? (
-                      <div className="group-settings-role-create">
-                        <input type="text" className="messenger-input" value={newRoleName}
-                          onChange={(e) => setNewRoleName(e.target.value)}
-                          placeholder="role name" />
-                        <input type="color" value={newRoleColor} onChange={(e) => setNewRoleColor(e.target.value)} />
-                        <button type="button" onClick={() => void handleCreateRole()}>+</button>
-                        <button type="button" onClick={() => { setShowCreateRole(false); setNewRoleName(''); }}>✕</button>
-                      </div>
-                    ) : (
-                      <button type="button" className="group-settings-add-role" onClick={() => setShowCreateRole(true)}>+ {t(language, 'addRole')}</button>
-                    )}
+                            <button type="button" className="primary-action group-settings-add-role" onClick={() => void handleSaveRolePermissions(role.id)}>{t(language, 'save')}</button>
+                          </>
+                        );
+                      })()}
+                    </div>
                   </div>
-                </div>
+                )
               ) : null}
 
               {settingsTab === 'members' && canManageRoles ? (
