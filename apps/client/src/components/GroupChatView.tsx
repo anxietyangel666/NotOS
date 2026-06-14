@@ -322,17 +322,31 @@ export function GroupChatView({ token, language, currentUser, group, onlineUserI
 
   // Load initial data
   useEffect(() => {
+    // Clear the previous group's data immediately so switching groups does not
+    // briefly show the old group's channels, messages and members for the 1-2s
+    // it takes the new group's data to load. Without this reset the stale state
+    // from the previous group lingers until the async requests below resolve.
+    setChannels([]);
+    setMessages([]);
+    setMembers([]);
+    setRoles([]);
+    setFolders([]);
+    setActiveChannel(null);
+
+    let cancelled = false;
     void Promise.all([
       api.getGroupChannels(token, group.id),
       api.getGroupRoles(token, group.id),
       api.getGroupMembers(token, group.id),
       api.getGroupFolders(token, group.id)
     ]).then(([chanPayload, rolePayload, memPayload, folderPayload]) => {
+      // Ignore a stale response if the user already switched to another group.
+      if (cancelled) return;
       setChannels(chanPayload.channels);
       setRoles(rolePayload.roles);
       setMembers(memPayload.members);
       setFolders(folderPayload.folders);
-      if (!activeChannel && chanPayload.channels.length > 0) {
+      if (chanPayload.channels.length > 0) {
         const firstText = chanPayload.channels.find((c) => c.type !== 'voice') ?? chanPayload.channels[0];
         setActiveChannel(firstText.id);
       }
@@ -340,6 +354,10 @@ export function GroupChatView({ token, language, currentUser, group, onlineUserI
     // Ask the server who is currently in this group's voice channels so the
     // participants list and x/N badges show before we join.
     voiceRoom?.requestGroupRooms(group.id);
+
+    return () => {
+      cancelled = true;
+    };
   }, [token, group.id]);
 
   // Load messages for active channel

@@ -270,17 +270,18 @@ export function registerVoiceHandlers(io: Server, socket: Socket, userId: string
       const groupId = await resolveGroupId(payload.channelId);
       if (groupId) {
         const memberIds = await getGroupMemberIds(groupId);
-        const participantsPayload = {
-          groupId,
-          channelId: payload.channelId,
-          participants: publicParticipants(payload.channelId)
-        };
-        // A full participants snapshot guarantees the left-side channel list
-        // updates the mic/screen icons even for members whose client had not
-        // yet cached this channel's participants, plus the incremental state
-        // event for clients that track it directly.
+        // Send ONLY the lightweight incremental state event to group members
+        // who are not already in the room (the room itself was notified above).
+        // Previously we also emitted a full voice:participants snapshot here,
+        // which on the sender's own client triggered a second cascade of state
+        // updates (participants + channelParticipants + talkingIds) on top of
+        // the voice:state cascade. Those duplicate updates re-rendered the whole
+        // group view and were the source of the lag spike on every mute toggle.
+        // The client's voice:state handler already updates the cached
+        // per-channel participant lists, so the snapshot is redundant here.
+        // Emitting voice:state again to in-room members is harmless (the state
+        // is idempotent) and far cheaper than the previous double cascade.
         for (const id of memberIds) {
-          io.to(id).emit('voice:participants', participantsPayload);
           io.to(id).emit('voice:state', statePayload);
         }
       }
