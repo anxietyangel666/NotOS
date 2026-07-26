@@ -5,7 +5,7 @@ import { t } from '../i18n';
 type WindowFrameProps = {
   language: Language;
   title: string;
-  eyebrow?: string;
+  titleContent?: ReactNode;
   /** Optional element (e.g. avatar) shown centered next to the title. */
   centerTitle?: ReactNode;
   className?: string;
@@ -15,6 +15,7 @@ type WindowFrameProps = {
   zIndex: number;
   defaultPosition?: { x: number; y: number };
   minSize?: { width: number; height: number };
+  defaultSize?: { width: number; height: number };
   storageKey?: string;
   onFocus: () => void;
   onMinimize: () => void;
@@ -49,8 +50,10 @@ function centeredPosition(
   const cx = bounds.left + Math.round((bounds.width - winW) / 2);
   const cy = bounds.top + Math.round((bounds.height - winH) / 2);
   // Clamp so the window is always fully visible
-  const x = Math.max(bounds.left + 8, Math.min(bounds.left + bounds.width - minSize.width - 8, cx));
-  const y = Math.max(bounds.top + 8, Math.min(bounds.top + bounds.height - 160, cy));
+  const maxX = Math.max(bounds.left + 8, bounds.left + bounds.width - winW - 8);
+  const maxY = Math.max(bounds.top + 8, bounds.top + bounds.height - winH - 58);
+  const x = Math.max(bounds.left + 8, Math.min(maxX, cx));
+  const y = Math.max(bounds.top + 8, Math.min(maxY, cy));
   // If the hint was already a sensible centered value (caller computed it from
   // window.innerWidth) and the desktop bounds match the viewport, prefer the
   // hint so we don't fight with the caller's intent.
@@ -64,16 +67,23 @@ function clampSize(
   minSize: { width: number; height: number }
 ): { width: number; height: number } {
   const bounds = getDesktopBounds();
+  // Maximum usable area inside the desktop.
+  const maxWidth = Math.max(0, bounds.width - 16);
+  const maxHeight = Math.max(0, bounds.height - 80);
+  // The effective minimum can never exceed the available area, otherwise a
+  // window keeps a min size larger than the (shrunken) app window and overflows.
+  const minWidth = Math.min(minSize.width, maxWidth);
+  const minHeight = Math.min(minSize.height, maxHeight);
   return {
-    width: Math.max(minSize.width, Math.min(bounds.width - 16, size.width)),
-    height: Math.max(minSize.height, Math.min(bounds.height - 80, size.height))
+    width: Math.max(minWidth, Math.min(maxWidth, size.width)),
+    height: Math.max(minHeight, Math.min(maxHeight, size.height))
   };
 }
 
 export function WindowFrame({
   language,
   title,
-  eyebrow,
+  titleContent,
   centerTitle,
   className,
   style,
@@ -82,6 +92,7 @@ export function WindowFrame({
   zIndex,
   defaultPosition = { x: 120, y: 72 },
   minSize = { width: 360, height: 240 },
+  defaultSize,
   storageKey,
   onFocus,
   onMinimize,
@@ -90,14 +101,20 @@ export function WindowFrame({
   children
 }: WindowFrameProps) {
   const frameRef = useRef<HTMLElement | null>(null);
+  // Last known desktop area, used to compute how much the app window shrank or
+  // grew between two resize events so inner windows can follow that delta 1:1.
+  const prevBoundsRef = useRef<{ width: number; height: number } | null>(null);
   const [size, setSize] = useState<{ width: number; height: number } | null>(() => {
-    if (!storageKey) return null;
-    try {
-      const stored = localStorage.getItem(`notoc.window.${storageKey}`);
-      if (!stored) return null;
-      const parsed = JSON.parse(stored) as { width: number; height: number };
-      return clampSize(parsed, minSize);
-    } catch { return null; }
+    if (storageKey) {
+      try {
+        const stored = localStorage.getItem(`notoc.window.${storageKey}`);
+        if (stored) {
+          const parsed = JSON.parse(stored) as { width: number; height: number };
+          return clampSize(parsed, minSize);
+        }
+      } catch { /* use the default size */ }
+    }
+    return defaultSize ? clampSize(defaultSize, minSize) : null;
   });
   const [position, setPosition] = useState(() => centeredPosition(defaultPosition, minSize, size));
   const [drag, setDrag] = useState<{ startX: number; startY: number; baseX: number; baseY: number } | null>(null);
@@ -164,6 +181,54 @@ export function WindowFrame({
     localStorage.setItem(`notoc.window.${storageKey}`, JSON.stringify(size));
   }, [size, storageKey]);
 
+  // Make inner windows track the application window when it is resized: when the
+  // app (desktop area) shrinks or grows by N pixels, each open window changes
+  // its size by exactly the same N pixels (per axis), so windows scale 1:1 with
+  // the app frame. The result is then clamped so a window never drops below its
+  // min size or overflows the available area, and its position is pulled back
+  // inside the desktop bounds.
+  useEffect(() => {
+    // Seed the previous-bounds baseline on mount so the first resize computes a
+    // correct delta rather than treating the whole area as the change.
+    if (!prevBoundsRef.current) {
+      const initial = getDesktopBounds();
+      prevBoundsRef.current = { width: initial.width, height: initial.height };
+    }
+
+    function handleViewportResize() {
+      const bounds = getDesktopBounds();
+      const prev = prevBoundsRef.current ?? { width: bounds.width, height: bounds.height };
+      // How much the app window changed since the last event (negative = shrank).
+      const deltaW = bounds.width - prev.width;
+      const deltaH = bounds.height - prev.height;
+      prevBoundsRef.current = { width: bounds.width, height: bounds.height };
+
+      setSize((current) => {
+        // Even windows without an explicit stored size adopt one now so they can
+        // follow the app frame; base it on the rendered frame, falling back to
+        // the min size.
+        const baseW = current?.width ?? frameRef.current?.offsetWidth ?? minSize.width;
+        const baseH = current?.height ?? frameRef.current?.offsetHeight ?? minSize.height;
+        const next = clampSize({ width: baseW + deltaW, height: baseH + deltaH }, minSize);
+        if (current && next.width === current.width && next.height === current.height) return current;
+        return next;
+      });
+
+      setPosition((current) => {
+        const winW = (size?.width ?? minSize.width) + deltaW;
+        const winH = (size?.height ?? minSize.height) + deltaH;
+        const maxX = bounds.left + bounds.width - Math.min(winW, bounds.width - 16) - 8;
+        const maxY = bounds.top + bounds.height - 160;
+        const x = Math.max(bounds.left + 8, Math.min(maxX, current.x));
+        const y = Math.max(bounds.top + 8, Math.min(maxY, current.y));
+        if (x === current.x && y === current.y) return current;
+        return { x, y };
+      });
+    }
+    window.addEventListener('resize', handleViewportResize);
+    return () => window.removeEventListener('resize', handleViewportResize);
+  }, [minSize, size?.width, size?.height]);
+
   const windowStyle = maximized
     ? { ...style, zIndex }
     : {
@@ -200,20 +265,21 @@ export function WindowFrame({
           setDrag({ startX: event.clientX, startY: event.clientY, baseX: position.x, baseY: position.y });
         }}
       >
-        <div>
-          {eyebrow ? <p className="eyebrow">{eyebrow}</p> : null}
-          <h2>{title}</h2>
+        <div className="window-frame-title-slot">
+          {titleContent}
         </div>
-        {centerTitle ? <div className="window-frame-center-title">{centerTitle}</div> : null}
+        <div className="window-frame-center-title">
+          {centerTitle ?? <span>{title}</span>}
+        </div>
         <div className="internal-window-controls">
           <button className="icon-action" type="button" aria-label={t(language, 'minimize')} onClick={onMinimize}>
-            -
+            <span className="window-control-icon minimize" aria-hidden="true" />
           </button>
           <button className="icon-action" type="button" aria-label={t(language, 'maximize')} onClick={onToggleMaximize}>
             □
           </button>
           <button className="icon-action danger-text" type="button" aria-label={t(language, 'close')} onClick={onClose}>
-            x
+            <span className="window-control-icon close" aria-hidden="true" />
           </button>
         </div>
       </div>

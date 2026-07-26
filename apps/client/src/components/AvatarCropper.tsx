@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import type { Language } from '../api/types';
 import { t } from '../i18n';
 
@@ -38,7 +39,7 @@ async function cropAvatar(imageDataUrl: string, zoom: number, offsetX: number, o
   context.drawImage(image, drawX, drawY, drawWidth, drawHeight);
   context.restore();
 
-  return canvas.toDataURL('image/png');
+  return canvas.toDataURL('image/webp', 0.86);
 }
 
 export function AvatarCropper({ imageDataUrl, language, onCancel, onApply }: AvatarCropperProps) {
@@ -79,8 +80,8 @@ export function AvatarCropper({ imageDataUrl, language, onCancel, onApply }: Ava
     }
   }
 
-  return (
-    <div className="modal-backdrop important" onClick={onCancel}>
+  return createPortal(
+    <div className="modal-backdrop important avatar-crop-backdrop" onClick={onCancel}>
       <section className="avatar-crop-window" onClick={(event) => event.stopPropagation()}>
         <div className="window-header">
           <div>
@@ -129,6 +130,7 @@ export function AvatarCropper({ imageDataUrl, language, onCancel, onApply }: Ava
           </button>
         </div>
       </section>
-    </div>
+    </div>,
+    document.body
   );
 }

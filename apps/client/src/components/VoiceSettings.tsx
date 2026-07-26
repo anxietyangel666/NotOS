@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Language } from '../api/types';
 import { t } from '../i18n';
-import { describeKey, loadCallSettings, saveCallSettings, type CallSettings } from '../utils/call-settings';
+import { applyCallAudioConstraints, audioConstraintsFromCallSettings, describeKey, loadCallSettings, saveCallSettings, type CallSettings } from '../utils/call-settings';
+import { createRnnoiseNode, destroyRnnoiseNode, setRnnoiseEnabled } from '../utils/rnnoise';
 import { SaveBar } from './SaveBar';
 
 type VoiceSettingsProps = {
@@ -12,6 +13,54 @@ type VoiceSettingsProps = {
 };
 
 type DeviceOption = { deviceId: string; label: string };
+type SinkAudioElement = HTMLAudioElement & {
+  setSinkId?: (sinkId: string) => Promise<void>;
+};
+
+const voiceCopy = {
+  en: {
+    devices: 'Devices',
+    devicesHint: 'Select the microphone and speakers used for calls.',
+    levels: 'Levels & test',
+    levelsHint: 'Test your microphone and hear the processed signal.',
+    input: 'Input mode',
+    inputHint: 'Choose when your voice is sent.',
+    processing: 'Microphone processing',
+    processingHint: 'RNNoise + WebRTC filters are applied to calls and voice channels.',
+    monitoring: 'You will hear yourself while the test is running.',
+    noiseHint: 'Reduces steady background, keyboard, and fan noise through RNNoise.',
+    echoHint: 'Reduces speaker echo and repeated voice capture.',
+    gainHint: 'Automatically evens out microphone loudness.'
+  },
+  ru: {
+    devices: 'Устройства',
+    devicesHint: 'Выберите микрофон и динамики для звонков.',
+    levels: 'Громкость и тест',
+    levelsHint: 'Проверьте микрофон и услышите обработанный звук.',
+    input: 'Режим ввода',
+    inputHint: 'Выберите, когда голос будет отправляться.',
+    processing: 'Обработка микрофона',
+    processingHint: 'RNNoise + WebRTC-фильтры применяются к звонкам и голосовым каналам.',
+    monitoring: 'Во время теста вы будете слышать себя.',
+    noiseHint: 'Убирает постоянный фон, шум клавиатуры и вентилятора через RNNoise.',
+    echoHint: 'Подавляет эхо от динамиков и повторный захват голоса.',
+    gainHint: 'Автоматически выравнивает громкость микрофона.'
+  },
+  uk: {
+    devices: 'Пристрої',
+    devicesHint: 'Виберіть мікрофон і динаміки для дзвінків.',
+    levels: 'Гучність і тест',
+    levelsHint: 'Перевірте мікрофон і почуйте оброблений звук.',
+    input: 'Режим вводу',
+    inputHint: 'Виберіть, коли голос буде надсилатися.',
+    processing: 'Обробка мікрофона',
+    processingHint: 'RNNoise + WebRTC-фільтри застосовуються до дзвінків і голосових каналів.',
+    monitoring: 'Під час тесту ви будете чути себе.',
+    noiseHint: 'Прибирає постійний фон, шум клавіатури й вентилятора через RNNoise.',
+    echoHint: 'Приглушує відлуння від динаміків і повторне захоплення голосу.',
+    gainHint: 'Автоматично вирівнює гучність мікрофона.'
+  }
+} satisfies Record<Language, Record<string, string>>;
 
 export function VoiceSettings({ language, onChange, onDirtyChange }: VoiceSettingsProps) {
   const [settings, setSettings] = useState<CallSettings>(loadCallSettings);
@@ -27,7 +76,11 @@ export function VoiceSettings({ language, onChange, onDirtyChange }: VoiceSettin
 
   const testStreamRef = useRef<MediaStream | null>(null);
   const testCtxRef = useRef<AudioContext | null>(null);
+  const testRnnoiseRef = useRef<AudioWorkletNode | null>(null);
+  const testMonitorRef = useRef<SinkAudioElement | null>(null);
+  const testMonitorGainRef = useRef<GainNode | null>(null);
   const rafRef = useRef<number | null>(null);
+  const copy = voiceCopy[language];
 
   // Edit the local draft only. Changes are persisted via the save bar so they
   // do not take effect until the user explicitly saves.
@@ -41,15 +94,40 @@ export function VoiceSettings({ language, onChange, onDirtyChange }: VoiceSettin
   );
 
   function saveVoiceSettings() {
+    const previousSettings = savedSettings;
     saveCallSettings(settings);
     setSavedSettings(settings);
     onChange?.(settings);
+    applySettingsToActiveTest(settings, previousSettings);
     // Notify any live call/voice room so settings apply immediately.
     window.dispatchEvent(new CustomEvent('notoc:callSettingsChanged'));
   }
 
   function resetVoiceSettings() {
     setSettings(savedSettings);
+  }
+
+  function applySettingsToActiveTest(next: CallSettings, previous: CallSettings) {
+    if (!testing) return;
+    if (next.inputDeviceId !== previous.inputDeviceId) {
+      stopTest();
+      window.setTimeout(() => {
+        void startTest();
+      }, 0);
+      return;
+    }
+    setRnnoiseEnabled(testRnnoiseRef.current, next.noiseSuppression);
+    void applyCallAudioConstraints(testStreamRef.current?.getAudioTracks()[0] ?? null, next);
+    const volume = Math.min(1, Math.max(0, next.outputVolume / 100));
+    if (testMonitorRef.current) {
+      testMonitorRef.current.volume = volume;
+      if (next.outputDeviceId !== 'default' && testMonitorRef.current.setSinkId) {
+        void testMonitorRef.current.setSinkId(next.outputDeviceId).catch(() => undefined);
+      }
+    }
+    if (testMonitorGainRef.current) {
+      testMonitorGainRef.current.gain.value = volume;
+    }
   }
 
   // Keep the parent informed of unsaved changes so it can block window close.
@@ -112,23 +190,64 @@ export function VoiceSettings({ language, onChange, onDirtyChange }: VoiceSettin
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [capturingKey]);
 
+  useEffect(() => {
+    const monitor = testMonitorRef.current;
+    if (!monitor) return;
+    const volume = Math.min(1, Math.max(0, settings.outputVolume / 100));
+    monitor.volume = volume;
+    if (testMonitorGainRef.current) {
+      testMonitorGainRef.current.gain.value = volume;
+    }
+    if (settings.outputDeviceId !== 'default' && monitor.setSinkId) {
+      void monitor.setSinkId(settings.outputDeviceId).catch(() => undefined);
+    }
+  }, [settings.outputDeviceId, settings.outputVolume]);
+
   async function startTest() {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          deviceId: settings.inputDeviceId !== 'default' ? { exact: settings.inputDeviceId } : undefined,
-          noiseSuppression: settings.noiseSuppression,
-          echoCancellation: settings.echoCancellation,
-          autoGainControl: settings.autoGainControl
-        }
+        audio: audioConstraintsFromCallSettings(settings)
       });
       testStreamRef.current = stream;
-      const ctx = new AudioContext();
+      const ctx = new AudioContext({ sampleRate: 48000 });
       testCtxRef.current = ctx;
       const source = ctx.createMediaStreamSource(stream);
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 512;
-      source.connect(analyser);
+      const monitorDest = ctx.createMediaStreamDestination();
+      const rnnoiseNode = await createRnnoiseNode(ctx, settings.noiseSuppression);
+      testRnnoiseRef.current = rnnoiseNode;
+      if (rnnoiseNode) {
+        source.connect(rnnoiseNode);
+        rnnoiseNode.connect(analyser);
+        rnnoiseNode.connect(monitorDest);
+      } else {
+        source.connect(analyser);
+        source.connect(monitorDest);
+      }
+      const monitor = new Audio() as SinkAudioElement;
+      monitor.srcObject = monitorDest.stream;
+      monitor.volume = Math.min(1, Math.max(0, settings.outputVolume / 100));
+      if (settings.outputDeviceId !== 'default' && monitor.setSinkId) {
+        await monitor.setSinkId(settings.outputDeviceId).catch(() => undefined);
+      }
+      testMonitorRef.current = monitor;
+      void monitor.play().catch(() => {
+        if (testCtxRef.current !== ctx) return;
+        const fallbackGain = ctx.createGain();
+        fallbackGain.gain.value = Math.min(1, Math.max(0, settings.outputVolume / 100));
+        testMonitorGainRef.current = fallbackGain;
+        try {
+          if (rnnoiseNode) {
+            rnnoiseNode.connect(fallbackGain);
+          } else {
+            source.connect(fallbackGain);
+          }
+          fallbackGain.connect(ctx.destination);
+        } catch {
+          testMonitorGainRef.current = null;
+        }
+      });
       const data = new Uint8Array(analyser.fftSize);
       const tick = () => {
         analyser.getByteTimeDomainData(data);
@@ -151,6 +270,14 @@ export function VoiceSettings({ language, onChange, onDirtyChange }: VoiceSettin
   function stopTest() {
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
     rafRef.current = null;
+    if (testMonitorRef.current) {
+      testMonitorRef.current.pause();
+      testMonitorRef.current.srcObject = null;
+      testMonitorRef.current = null;
+    }
+    testMonitorGainRef.current = null;
+    destroyRnnoiseNode(testRnnoiseRef.current);
+    testRnnoiseRef.current = null;
     testStreamRef.current?.getTracks().forEach((track) => track.stop());
     testStreamRef.current = null;
     if (testCtxRef.current) {
@@ -167,68 +294,105 @@ export function VoiceSettings({ language, onChange, onDirtyChange }: VoiceSettin
 
       {permissionError ? <div className="inline-error">{t(language, 'micPermissionNeeded')}</div> : null}
 
-      <label className="field-label">{t(language, 'inputDevice')}</label>
-      <select className="text-field" value={settings.inputDeviceId} onChange={(e) => update({ inputDeviceId: e.target.value })}>
-        {inputs.map((d) => (
-          <option key={d.deviceId} value={d.deviceId}>{d.label}</option>
-        ))}
-      </select>
+      <section className="voice-settings-card">
+        <div className="voice-settings-card-head">
+          <strong>{copy.devices}</strong>
+          <span>{copy.devicesHint}</span>
+        </div>
+        <div className="voice-settings-grid">
+          <label className="voice-control-field">
+            <span className="field-label">{t(language, 'inputDevice')}</span>
+            <select className="text-field" value={settings.inputDeviceId} onChange={(e) => update({ inputDeviceId: e.target.value })}>
+              {inputs.map((d) => (
+                <option key={d.deviceId} value={d.deviceId}>{d.label}</option>
+              ))}
+            </select>
+          </label>
+          <label className="voice-control-field">
+            <span className="field-label">{t(language, 'outputDevice')}</span>
+            <select className="text-field" value={settings.outputDeviceId} onChange={(e) => update({ outputDeviceId: e.target.value })}>
+              {outputs.map((d) => (
+                <option key={d.deviceId} value={d.deviceId}>{d.label}</option>
+              ))}
+            </select>
+          </label>
+        </div>
+      </section>
 
-      <label className="field-label">{t(language, 'outputDevice')}</label>
-      <select className="text-field" value={settings.outputDeviceId} onChange={(e) => update({ outputDeviceId: e.target.value })}>
-        {outputs.map((d) => (
-          <option key={d.deviceId} value={d.deviceId}>{d.label}</option>
-        ))}
-      </select>
+      <section className="voice-settings-card">
+        <div className="voice-settings-card-head">
+          <strong>{copy.levels}</strong>
+          <span>{copy.levelsHint}</span>
+        </div>
+        <div className="voice-range-row">
+          <label className="field-label">{t(language, 'micVolume')} - {settings.micVolume}%</label>
+          <input type="range" min={0} max={200} value={settings.micVolume} onChange={(e) => update({ micVolume: Number(e.target.value) })} />
+        </div>
+        <div className="voice-range-row">
+          <label className="field-label">{t(language, 'outputVolume')} - {settings.outputVolume}%</label>
+          <input type="range" min={0} max={100} value={settings.outputVolume} onChange={(e) => update({ outputVolume: Number(e.target.value) })} />
+        </div>
+        <div className="voice-test">
+          <button className="secondary-action" type="button" onClick={() => (testing ? stopTest() : void startTest())}>
+            {testing ? t(language, 'stopMicTest') : t(language, 'testMic')}
+          </button>
+          <div className="voice-level-bar"><span style={{ width: `${level}%` }} /></div>
+        </div>
+        {testing ? <div className="voice-monitor-note">{copy.monitoring}</div> : null}
+      </section>
 
-      <label className="field-label">{t(language, 'micVolume')} — {settings.micVolume}%</label>
-      <input type="range" min={0} max={200} value={settings.micVolume} onChange={(e) => update({ micVolume: Number(e.target.value) })} />
-
-      <label className="field-label">{t(language, 'outputVolume')} — {settings.outputVolume}%</label>
-      <input type="range" min={0} max={100} value={settings.outputVolume} onChange={(e) => update({ outputVolume: Number(e.target.value) })} />
-
-      <div className="voice-test">
-        <button className="secondary-action" type="button" onClick={() => (testing ? stopTest() : void startTest())}>
-          {testing ? t(language, 'stopMicTest') : t(language, 'testMic')}
-        </button>
-        <div className="voice-level-bar"><span style={{ width: `${level}%` }} /></div>
-      </div>
-
-      <hr className="settings-divider" />
-
-      <label className="field-label">{t(language, 'inputMode')}</label>
-      <div className="voice-mode-toggle">
-        <button className={!settings.pushToTalk ? 'voice-mode active' : 'voice-mode'} type="button" onClick={() => update({ pushToTalk: false })}>
-          {t(language, 'voiceActivity')}
-        </button>
-        <button className={settings.pushToTalk ? 'voice-mode active' : 'voice-mode'} type="button" onClick={() => update({ pushToTalk: true })}>
-          {t(language, 'pushToTalk')}
-        </button>
-      </div>
-
-      {settings.pushToTalk ? (
-        <div className="voice-ptt-key">
-          <span>{t(language, 'pushToTalkKey')}</span>
-          <button className="secondary-action" type="button" onClick={() => setCapturingKey(true)}>
-            {capturingKey ? t(language, 'pressAnyKey') : describeKey(settings.pushToTalkKey, t(language, 'notSet'))}
+      <section className="voice-settings-card">
+        <div className="voice-settings-card-head">
+          <strong>{copy.input}</strong>
+          <span>{copy.inputHint}</span>
+        </div>
+        <label className="field-label">{t(language, 'inputMode')}</label>
+        <div className="voice-mode-toggle">
+          <button className={!settings.pushToTalk ? 'voice-mode active' : 'voice-mode'} type="button" onClick={() => update({ pushToTalk: false })}>
+            {t(language, 'voiceActivity')}
+          </button>
+          <button className={settings.pushToTalk ? 'voice-mode active' : 'voice-mode'} type="button" onClick={() => update({ pushToTalk: true })}>
+            {t(language, 'pushToTalk')}
           </button>
         </div>
-      ) : null}
 
-      <hr className="settings-divider" />
+        {settings.pushToTalk ? (
+          <div className="voice-ptt-key">
+            <span>{t(language, 'pushToTalkKey')}</span>
+            <button className="secondary-action" type="button" onClick={() => setCapturingKey(true)}>
+              {capturingKey ? t(language, 'pressAnyKey') : describeKey(settings.pushToTalkKey, t(language, 'notSet'))}
+            </button>
+          </div>
+        ) : null}
+      </section>
 
-      <label className="voice-checkbox">
-        <input type="checkbox" checked={settings.echoCancellation} onChange={(e) => update({ echoCancellation: e.target.checked })} />
-        <span>{t(language, 'echoCancellation')}</span>
-      </label>
-      <label className="voice-checkbox">
-        <input type="checkbox" checked={settings.noiseSuppression} onChange={(e) => update({ noiseSuppression: e.target.checked })} />
-        <span>{t(language, 'noiseSuppression')}</span>
-      </label>
-      <label className="voice-checkbox">
-        <input type="checkbox" checked={settings.autoGainControl} onChange={(e) => update({ autoGainControl: e.target.checked })} />
-        <span>{t(language, 'autoGainControl')}</span>
-      </label>
+      <div className="voice-settings-card voice-processing-card">
+        <div className="voice-settings-card-head">
+          <strong>{copy.processing}</strong>
+          <span>{copy.processingHint}</span>
+        </div>
+        <label className="voice-checkbox">
+          <input type="checkbox" checked={settings.noiseSuppression} onChange={(e) => { update({ noiseSuppression: e.target.checked }); setRnnoiseEnabled(testRnnoiseRef.current, e.target.checked); }} />
+          <span>
+            <strong>{t(language, 'noiseSuppression')}</strong>
+            <small>{copy.noiseHint}</small>
+          </span>
+        </label>
+        <label className="voice-checkbox">
+          <input type="checkbox" checked={settings.echoCancellation} onChange={(e) => update({ echoCancellation: e.target.checked })} />
+          <span>
+            <strong>{t(language, 'echoCancellation')}</strong>
+            <small>{copy.echoHint}</small>
+          </span>
+        </label>
+        <label className="voice-checkbox">
+          <input type="checkbox" checked={settings.autoGainControl} onChange={(e) => update({ autoGainControl: e.target.checked })} />
+          <span>
+            <strong>{t(language, 'autoGainControl')}</strong>
+            <small>{copy.gainHint}</small>
+          </span>
+        </label>
+      </div>
 
       <SaveBar
         language={language}

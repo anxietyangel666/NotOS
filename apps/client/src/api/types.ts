@@ -74,9 +74,44 @@ export type PublicUser = {
   status: string;
   pinnedImageData: string;
   pinnedCards: PinnedCard[];
+  allowGroupIdentityMessages: boolean;
   createdAt: string;
   updatedAt: string;
 };
+
+export type ConnectionProvider = 'spotify' | 'riot';
+
+export type UserConnection = {
+  provider: ConnectionProvider;
+  connected: boolean;
+  displayName: string;
+  metadata: Record<string, unknown>;
+  updatedAt: string;
+};
+
+export type UserActivity =
+  | {
+      provider: 'spotify';
+      type: 'listening';
+      title: string;
+      subtitle: string;
+      album: string;
+      imageUrl: string;
+      url: string;
+      progressMs: number;
+      durationMs: number;
+      fetchedAt?: number;
+    }
+  | {
+      provider: 'riot';
+      type: 'playing';
+      title: string;
+      subtitle: string;
+      riotId: string;
+      region: string;
+      gameStartTime: number | null;
+      fetchedAt?: number;
+    };
 
 export type DesktopIconSize = 'small' | 'medium' | 'large';
 
@@ -116,14 +151,47 @@ export type MessengerMessage = {
   id: string;
   senderId: string;
   recipientId: string;
+  senderGroup: { id: string; name: string; avatarData: string } | null;
   body: string;
   imageData: string | null;
   imageName: string | null;
   imageSpoiler: boolean;
+  mediaItems?: ChatMediaItem[];
   editedAt: string | null;
   deletedAt: string | null;
+  readAt: string | null;
   createdAt: string;
   pinnedAt: string | null;
+  reactions: GroupMessageReaction[];
+  replyTo: MessageReplySnippet | null;
+  // Client-only: a stable React key kept across the optimistic→server swap so
+  // the bubble reconciles in place instead of remounting (no flash/jump). Also
+  // marks a message as still-sending for a subtle pending style.
+  clientKey?: string;
+  pending?: boolean;
+};
+
+export type MessageReplySnippet = {
+  id: string;
+  senderId: string;
+  senderGroup?: { id: string; name: string; avatarData: string } | null;
+  body: string;
+  imageData: string | null;
+  imageName: string | null;
+  mediaItems?: ChatMediaItem[];
+  deletedAt?: string | null;
+  feedPost?: boolean;
+  feedSourceId?: string | null;
+  feedMirror?: boolean;
+  viewCount?: number;
+  reactions?: GroupMessageReaction[];
+  createdAt?: string;
+};
+
+export type ChatMediaItem = {
+  dataUrl: string;
+  name: string | null;
+  spoiler: boolean;
 };
 
 export type ConversationPreview = {
@@ -132,17 +200,30 @@ export type ConversationPreview = {
   unreadCount: number;
 };
 
+export type ConversationSettings = {
+  backgroundData: string;
+  updatedBy: string | null;
+  updatedAt: string | null;
+};
+
 export type DesktopWallMessage = {
   id: string;
   ownerId: string;
   author: PublicUser;
   body: string;
   createdAt: string;
+  // Client-only: see MessengerMessage.clientKey/pending.
+  clientKey?: string;
+  pending?: boolean;
+};
+
+export type FriendRequestUser = PublicUser & {
+  requestCreatedAt?: string;
 };
 
 export type FriendRequests = {
-  incoming: PublicUser[];
-  outgoing: PublicUser[];
+  incoming: FriendRequestUser[];
+  outgoing: FriendRequestUser[];
 };
 
 export type Group = {
@@ -154,6 +235,7 @@ export type Group = {
   nameplate: NamePlate | null;
   description: string;
   defaultRoleId: string | null;
+  everyonePermissions: string[];
   createdAt: string;
 };
 
@@ -166,25 +248,71 @@ export type GroupMember = {
   joinedAt: string;
 };
 
+export type GroupInvite = {
+  id: string;
+  groupId: string;
+  channelId: string | null;
+  code: string;
+  creator: PublicUser | null;
+  usesCount: number;
+  createdAt: string;
+};
+
+export type ChannelPermissionOverride = {
+  channelId: string;
+  roleId: string;
+  permission: string;
+  value: 'allow' | 'deny';
+};
+
+export type GroupMessageReaction = {
+  emoji: string;
+  count: number;
+  userIds: string[];
+};
+
 export type GroupMessage = {
   id: string;
   groupId: string;
   channelId: string | null;
   senderId: string;
+  senderGroup: { id: string; name: string; avatarData: string } | null;
   body: string;
   imageData: string | null;
   imageName: string | null;
   imageSpoiler: boolean;
+  mediaItems?: ChatMediaItem[];
   editedAt: string | null;
   deletedAt: string | null;
   pinnedAt: string | null;
+  feedSourceId: string | null;
+  feedMirror: boolean;
+  viewCount: number;
+  reactions: GroupMessageReaction[];
+  replyTo: MessageReplySnippet | null;
   createdAt: string;
+  // Client-only: see MessengerMessage.clientKey/pending.
+  clientKey?: string;
+  pending?: boolean;
 };
 
 export type GroupConversationPreview = {
   group: Group;
   message: GroupMessage;
   unreadCount: number;
+};
+
+export type MentionNotification = {
+  id: string;
+  kind: 'dm' | 'group';
+  messageId: string;
+  createdAt: string;
+  sender: PublicUser;
+  body: string;
+  imageData: string | null;
+  imageName: string | null;
+  group?: Group;
+  channelId?: string | null;
 };
 
 export type GroupRole = {
@@ -204,8 +332,14 @@ export type GroupChannel = {
   name: string;
   position: number;
   folderId: string | null;
-  type: 'text' | 'voice';
+  type: 'text' | 'voice' | 'feed';
   userLimit: number | null;
+  topic: string;
+  slowmodeSeconds: number;
+  nsfw: boolean;
+  bitrate: number;
+  feedChatChannelId: string | null;
+  feedParentChannelId: string | null;
   requiredRoleIds: string[];
 };
 
@@ -271,6 +405,10 @@ export type AiChatMessage = {
   id: string;
   role: 'user' | 'assistant';
   content: string;
+  imageData?: string | null;
+  imageName?: string | null;
+  imageSpoiler?: boolean;
+  mediaItems?: ChatMediaItem[];
   createdAt: string;
 };
 
@@ -297,6 +435,7 @@ export type AiEmojiUsage = 'none' | 'some' | 'many';
 
 export type AiSettings = {
   assistantName: string;
+  assistantAvatarData: string;
   gender: AiPersonaGender;
   persona: AiPersona;
   tone: AiTone;

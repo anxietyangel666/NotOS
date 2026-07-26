@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../api/client';
 import type { Group, Language } from '../api/types';
 import { nameplateToCss } from '../api/types';
@@ -8,26 +8,67 @@ type InviteEmbedProps = {
   token: string;
   language: Language;
   inviteCode: string;
+  channelId?: string | null;
   currentUserId: string;
   memberGroupIds?: Set<string>;
   onJoined?: (group: Group) => void;
-  onNavigate?: (groupId: string) => void;
+  onNavigate?: (groupId: string, channelId?: string | null) => void;
 };
 
-export function InviteEmbed({ token, language, inviteCode, currentUserId, memberGroupIds, onJoined, onNavigate }: InviteEmbedProps) {
-  const [preview, setPreview] = useState<{ group: Group; memberCount: number } | null>(null);
+type InvitePreview = { group: Group; memberCount: number };
+
+const invitePreviewCache = new Map<string, Promise<InvitePreview> | InvitePreview>();
+
+function loadInvitePreview(token: string, inviteCode: string) {
+  const cached = invitePreviewCache.get(inviteCode);
+  if (cached) return Promise.resolve(cached);
+  const promise = api.getGroupPreviewByInvite(token, inviteCode)
+    .then((data) => {
+      invitePreviewCache.set(inviteCode, data);
+      return data;
+    })
+    .catch((error) => {
+      invitePreviewCache.delete(inviteCode);
+      throw error;
+    });
+  invitePreviewCache.set(inviteCode, promise);
+  return promise;
+}
+
+export function InviteEmbed({ token, language, inviteCode, channelId = null, currentUserId, memberGroupIds, onJoined, onNavigate }: InviteEmbedProps) {
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const [visible, setVisible] = useState(false);
+  const [preview, setPreview] = useState<InvitePreview | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [joining, setJoining] = useState(false);
 
   useEffect(() => {
+    const node = rootRef.current;
+    if (!node) return;
+    if (!('IntersectionObserver' in window)) {
+      setVisible(true);
+      return;
+    }
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) {
+        setVisible(true);
+        observer.disconnect();
+      }
+    }, { rootMargin: '200px' });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (!visible) return;
     setLoading(true);
     setError('');
-    api.getGroupPreviewByInvite(token, inviteCode)
+    loadInvitePreview(token, inviteCode)
       .then((data) => setPreview(data))
       .catch(() => setError(t(language, 'inviteInvalid')))
       .finally(() => setLoading(false));
-  }, [token, inviteCode, language]);
+  }, [visible, token, inviteCode, language]);
 
   async function handleJoin() {
     if (!preview) return;
@@ -35,7 +76,7 @@ export function InviteEmbed({ token, language, inviteCode, currentUserId, member
     try {
       const payload = await api.joinGroupByInvite(token, inviteCode);
       onJoined?.(payload.group);
-      onNavigate?.(payload.group.id);
+      onNavigate?.(payload.group.id, channelId);
     } catch {
       setError(t(language, 'inviteJoinError'));
     }
@@ -44,11 +85,11 @@ export function InviteEmbed({ token, language, inviteCode, currentUserId, member
 
   function handleNavigate() {
     if (!preview) return;
-    onNavigate?.(preview.group.id);
+    onNavigate?.(preview.group.id, channelId);
   }
 
-  if (loading) return <div className="invite-embed loading"><span /></div>;
-  if (error) return <div className="invite-embed error">{error}</div>;
+  if (!visible || loading) return <div ref={rootRef} className="invite-embed loading"><span /></div>;
+  if (error) return <div ref={rootRef} className="invite-embed error">{error}</div>;
   if (!preview) return null;
 
   const isMember = memberGroupIds?.has(preview.group.id) ?? false;
@@ -59,7 +100,7 @@ export function InviteEmbed({ token, language, inviteCode, currentUserId, member
   const bannerBackground = plateCss ?? 'linear-gradient(135deg, var(--blue) 0%, color-mix(in srgb, var(--blue) 55%, #000) 100%)';
 
   return (
-    <div className="group-embed">
+    <div ref={rootRef} className="group-embed">
       <div className="group-embed-banner" style={{ background: bannerBackground }} />
       <div className="group-embed-head">
         <div className="group-embed-avatar-wrap">

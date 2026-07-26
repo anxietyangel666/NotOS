@@ -51,3 +51,22 @@ export function describeKey(code: string, fallback: string): string {
   if (code.startsWith('Arrow')) return code.slice(5);
   return code;
 }
+
+export function audioConstraintsFromCallSettings(settings: CallSettings): MediaTrackConstraints {
+  return {
+    deviceId: settings.inputDeviceId && settings.inputDeviceId !== 'default' ? { exact: settings.inputDeviceId } : undefined,
+    noiseSuppression: settings.noiseSuppression,
+    echoCancellation: settings.echoCancellation,
+    autoGainControl: settings.autoGainControl
+  };
+}
+
+export async function applyCallAudioConstraints(track: MediaStreamTrack | null, settings: CallSettings): Promise<void> {
+  if (!track || track.readyState === 'ended') return;
+  try {
+    await track.applyConstraints(audioConstraintsFromCallSettings(settings));
+  } catch {
+    // Some devices/drivers do not support every processing flag. Keep the live
+    // call running and let the next getUserMedia call use the saved settings.
+  }
+}

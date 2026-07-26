@@ -1,44 +1,59 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent } from 'react';
-import { createPortal } from 'react-dom';
+﻿import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent } from 'react';
+import { createPortal, flushSync } from 'react-dom';
 import type { Socket } from 'socket.io-client';
 import { api } from '../api/client';
 import { cacheUser, getOrFetchUser } from '../api/user-cache';
 import { useSocket } from '../hooks/use-socket';
-import type { DesktopIconSize, DesktopSort, Language, MessengerMessage, NameStyle, NamePlate, PinnedCard, PublicUser, StoragePayload, Theme } from '../api/types';
+import type { ConnectionProvider, DesktopIconSize, DesktopSort, DesktopWallMessage, FriendRequests, Group, GroupMessage, Language, MentionNotification, MessengerMessage, NameStyle, NamePlate, PinnedCard, PublicUser, Theme, UserConnection } from '../api/types';
 import { DEFAULT_NAMEPLATE, nameplateToCss } from '../api/types';
-import type { StorageItem } from '../api/types';
 import type { AuthNotice } from '../app-types';
 import { downloadAuthFile, openNativeImageFile, readImageAsDataUrl } from '../auth/auth-file';
 import { useClock } from '../hooks/use-clock';
-import { LANGUAGES, LOCALES, THEMES, t, getSavedTimeFormat, saveTimeFormat, type TimeFormat } from '../i18n';
+import { LANGUAGES, LOCALES, THEMES, TRANSLATE_LANGUAGES, findTranslateLanguage, t, getSavedTimeFormat, saveTimeFormat, getSavedTranslateTarget, saveTranslateTarget, getSavedComposerTranslateTarget, saveComposerTranslateTarget, type TimeFormat } from '../i18n';
 import { addMusicTrack, deleteMusicTrack, getMusicTracks, saveMusicTracksOrder, type MusicTrack } from '../music-library';
 import { AvatarCropper } from './AvatarCropper';
 import { DesktopWall } from './DesktopWall';
+import { DesktopIcons } from './DesktopIcons';
 import { MessengerWindow, type OngoingCallInfo } from './MessengerWindow';
+import { isVideoCircleAttachment, isVoiceAttachment } from './VoiceMessage';
 import { AiChatWindow } from './AiChatWindow';
 import { callMessageLabel, formatCallDuration } from '../utils/call-messages';
-import { MusicPlayerWindow } from './MusicPlayerWindow';
+import { WatchTogetherWindow } from './WatchTogetherWindow';
 import { PlayPauseIcon, PrevTrackIcon, NextTrackIcon, VolumeIcon } from './PlayerIcons';
 import { ProfileModal } from './ProfileModal';
 import { SaveBar } from './SaveBar';
 import { NameStyleModal } from './NameStyleModal';
-import { UserBadges } from './UserBadges';
 import { UserName } from './UserName';
-import { nameStyleClass, nameStyleToCss } from '../utils/name-style';
-import { ImageViewerWindow } from './ImageViewerWindow';
-import { VideoViewerWindow } from './VideoViewerWindow';
+import { UserStatusPanel } from './UserStatusPanel';
+import {
+  loadUserStatus,
+  saveUserStatus,
+  STATUS_CHANGED_EVENT,
+  type PresenceStatus,
+  type UserStatusState
+} from '../utils/user-status';
+import { applyPresenceChange, normalizePresenceSnapshot, onlineIdsFromPresence, type PresenceChangedPayload, type PresenceSnapshotPayload } from '../utils/presence';
 import { PinnedImageCard } from './PinnedImageWindow';
 import { PinnedVideoCard } from './PinnedVideoWindow';
-import { NotepadWindow } from './NotepadWindow';
 import { RemoteDesktopWindow } from './RemoteDesktopWindow';
-import { VirtualExplorer } from './VirtualExplorer';
 import { WindowFrame } from './WindowFrame';
 import { PinSetupModal } from './PinSetupModal';
 import { PinDisableModal } from './PinDisableModal';
 import { VoiceSettings } from './VoiceSettings';
+import { CustomEmojiSettings } from './CustomEmojiSettings';
+import { EmojiPicker } from './EmojiPicker';
+import { EmojiToggleIcon } from './ChatComposeIcons';
+import { EMOJI_BURST_EVENT, playEmojiBurst, type EmojiBurstEventDetail } from './Twemoji';
+import { ProfilePreviewCard } from './ProfilePreviewCard';
+import { customEmojiToShortcodes, expandCustomEmojiShortcodes } from '../utils/custom-emoji';
+import { parseForward } from '../utils/forward';
 import { UpdatesWindow } from './UpdatesWindow';
+import { InboxWindow } from './InboxWindow';
 import { hasPin } from '../utils/pin-lock';
 import { LATEST_UPDATE_ID, hasUnseenUpdate, markUpdatesSeen } from '../utils/updates';
+import { DesktopNotifications, type DesktopNotification } from './DesktopNotifications';
+import { ErrorBoundary } from './ErrorBoundary';
+import { assetUrl } from '../utils/assets';
 
 type DesktopProps = {
   token: string;
@@ -50,19 +65,25 @@ type DesktopProps = {
   onLogout: () => void;
 };
 
-type SettingsTab = 'profile' | 'desktop' | 'appearance' | 'region' | 'music' | 'voice' | 'security' | 'premium';
+type SettingsTab = 'profile' | 'desktop' | 'appearance' | 'region' | 'connections' | 'music' | 'voice' | 'privacy' | 'security' | 'premium' | 'customEmoji';
 type DesktopIconId = string;
 type DesktopContextMenu =
   | { type: 'desktop'; x: number; y: number }
   | { type: 'shortcut'; x: number; y: number; iconId: string };
 
-type DesktopNotification = {
-  id: string;
-  title: string;
-  message: string;
-  avatarData?: string;
-  onOpen?: () => void;
+type MentionSocketPayload =
+  | { kind: 'dm'; message: MessengerMessage; sender: PublicUser }
+  | { kind: 'group'; message: GroupMessage; sender: PublicUser; group: Group };
+
+type ViewTransitionDocument = Document & {
+  startViewTransition?: (updateCallback: () => void) => {
+    ready: Promise<void>;
+    finished: Promise<void>;
+    updateCallbackDone: Promise<void>;
+  };
 };
+
+// DesktopNotification type is imported from DesktopNotifications.tsx
 
 type IconDragState = {
   ids: DesktopIconId[];
@@ -74,6 +95,14 @@ type IconDragState = {
 
 const LIGHT_WALLPAPER = 'linear-gradient(135deg, #dff1ff 0%, #f7fbff 48%, #e8f0f8 100%)';
 const DARK_WALLPAPER = 'linear-gradient(135deg, #111827 0%, #172033 48%, #0b1220 100%)';
+const EMPTY_INBOX_REQUESTS: FriendRequests = { incoming: [], outgoing: [] };
+
+function friendRequestReadKey(user: FriendRequests['incoming'][number]) {
+  return `friendRequest:${user.id}:${user.requestCreatedAt ?? user.createdAt}`;
+}
+function mentionReadKey(mention: MentionNotification) {
+  return `mention:${mention.id}`;
+}
 
 const WALLPAPERS = [
   {
@@ -95,6 +124,39 @@ const WALLPAPERS = [
 ];
 
 const ACCENT_COLORS = ['#0078D4', '#2AABEE', '#00A86B', '#7C3AED', '#E81123', '#FF8C00', '#D83B01', '#E3008C'];
+const RIOT_REGIONS = [
+  'br1', 'eun1', 'euw1', 'jp1', 'kr', 'la1', 'la2', 'me1', 'na1', 'oc1', 'ru', 'sg2', 'tr1', 'tw2', 'vn2'
+];
+const CONNECTION_ICONS = {
+  spotify: assetUrl('Icons/spotify.png'),
+  riot: assetUrl('Icons/riot.png')
+};
+type ConnectionVisibilityDraft = Record<ConnectionProvider, { showProfile: boolean; showActivity: boolean }>;
+function defaultConnectionVisibilityDraft(): ConnectionVisibilityDraft {
+  return {
+    spotify: { showProfile: true, showActivity: true },
+    riot: { showProfile: true, showActivity: true }
+  };
+}
+function readConnectionVisibility(connection: UserConnection | undefined | null) {
+  return {
+    showProfile: typeof connection?.metadata?.showProfile === 'boolean' ? connection.metadata.showProfile : true,
+    showActivity: typeof connection?.metadata?.showActivity === 'boolean' ? connection.metadata.showActivity : true
+  };
+}
+function connectionVisibilityFromConnections(connections: UserConnection[]) {
+  const draft = defaultConnectionVisibilityDraft();
+  for (const connection of connections) {
+    if (!connection.connected) continue;
+    draft[connection.provider] = readConnectionVisibility(connection);
+  }
+  return draft;
+}
+function connectionVisibilityIsDirty(connection: UserConnection, draft: ConnectionVisibilityDraft) {
+  const saved = readConnectionVisibility(connection);
+  const next = draft[connection.provider];
+  return saved.showProfile !== next.showProfile || saved.showActivity !== next.showActivity;
+}
 
 const RECENT_WALLPAPERS_KEY = 'notoc.recentWallpapers';
 const MAX_RECENT_WALLPAPERS = 8;
@@ -110,13 +172,12 @@ function saveWindowMaximized(value: Record<string, boolean>) {
 
 const DEFAULT_ICON_POSITIONS = {
   messenger: { x: 18, y: 18 },
-  storage: { x: 18, y: 140 },
-  musicPlayer: { x: 18, y: 262 },
-  updates: { x: 18, y: 384 },
-  aiChat: { x: 18, y: 506 }
+  inbox: { x: 150, y: 18 },
+  watchTogether: { x: 18, y: 140 },
+  updates: { x: 18, y: 262 },
+  aiChat: { x: 18, y: 384 }
 } satisfies Record<string, { x: number; y: number }>;
 
-const DESKTOP_FOLDER_ID = 'system-desktop';
 const MAX_IMPORTED_FILE_SIZE = 50 * 1024 * 1024;
 const MAX_IMPORTED_VIDEO_SIZE = 150 * 1024 * 1024;
 
@@ -127,20 +188,59 @@ function maxImportSizeForFile(file: File) {
 }
 
 const ICON_METRICS: Record<DesktopIconSize, { width: number; height: number; gap: number }> = {
-  small: { width: 92, height: 82, gap: 10 },
-  medium: { width: 118, height: 108, gap: 14 },
-  large: { width: 146, height: 132, gap: 18 }
+  small: { width: 92, height: 100, gap: 6 },
+  medium: { width: 118, height: 126, gap: 6 },
+  large: { width: 146, height: 150, gap: 8 }
 };
+
+const DESKTOP_GRID_MARGIN = 18;
+const DESKTOP_GRID_TASKBAR_RESERVED = 76;
 
 const SETTINGS_TABS: Array<{ id: SettingsTab; labelKey: Parameters<typeof t>[1] }> = [
   { id: 'desktop', labelKey: 'desktopSettings' },
   { id: 'appearance', labelKey: 'appearanceSettings' },
   { id: 'region', labelKey: 'languageAndTime' },
+  { id: 'connections', labelKey: 'connectionsSettings' },
   { id: 'music', labelKey: 'music' },
   { id: 'voice', labelKey: 'voiceAndVideo' },
+  { id: 'customEmoji', labelKey: 'customEmojiSettingsTitle' },
+  { id: 'privacy', labelKey: 'privacySettings' },
   { id: 'security', labelKey: 'securitySettings' },
   { id: 'premium', labelKey: 'premiumSettings' }
 ];
+
+const SETTINGS_HEADINGS: Record<SettingsTab, Array<{ id: string; labelKey: Parameters<typeof t>[1] }>> = {
+  profile: [
+    { id: 'profile-main', labelKey: 'profile' },
+    { id: 'profile-style', labelKey: 'displayNameStyles' },
+    { id: 'profile-theme', labelKey: 'profileTheme' },
+    { id: 'profile-nameplate', labelKey: 'nameplate' },
+    { id: 'profile-status', labelKey: 'profileStatus' }
+  ],
+  desktop: [
+    { id: 'desktop-wallpaper', labelKey: 'wallpaper' },
+    { id: 'desktop-icons', labelKey: 'iconLayout' }
+  ],
+  appearance: [
+    { id: 'appearance-preview', labelKey: 'appearanceSettings' },
+    { id: 'appearance-accent', labelKey: 'recentColors' },
+    { id: 'appearance-theme', labelKey: 'customColor' },
+    { id: 'appearance-transparency', labelKey: 'transparencyEffects' }
+  ],
+  region: [
+    { id: 'region-language', labelKey: 'languageAndTime' },
+    { id: 'region-translate', labelKey: 'translateTo' },
+    { id: 'region-composer', labelKey: 'composerTranslateTo' },
+    { id: 'region-time', labelKey: 'timeFormat' }
+  ],
+  connections: [],
+  music: [],
+  voice: [],
+  customEmoji: [],
+  privacy: [{ id: 'privacy-group-identity', labelKey: 'groupIdentityMessages' }],
+  security: [],
+  premium: []
+};
 
 
 
@@ -167,11 +267,71 @@ function normalizeIconPositions(value: PublicUser['desktopIcons']): PublicUser['
   return {
     ...value,
     messenger: { ...value.messenger, ...DEFAULT_ICON_POSITIONS.messenger, ...value.messenger, kind: 'app' },
-    storage: { ...value.storage, ...DEFAULT_ICON_POSITIONS.storage, ...value.storage, kind: 'app' },
-    musicPlayer: { ...value.musicPlayer, ...DEFAULT_ICON_POSITIONS.musicPlayer, ...value.musicPlayer, kind: 'app' },
+    inbox: { ...value.inbox, ...DEFAULT_ICON_POSITIONS.inbox, ...value.inbox, kind: 'app' },
+    watchTogether: { ...value.watchTogether, ...DEFAULT_ICON_POSITIONS.watchTogether, ...value.watchTogether, kind: 'app' },
     updates: { ...value.updates, ...DEFAULT_ICON_POSITIONS.updates, ...value.updates, kind: 'app' },
     aiChat: { ...value.aiChat, ...DEFAULT_ICON_POSITIONS.aiChat, ...value.aiChat, kind: 'app' }
   } satisfies PublicUser['desktopIcons'];
+}
+
+function desktopGridBounds(bounds: DOMRect | { width: number; height: number } | null | undefined, metrics: { width: number; height: number }) {
+  const width = bounds?.width ?? window.innerWidth;
+  const height = bounds?.height ?? window.innerHeight;
+  return {
+    maxX: Math.max(DESKTOP_GRID_MARGIN, width - metrics.width - DESKTOP_GRID_MARGIN),
+    maxY: Math.max(DESKTOP_GRID_MARGIN, height - DESKTOP_GRID_TASKBAR_RESERVED - metrics.height)
+  };
+}
+
+function snapDesktopIconPosition(
+  x: number,
+  y: number,
+  metrics: { width: number; height: number; gap: number },
+  bounds?: DOMRect | { width: number; height: number } | null
+) {
+  const stepX = metrics.width + metrics.gap;
+  const stepY = metrics.height + metrics.gap;
+  const { maxX, maxY } = desktopGridBounds(bounds, metrics);
+  const maxColumn = Math.max(0, Math.floor((maxX - DESKTOP_GRID_MARGIN) / stepX));
+  const maxRow = Math.max(0, Math.floor((maxY - DESKTOP_GRID_MARGIN) / stepY));
+  const column = Math.max(0, Math.min(maxColumn, Math.round((x - DESKTOP_GRID_MARGIN) / stepX)));
+  const row = Math.max(0, Math.min(maxRow, Math.round((y - DESKTOP_GRID_MARGIN) / stepY)));
+  return {
+    x: DESKTOP_GRID_MARGIN + column * stepX,
+    y: DESKTOP_GRID_MARGIN + row * stepY
+  };
+}
+
+function desktopGridPositionByIndex(
+  index: number,
+  metrics: { width: number; height: number; gap: number },
+  bounds?: DOMRect | { width: number; height: number } | null
+) {
+  const stepX = metrics.width + metrics.gap;
+  const stepY = metrics.height + metrics.gap;
+  const { maxY } = desktopGridBounds(bounds, metrics);
+  const rows = Math.max(1, Math.floor((maxY - DESKTOP_GRID_MARGIN) / stepY) + 1);
+  const column = Math.floor(index / rows);
+  const row = index % rows;
+  return snapDesktopIconPosition(
+    DESKTOP_GRID_MARGIN + column * stepX,
+    DESKTOP_GRID_MARGIN + row * stepY,
+    metrics,
+    bounds
+  );
+}
+
+function snapDesktopIconPositions(
+  positions: PublicUser['desktopIcons'],
+  metrics: { width: number; height: number; gap: number },
+  bounds?: DOMRect | { width: number; height: number } | null
+) {
+  const next: PublicUser['desktopIcons'] = { ...positions };
+  for (const [id, pos] of Object.entries(positions)) {
+    if (!pos) continue;
+    next[id] = { ...pos, ...snapDesktopIconPosition(pos.x, pos.y, metrics, bounds) };
+  }
+  return next;
 }
 
 function rectsIntersect(a: { x: number; y: number; width: number; height: number }, b: { x: number; y: number; width: number; height: number }) {
@@ -185,42 +345,6 @@ function formatPlaybackTime(value: number) {
     .toString()
     .padStart(2, '0');
   return `${minutes}:${seconds}`;
-}
-
-function isAudioStorageItem(item: StorageItem) {
-  return item.type === 'file' && (item.mimeType?.startsWith('audio/') || item.content?.startsWith('data:audio/'));
-}
-
-function isImageStorageItem(item: StorageItem) {
-  return item.type === 'file' && (item.mimeType?.startsWith('image/') || item.content?.startsWith('data:image/'));
-}
-
-function isVideoStorageItem(item: StorageItem) {
-  return item.type === 'file' && (item.mimeType?.startsWith('video/') || item.content?.startsWith('data:video/'));
-}
-
-function now() {
-  return new Date().toISOString();
-}
-
-function makeStorageId() {
-  return crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
-
-function ensureDesktopFolder(items: StorageItem[]) {
-  if (items.some((item) => item.id === DESKTOP_FOLDER_ID)) return items;
-  const timestamp = now();
-  return [
-    ...items,
-    {
-      id: DESKTOP_FOLDER_ID,
-      type: 'folder' as const,
-      name: 'Desktop',
-      parentId: null,
-      createdAt: timestamp,
-      updatedAt: timestamp
-    }
-  ];
 }
 
 function readFileAsDataUrl(file: File, onProgress?: (fraction: number) => void) {
@@ -264,11 +388,19 @@ function dataUrlWithMime(dataUrl: string, mimeType: string) {
   return commaIndex >= 0 ? `data:${mimeType};base64,${dataUrl.slice(commaIndex + 1)}` : dataUrl;
 }
 
-function notificationMessage(message: Pick<MessengerMessage, 'body' | 'imageData'>, language: Language) {
+function notificationMessage(message: Pick<MessengerMessage, 'body' | 'imageData' | 'imageName'>, language: Language) {
+  const fwd = parseForward(message.body);
+  if (fwd) return `↪ ${fwd.caption || fwd.body}`;
+  if (isVideoCircleAttachment(message.imageData, message.imageName)) {
+    return language === 'ru' ? 'Р’РёРґРµРѕ РєСЂСѓР¶РѕРє' : 'Video message';
+  }
+  if (isVoiceAttachment(message.imageData, message.imageName)) {
+    return language === 'ru' ? 'Р“РѕР»РѕСЃРѕРІРѕРµ СЃРѕРѕР±С‰РµРЅРёРµ' : 'Voice message';
+  }
   return message.body || (message.imageData ? t(language, 'imageMessage') : '');
 }
 
-// Field-by-field nameplate comparison — avoids JSON.stringify on every render.
+// Field-by-field nameplate comparison вЂ” avoids JSON.stringify on every render.
 function nameplateIsDirty(
   draft: NonNullable<NamePlate>,
   saved: NonNullable<NamePlate>
@@ -282,12 +414,69 @@ function nameplateIsDirty(
   );
 }
 
+function nameStyleIsDirty(draft: NameStyle, saved: NameStyle): boolean {
+  if (!draft && !saved) return false;
+  if (!draft || !saved) return true;
+  return draft.font !== saved.font || draft.effect !== saved.effect || draft.color !== saved.color;
+}
+
+function desktopIconsChanged(draft: PublicUser['desktopIcons'], saved: PublicUser['desktopIcons']): boolean {
+  try {
+    return JSON.stringify(draft) !== JSON.stringify(normalizeIconPositions(saved));
+  } catch {
+    return draft !== saved;
+  }
+}
+
+function applyAppearanceToDocument(theme: Theme, accentColor: string, transparencyEnabled: boolean) {
+  document.documentElement.dataset.theme = theme;
+  document.documentElement.style.setProperty('--blue', accentColor || '#2AABEE');
+  document.documentElement.style.removeProperty('--blue-dark');
+  document.documentElement.dataset.transparency = transparencyEnabled === false ? 'off' : 'on';
+}
+
+function runThemeWaveTransition(update: () => void) {
+  const doc = document as ViewTransitionDocument;
+  const canUseViewTransition =
+    typeof doc.startViewTransition === 'function' &&
+    !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  if (!canUseViewTransition) {
+    update();
+    return;
+  }
+
+  const transition = doc.startViewTransition(update);
+  const originX = 0;
+  const originY = window.innerHeight;
+  const endRadius = Math.hypot(window.innerWidth, window.innerHeight) + 48;
+
+  transition.ready
+    .then(() => {
+      document.documentElement.animate(
+        {
+          clipPath: [
+            `circle(0px at ${originX}px ${originY}px)`,
+            `circle(${endRadius}px at ${originX}px ${originY}px)`
+          ]
+        },
+        {
+          duration: 680,
+          easing: 'cubic-bezier(0.22, 1, 0.36, 1)',
+          pseudoElement: '::view-transition-new(root)'
+        } as KeyframeAnimationOptions
+      );
+    })
+    .catch(() => undefined);
+}
+
 export function Desktop({ token, user, language, notice, onNoticeClose, onUserChange, onLogout }: DesktopProps) {
   const desktopRef = useRef<HTMLElement | null>(null);
   const [contextMenu, setContextMenu] = useState<DesktopContextMenu | null>(null);
   const [settingsWindow, setSettingsWindow] = useState<'closed' | 'open' | 'minimized'>('closed');
   const [settingsMaximized, setSettingsMaximized] = useState(() => loadWindowMaximized().settings ?? false);
   const [activeTab, setActiveTab] = useState<SettingsTab>('profile');
+  const [settingsNav, setSettingsNav] = useState<{ entries: SettingsTab[]; index: number }>({ entries: ['profile'], index: 0 });
   const [nicknameDraft, setNicknameDraft] = useState(user.nickname);
   const [nameStyleDraft, setNameStyleDraft] = useState<NameStyle>(user.nameStyle ?? null);
   const [profilePrimaryDraft, setProfilePrimaryDraft] = useState(user.profilePrimaryColor || '#2AABEE');
@@ -295,7 +484,9 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
   const [nameplateDraft, setNameplateDraft] = useState<NonNullable<NamePlate>>(user.nameplate ?? DEFAULT_NAMEPLATE);
   const [nameStyleModalOpen, setNameStyleModalOpen] = useState(false);
   const [confirmDeleteNameStyle, setConfirmDeleteNameStyle] = useState(false);
-  const [statusDraft, setStatusDraft] = useState(user.status ?? '');
+  const [statusDraft, setStatusDraft] = useState(() => customEmojiToShortcodes(user.status ?? ''));
+  const [statusEmojiOpen, setStatusEmojiOpen] = useState(false);
+  const statusEmojiAnchorRef = useRef<HTMLButtonElement | null>(null);
   const [avatarDraft, setAvatarDraft] = useState(user.avatarData);
   const [wallpaperDraft, setWallpaperDraft] = useState(user.wallpaper);
   const [recentWallpapers, setRecentWallpapers] = useState<string[]>(() => {
@@ -303,6 +494,12 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
   });
   const [languageDraft, setLanguageDraft] = useState<Language>(user.language);
   const [languageOpen, setLanguageOpen] = useState(false);
+  const [translateTarget, setTranslateTarget] = useState<string>(getSavedTranslateTarget);
+  const [translateTargetOpen, setTranslateTargetOpen] = useState(false);
+  const [translateSearch, setTranslateSearch] = useState('');
+  const [composerTranslateTarget, setComposerTranslateTarget] = useState<string>(getSavedComposerTranslateTarget);
+  const [composerTranslateTargetOpen, setComposerTranslateTargetOpen] = useState(false);
+  const [composerTranslateSearch, setComposerTranslateSearch] = useState('');
   const [timeFormat, setTimeFormat] = useState<TimeFormat>(getSavedTimeFormat);
   const clock = useClock(language, getSavedTimeFormat());
   const [themeDraft, setThemeDraft] = useState<Theme>(user.theme);
@@ -310,32 +507,57 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
   const [transparencyDraft, setTransparencyDraft] = useState(user.transparencyEnabled);
   const [iconSizeDraft, setIconSizeDraft] = useState<DesktopIconSize>(user.desktopIconSize);
   const [hideIconsDraft, setHideIconsDraft] = useState(user.hideDesktopIcons);
+  const [allowGroupIdentityMessagesDraft, setAllowGroupIdentityMessagesDraft] = useState(user.allowGroupIdentityMessages ?? true);
+  const [connections, setConnections] = useState<UserConnection[]>([]);
+  const [connectionVisibilityDraft, setConnectionVisibilityDraft] = useState<ConnectionVisibilityDraft>(() => defaultConnectionVisibilityDraft());
+  const [connectionsLoading, setConnectionsLoading] = useState(false);
+  const [connectionsStatus, setConnectionsStatus] = useState('');
+  const [spotifyConfigured, setSpotifyConfigured] = useState(false);
+  const [riotConfigured, setRiotConfigured] = useState(false);
+  const [riotGameName, setRiotGameName] = useState('');
+  const [riotTagLine, setRiotTagLine] = useState('');
+  const [riotRegion, setRiotRegion] = useState('euw1');
   const [cropSource, setCropSource] = useState<string | null>(null);
-  const [storageWindow, setStorageWindow] = useState<'closed' | 'open' | 'minimized'>('closed');
-  const [storageMaximized, setStorageMaximized] = useState(() => loadWindowMaximized().explorer ?? false);
-  const [explorerFolderId, setExplorerFolderId] = useState<string | null>(null);
+  const widgetPhotoInputRef = useRef<HTMLInputElement | null>(null);
+  const widgetVideoInputRef = useRef<HTMLInputElement | null>(null);
+  const playlistAudioInputRef = useRef<HTMLInputElement | null>(null);
+  const widgetDropPointRef = useRef<{ x: number; y: number } | null>(null);
+  const [inboxWindow, setInboxWindow] = useState<'closed' | 'open' | 'minimized'>('closed');
+  const [inboxMaximized, setInboxMaximized] = useState(() => loadWindowMaximized().inbox ?? false);
+  const [inboxReadIds, setInboxReadIds] = useState<Set<string>>(() => {
+    try {
+      const stored = JSON.parse(localStorage.getItem(`notoc.inbox.read.${user.id}`) ?? '[]');
+      return new Set(Array.isArray(stored) ? stored.filter((value) => typeof value === 'string') : []);
+    } catch {
+      return new Set();
+    }
+  });
+  const [inboxUnreadCount, setInboxUnreadCount] = useState(0);
+  const [inboxLoading, setInboxLoading] = useState(true);
+  const [inboxRequests, setInboxRequests] = useState<FriendRequests>(EMPTY_INBOX_REQUESTS);
+  const [inboxWallMessages, setInboxWallMessages] = useState<DesktopWallMessage[]>([]);
+  const [mentionNotifications, setMentionNotifications] = useState<MentionNotification[]>(() => {
+    try {
+      const stored = JSON.parse(localStorage.getItem(`notoc.inbox.mentions.${user.id}`) ?? '[]');
+      return Array.isArray(stored) ? stored.filter((item) => item && typeof item.id === 'string') as MentionNotification[] : [];
+    } catch {
+      return [];
+    }
+  });
   const [messengerWindow, setMessengerWindow] = useState<'closed' | 'open' | 'minimized'>('closed');
   const [messengerMaximized, setMessengerMaximized] = useState(() => loadWindowMaximized().messenger ?? false);
   const [remoteDesktopWindow, setRemoteDesktopWindow] = useState<'closed' | 'open' | 'minimized'>('closed');
   const [remoteDesktopMaximized, setRemoteDesktopMaximized] = useState(() => loadWindowMaximized()['remote-desktop'] ?? false);
   const [remoteDesktopUser, setRemoteDesktopUser] = useState<PublicUser | null>(null);
   const [activeChatUserId, setActiveChatUserId] = useState<string | null>(null);
+  const [activeChatGroupId, setActiveChatGroupId] = useState<string | null>(null);
   const [messengerChatRequest, setMessengerChatRequest] = useState<{ userId: string; requestId: number } | null>(null);
-  const [notepadWindow, setNotepadWindow] = useState<'closed' | 'open' | 'minimized'>('closed');
-  const [notepadMaximized, setNotepadMaximized] = useState(() => loadWindowMaximized().notepad ?? false);
-  const [notepadItemId, setNotepadItemId] = useState<string | null>(null);
-  const [notepadTitle, setNotepadTitle] = useState(t(language, 'notepad'));
-  const [musicPlayerWindow, setMusicPlayerWindow] = useState<'closed' | 'open' | 'minimized'>('closed');
-  const [musicPlayerMaximized, setMusicPlayerMaximized] = useState(() => loadWindowMaximized()['music-player'] ?? false);
-  const [musicPlayerInitialTrackId, setMusicPlayerInitialTrackId] = useState<string | null>(null);
-  const [imageViewerWindow, setImageViewerWindow] = useState<'closed' | 'open' | 'minimized'>('closed');
-  const [imageViewerMaximized, setImageViewerMaximized] = useState(() => loadWindowMaximized()['image-viewer'] ?? false);
+  const [messengerGroupRequest, setMessengerGroupRequest] = useState<{ groupId: string; group: Group; channelId: string | null; requestId: number } | null>(null);
+  const [watchTogetherWindow, setWatchTogetherWindow] = useState<'closed' | 'open' | 'minimized'>('closed');
+  const [watchTogetherMaximized, setWatchTogetherMaximized] = useState(() => loadWindowMaximized()['watch-together'] ?? false);
+  const [watchTogetherInvite, setWatchTogetherInvite] = useState<{ code: string; requestId: number } | null>(null);
   const [aiChatWindow, setAiChatWindow] = useState<'closed' | 'open' | 'minimized'>('closed');
   const [aiChatMaximized, setAiChatMaximized] = useState(() => loadWindowMaximized()['ai-chat'] ?? false);
-  const [imageViewerItemId, setImageViewerItemId] = useState<string | null>(null);
-  const [videoViewerWindow, setVideoViewerWindow] = useState<'closed' | 'open' | 'minimized'>('closed');
-  const [videoViewerMaximized, setVideoViewerMaximized] = useState(() => loadWindowMaximized()['video-viewer'] ?? false);
-  const [videoViewerItemId, setVideoViewerItemId] = useState<string | null>(null);
   const [pinnedCards, setPinnedCards] = useState<PinnedCard[]>(() => (Array.isArray(user.pinnedCards) ? user.pinnedCards : []));
   const [desktopWatcherCount, setDesktopWatcherCount] = useState(0);
   const [viewerCursors, setViewerCursors] = useState<Record<string, { nickname: string; x: number; y: number }>>({});
@@ -349,12 +571,15 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
   pinnedCardsRef.current = pinnedCards;
   // Window z-indexes start well above the desktop context menu (z 200) so an
   // open window always renders above the desktop right-click menu.
-  const [windowZ, setWindowZ] = useState({ settings: 1010, explorer: 1011, notepad: 1012, messenger: 1013, remoteDesktop: 1014, musicPlayer: 1015, imageViewer: 1016, aiChat: 1017, videoViewer: 1018 });
-  const [nextZ, setNextZ] = useState(1020);
+  const [windowZ, setWindowZ] = useState({ settings: 1010, inbox: 1011, messenger: 1012, remoteDesktop: 1013, aiChat: 1014, watchTogether: 1015 });
+  const [nextZ, setNextZ] = useState(1015);
   const [iconPositions, setIconPositions] = useState<PublicUser['desktopIcons']>(() => normalizeIconPositions(user.desktopIcons));
+  // The desktop size (px) for which the current iconPositions are valid. On
+  // resize we rescale every icon's x/y by the width/height ratio so the layout
+  // stays proportional (an icon dropped at the right edge in fullscreen stays at
+  // the right edge in a smaller window). Initialised on first measure.
+  const iconRefSizeRef = useRef<{ width: number; height: number } | null>(null);
   const [selectedIconIds, setSelectedIconIds] = useState<DesktopIconId[]>([]);
-  const [renamingIconId, setRenamingIconId] = useState<DesktopIconId | null>(null);
-  const [renameDraft, setRenameDraft] = useState('');
   const [selectionStart, setSelectionStart] = useState<{ x: number; y: number } | null>(null);
   const [selectionRect, setSelectionRect] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
   const [dragState, setDragState] = useState<IconDragState | null>(null);
@@ -371,14 +596,14 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
   }, []);
   const [confirmLogout, setConfirmLogout] = useState(false);
   const [settingsSearch, setSettingsSearch] = useState('');
+  const settingsContentRef = useRef<HTMLDivElement | null>(null);
+  const [highlightSettingsHeading, setHighlightSettingsHeading] = useState<string | null>(null);
   const [legalContent, setLegalContent] = useState<'privacy' | 'terms' | null>(null);
   const [pinModal, setPinModal] = useState<'create' | 'change' | null>(null);
   const [pinDisableModal, setPinDisableModal] = useState(false);
   const [pinEnabled, setPinEnabled] = useState<boolean>(() => hasPin(user.id));
   const [pinStatusMessage, setPinStatusMessage] = useState('');
   const [musicTracks, setMusicTracks] = useState<MusicTrack[]>([]);
-  const [storageItems, setStorageItems] = useState<StorageItem[]>([]);
-  const [storageAudioFiles, setStorageAudioFiles] = useState<StorageItem[]>([]);
   const [currentTrackIndex, setCurrentTrackIndex] = useState(0);
   const [dragTrackIndex, setDragTrackIndex] = useState<number | null>(null);
   const [musicPlaying, setMusicPlaying] = useState(false);
@@ -422,6 +647,8 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
   const [cardCvcDraft, setCardCvcDraft] = useState('');
   const [premiumStatus, setPremiumStatus] = useState('');
   const [profileModalUser, setProfileModalUser] = useState<PublicUser | null>(null);
+  // Avatar rect so the profile card pops out anchored beside it. Null в†’ centered.
+  const [profileAnchor, setProfileAnchor] = useState<{ left: number; top: number; right: number; bottom: number } | null>(null);
   // What's New / updates center. `updatesInitialId` is set to the latest update
   // id when auto-opened on login (so it opens expanded), null when opened from
   // the desktop shortcut (so it shows the full list).
@@ -429,10 +656,78 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
   const [updatesInitialId, setUpdatesInitialId] = useState<string | null>(null);
   const [taskbarMenu, setTaskbarMenu] = useState<{ x: number; y: number } | null>(null);
   const [onlineUserIds, setOnlineUserIds] = useState<string[]>([]);
+  const [presenceStatuses, setPresenceStatuses] = useState<Record<string, PresenceStatus>>({});
+  const [userStatus, setUserStatus] = useState<UserStatusState>(loadUserStatus);
+  const [statusPanel, setStatusPanel] = useState<{ left: number; bottom: number } | null>(null);
+  const statusTriggerRef = useRef<HTMLButtonElement | null>(null);
 
   useEffect(() => {
-    setStatusDraft(user.status ?? '');
+    setStatusDraft(customEmojiToShortcodes(user.status ?? ''));
   }, [user.status, user.id]);
+
+  // Keep the local presence/voice state in sync with any other surface that
+  // updates it (the panel persists + broadcasts via STATUS_CHANGED_EVENT).
+  useEffect(() => {
+    const onStatusChange = (event: Event) => {
+      const detail = (event as CustomEvent<UserStatusState>).detail;
+      if (detail) setUserStatus(detail);
+    };
+    window.addEventListener(STATUS_CHANGED_EVENT, onStatusChange as EventListener);
+    return () => window.removeEventListener(STATUS_CHANGED_EVENT, onStatusChange as EventListener);
+  }, []);
+
+  const selectUserStatus = useCallback((status: PresenceStatus) => {
+    setUserStatus((prev) => { const next = { ...prev, status }; saveUserStatus(next); return next; });
+  }, []);
+
+  const toggleSelfMute = useCallback(() => {
+    setUserStatus((prev) => {
+      const muted = !prev.voice.muted;
+      const deafened = muted ? prev.voice.deafened : false;
+      const next = { ...prev, voice: { muted, deafened } };
+      saveUserStatus(next);
+      return next;
+    });
+  }, []);
+
+  const toggleSelfDeafen = useCallback(() => {
+    setUserStatus((prev) => {
+      const deafened = !prev.voice.deafened;
+      const muted = deafened ? true : false;
+      const next = { ...prev, voice: { muted, deafened } };
+      saveUserStatus(next);
+      return next;
+    });
+  }, []);
+
+  const openStatusPanel = useCallback((event?: { preventDefault?: () => void; stopPropagation?: () => void }) => {
+    event?.preventDefault?.();
+    event?.stopPropagation?.();
+    const rect = statusTriggerRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    setStatusPanel((cur) => (cur ? null : { left: rect.left, bottom: rect.top }));
+  }, []);
+
+  useEffect(() => {
+    if (!taskbarMenu) return;
+
+    function closeTaskbarMenu(event: globalThis.MouseEvent) {
+      const target = event.target as Element | null;
+      if (target?.closest?.('.taskbar-user-menu')) return;
+      setTaskbarMenu(null);
+    }
+
+    function closeTaskbarMenuOnEscape(event: KeyboardEvent) {
+      if (event.key === 'Escape') setTaskbarMenu(null);
+    }
+
+    window.addEventListener('mousedown', closeTaskbarMenu, true);
+    window.addEventListener('keydown', closeTaskbarMenuOnEscape);
+    return () => {
+      window.removeEventListener('mousedown', closeTaskbarMenu, true);
+      window.removeEventListener('keydown', closeTaskbarMenuOnEscape);
+    };
+  }, [taskbarMenu]);
 
   useEffect(() => {
     localStorage.setItem(RECENT_WALLPAPERS_KEY, JSON.stringify(recentWallpapers));
@@ -444,18 +739,15 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
     const timer = window.setTimeout(() => {
       saveWindowMaximized({
         settings: settingsMaximized,
-        explorer: storageMaximized,
+        inbox: inboxMaximized,
         messenger: messengerMaximized,
         'remote-desktop': remoteDesktopMaximized,
-        notepad: notepadMaximized,
-        'music-player': musicPlayerMaximized,
-        'image-viewer': imageViewerMaximized,
         'ai-chat': aiChatMaximized,
-        'video-viewer': videoViewerMaximized
+        'watch-together': watchTogetherMaximized
       });
     }, 300);
     return () => window.clearTimeout(timer);
-  }, [settingsMaximized, storageMaximized, messengerMaximized, remoteDesktopMaximized, notepadMaximized, musicPlayerMaximized, imageViewerMaximized, aiChatMaximized, videoViewerMaximized]);
+  }, [settingsMaximized, inboxMaximized, messengerMaximized, remoteDesktopMaximized, aiChatMaximized, watchTogetherMaximized]);
 
   useEffect(() => {
     if (!wallpaperDraft) return;
@@ -473,6 +765,73 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
     }
   }, [user, profileModalUser]);
 
+  useEffect(() => {
+    try {
+      const stored = JSON.parse(localStorage.getItem(`notoc.inbox.read.${user.id}`) ?? '[]');
+      setInboxReadIds(new Set(Array.isArray(stored) ? stored.filter((value) => typeof value === 'string') : []));
+    } catch {
+      setInboxReadIds(new Set());
+    }
+    try {
+      const storedMentions = JSON.parse(localStorage.getItem(`notoc.inbox.mentions.${user.id}`) ?? '[]');
+      setMentionNotifications(Array.isArray(storedMentions) ? storedMentions.filter((item) => item && typeof item.id === 'string') as MentionNotification[] : []);
+    } catch {
+      setMentionNotifications([]);
+    }
+  }, [user.id]);
+
+  useEffect(() => {
+    localStorage.setItem(`notoc.inbox.read.${user.id}`, JSON.stringify(Array.from(inboxReadIds).slice(-300)));
+  }, [inboxReadIds, user.id]);
+
+  useEffect(() => {
+    localStorage.setItem(`notoc.inbox.mentions.${user.id}`, JSON.stringify(mentionNotifications.slice(0, 100)));
+  }, [mentionNotifications, user.id]);
+
+  useEffect(() => {
+    setInboxLoading(true);
+    setInboxRequests(EMPTY_INBOX_REQUESTS);
+    setInboxWallMessages([]);
+  }, [user.id]);
+
+  const computedInboxUnreadCount = useMemo(() => {
+    const requestCount = inboxRequests.incoming.reduce(
+      (count, requestUser) => count + (inboxReadIds.has(friendRequestReadKey(requestUser)) ? 0 : 1),
+      0
+    );
+    const wallCount = inboxWallMessages.reduce(
+      (count, message) => count + (inboxReadIds.has(`desktopWall:${message.id}`) ? 0 : 1),
+      0
+    );
+    const mentionCount = mentionNotifications.reduce(
+      (count, mention) => count + (inboxReadIds.has(mentionReadKey(mention)) ? 0 : 1),
+      0
+    );
+    return requestCount + wallCount + mentionCount;
+  }, [inboxReadIds, inboxRequests.incoming, inboxWallMessages, mentionNotifications]);
+
+  const groupMentionCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const mention of mentionNotifications) {
+      if (mention.kind !== 'group' || !mention.group) continue;
+      if (inboxReadIds.has(mentionReadKey(mention))) continue;
+      counts[mention.group.id] = (counts[mention.group.id] ?? 0) + 1;
+    }
+    return counts;
+  }, [inboxReadIds, mentionNotifications]);
+
+  useEffect(() => {
+    setInboxUnreadCount(computedInboxUnreadCount);
+  }, [computedInboxUnreadCount]);
+
+  useEffect(() => {
+    void window.notoc?.setUnreadBadge?.(inboxUnreadCount);
+  }, [inboxUnreadCount]);
+
+  useEffect(() => () => {
+    void window.notoc?.setUnreadBadge?.(0);
+  }, []);
+
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const playerRef = useRef<HTMLDivElement | null>(null);
 
@@ -480,34 +839,95 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
     () => {
       const builtinIcons = [
       { id: 'messenger' as const, letters: 'M', label: t(language, 'messenger'), iconType: 'messenger' },
-      { id: 'storage' as const, letters: 'DB', label: t(language, 'storage'), iconType: 'storage' },
-      { id: 'musicPlayer' as const, letters: 'MP', label: t(language, 'musicPlayer'), iconType: 'music-player' },
+      { id: 'inbox' as const, letters: 'IN', label: language === 'ru' ? 'Почта' : language === 'uk' ? 'Пошта' : 'Mail', iconType: 'inbox', badgeCount: inboxUnreadCount },
+      { id: 'watchTogether' as const, letters: 'WT', label: t(language, 'watchTogether'), iconType: 'watch-together' },
       { id: 'aiChat' as const, letters: 'AI', label: t(language, 'aiChat'), iconType: 'ai-chat' },
-      { id: 'updates' as const, letters: '★', label: t(language, 'updates'), iconType: 'updates' }
+      { id: 'updates' as const, letters: '*', label: t(language, 'updates'), iconType: 'updates' }
       ];
-      const fileIcons = Object.entries(iconPositions)
-        .filter(([id, value]) => id.startsWith('file:') && value.kind === 'storage-item')
-        .map(([id, value]) => {
-          const item = storageItems.find((candidate) => candidate.id === value.storageItemId);
-          const audio = item ? isAudioStorageItem(item) : false;
-          const image = item ? isImageStorageItem(item) : false;
-          const video = item ? isVideoStorageItem(item) : false;
-
-          return {
-            id,
-            letters: value.itemType === 'folder' ? 'DIR' : value.itemType === 'text' ? 'TXT' : audio ? 'MP' : image ? 'IMG' : video ? 'VID' : 'FILE',
-            label: value.label ?? t(language, 'textFile'),
-            iconType: value.itemType === 'file' && audio ? 'music-player' : value.itemType === 'file' && image ? 'image' : value.itemType === 'file' && video ? 'video' : value.itemType ?? 'text'
-          };
-        });
-      return [...builtinIcons, ...fileIcons];
+      return builtinIcons;
     },
-    [iconPositions, language, storageItems]
+    [inboxUnreadCount, language]
   );
 
   const iconMetrics = ICON_METRICS[user.desktopIconSize] ?? ICON_METRICS.medium;
-  const imageViewerItem = useMemo(() => storageItems.find((item) => item.id === imageViewerItemId) ?? null, [imageViewerItemId, storageItems]);
-  const videoViewerItem = useMemo(() => storageItems.find((item) => item.id === videoViewerItemId) ?? null, [videoViewerItemId, storageItems]);
+
+  async function loadConnections() {
+    setConnectionsLoading(true);
+    setConnectionsStatus('');
+    try {
+      const payload = await api.getConnections(token);
+      setConnections(payload.connections);
+      setConnectionVisibilityDraft(connectionVisibilityFromConnections(payload.connections));
+      setSpotifyConfigured(payload.spotifyConfigured);
+      setRiotConfigured(payload.riotConfigured);
+      const riot = payload.connections.find((connection) => connection.provider === 'riot' && connection.connected);
+      if (riot) {
+        const meta = riot.metadata ?? {};
+        const [name, tag = ''] = riot.displayName.split('#');
+        setRiotGameName(typeof meta.gameName === 'string' ? meta.gameName : name);
+        setRiotTagLine(typeof meta.tagLine === 'string' ? meta.tagLine : tag);
+        setRiotRegion(typeof meta.region === 'string' ? meta.region : 'euw1');
+      }
+    } catch (error) {
+      setConnectionsStatus(getErrorMessage(error, language));
+    } finally {
+      setConnectionsLoading(false);
+    }
+  }
+
+  async function connectSpotify() {
+    setConnectionsStatus('');
+    if (!spotifyConfigured) {
+      setConnectionsStatus('Spotify is not configured on the server. Check SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET and SPOTIFY_REDIRECT_URI in Railway variables, then redeploy the server.');
+      return;
+    }
+    try {
+      const payload = await api.startSpotifyConnection(token);
+      window.open(payload.url, '_blank', 'noopener,noreferrer,width=620,height=760');
+      window.setTimeout(() => void loadConnections(), 2500);
+      window.setTimeout(() => void loadConnections(), 7000);
+    } catch (error) {
+      setConnectionsStatus(getErrorMessage(error, language));
+    }
+  }
+
+  async function connectRiot() {
+    setConnectionsStatus('');
+    if (!riotConfigured) {
+      setConnectionsStatus('Riot is not configured on the server. Check RIOT_API_KEY in Railway variables, then redeploy the server.');
+      return;
+    }
+    try {
+      const payload = await api.connectRiot(token, {
+        gameName: riotGameName.trim(),
+        tagLine: riotTagLine.trim().replace(/^#/, ''),
+        region: riotRegion
+      });
+      setConnections((current) => [payload.connection, ...current.filter((connection) => connection.provider !== 'riot')]);
+      setConnectionVisibilityDraft((current) => ({ ...current, riot: readConnectionVisibility(payload.connection) }));
+    } catch (error) {
+      setConnectionsStatus(getErrorMessage(error, language));
+    }
+  }
+
+  async function disconnectProvider(provider: 'spotify' | 'riot') {
+    setConnectionsStatus('');
+    try {
+      await api.disconnectConnection(token, provider);
+      setConnections((current) => current.filter((connection) => connection.provider !== provider));
+      setConnectionVisibilityDraft((current) => ({ ...current, [provider]: { showProfile: true, showActivity: true } }));
+    } catch (error) {
+      setConnectionsStatus(getErrorMessage(error, language));
+    }
+  }
+
+  function updateConnectionVisibility(provider: ConnectionProvider, patch: { showProfile?: boolean; showActivity?: boolean }) {
+    setConnectionsStatus('');
+    setConnectionVisibilityDraft((current) => ({
+      ...current,
+      [provider]: { ...current[provider], ...patch }
+    }));
+  }
 
   // Restore every settings draft to the persisted user values. Used both when
   // `user` changes and when the user clicks "Reset" in the save bar.
@@ -517,7 +937,7 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
     setProfilePrimaryDraft(user.profilePrimaryColor || '#2AABEE');
     setProfileAccentDraft(user.profileAccentColor || '#5865F2');
     setNameplateDraft(user.nameplate ?? DEFAULT_NAMEPLATE);
-    setStatusDraft(user.status ?? '');
+    setStatusDraft(customEmojiToShortcodes(user.status ?? ''));
     setAvatarDraft(user.avatarData);
     setWallpaperDraft(user.wallpaper);
     setLanguageDraft(user.language);
@@ -526,7 +946,21 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
     setTransparencyDraft(user.transparencyEnabled);
     setIconSizeDraft(user.desktopIconSize);
     setHideIconsDraft(user.hideDesktopIcons);
+    setAllowGroupIdentityMessagesDraft(user.allowGroupIdentityMessages ?? true);
+    setConnectionVisibilityDraft(connectionVisibilityFromConnections(connections));
     setTimeFormat(getSavedTimeFormat());
+    setTranslateTarget(getSavedTranslateTarget());
+    setComposerTranslateTarget(getSavedComposerTranslateTarget());
+    applyAppearanceToDocument(user.theme, user.accentColor, user.transparencyEnabled);
+  }
+
+  function updateThemeDraftWithWave(nextTheme: Theme) {
+    if (nextTheme === themeDraft) return;
+
+    runThemeWaveTransition(() => {
+      flushSync(() => setThemeDraft(nextTheme));
+      applyAppearanceToDocument(nextTheme, accentColorDraft, transparencyDraft);
+    });
   }
 
   useEffect(() => {
@@ -543,31 +977,52 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
     setTransparencyDraft(user.transparencyEnabled);
     setIconSizeDraft(user.desktopIconSize);
     setHideIconsDraft(user.hideDesktopIcons);
+    setAllowGroupIdentityMessagesDraft(user.allowGroupIdentityMessages ?? true);
     setPinnedCards(Array.isArray(user.pinnedCards) ? user.pinnedCards : []);
-    setIconPositions(normalizeIconPositions(user.desktopIcons));
-  }, [user.accentColor, user.avatarData, user.desktopIconSize, user.desktopIcons, user.hideDesktopIcons, user.language, user.nickname, user.nameStyle, user.pinnedCards, user.profilePrimaryColor, user.profileAccentColor, user.theme, user.transparencyEnabled, user.wallpaper]);
+    setIconPositions(() => {
+      const normalized = normalizeIconPositions(user.desktopIcons);
+      const bounds = desktopRef.current?.getBoundingClientRect();
+      const metrics = ICON_METRICS[user.desktopIconSize] ?? ICON_METRICS.medium;
+      return bounds ? snapDesktopIconPositions(normalized, metrics, bounds) : normalized;
+    });
+  }, [user.accentColor, user.allowGroupIdentityMessages, user.avatarData, user.desktopIconSize, user.desktopIcons, user.hideDesktopIcons, user.language, user.nickname, user.nameStyle, user.pinnedCards, user.profilePrimaryColor, user.profileAccentColor, user.theme, user.transparencyEnabled, user.wallpaper]);
+
+  useEffect(() => {
+    if (settingsWindow !== 'open') return;
+    applyAppearanceToDocument(themeDraft, accentColorDraft, transparencyDraft);
+  }, [settingsWindow, themeDraft, accentColorDraft, transparencyDraft]);
+
+  useEffect(() => {
+    if (settingsWindow !== 'open' || activeTab !== 'connections') return;
+    void loadConnections();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settingsWindow, activeTab, token]);
+
+  const savedStatusDraft = customEmojiToShortcodes(user.status ?? '').trim();
+  const connectionVisibilityDirty = connections.some((connection) => connection.connected && connectionVisibilityIsDirty(connection, connectionVisibilityDraft));
 
   // True when any settings draft differs from the persisted user values.
-  const settingsDirty = useMemo(() => {
-    return (
-      nicknameDraft.trim() !== user.nickname ||
-      statusDraft.trim() !== (user.status ?? '').trim() ||
-      avatarDraft !== user.avatarData ||
-      wallpaperDraft !== user.wallpaper ||
-      languageDraft !== user.language ||
-      themeDraft !== user.theme ||
-      accentColorDraft !== user.accentColor ||
-      transparencyDraft !== user.transparencyEnabled ||
-      iconSizeDraft !== user.desktopIconSize ||
-      hideIconsDraft !== user.hideDesktopIcons ||
-      (nameStyleDraft ?? null) !== (user.nameStyle ?? null) ||
-      profilePrimaryDraft !== (user.profilePrimaryColor || '#2AABEE') ||
-      profileAccentDraft !== (user.profileAccentColor || '#5865F2') ||
-      // Compare nameplate field-by-field to avoid JSON.stringify on every render.
-      nameplateIsDirty(nameplateDraft, user.nameplate ?? DEFAULT_NAMEPLATE) ||
-      timeFormat !== getSavedTimeFormat()
-    );
-  }, [nicknameDraft, statusDraft, avatarDraft, wallpaperDraft, languageDraft, themeDraft, accentColorDraft, transparencyDraft, iconSizeDraft, hideIconsDraft, nameStyleDraft, profilePrimaryDraft, profileAccentDraft, nameplateDraft, timeFormat, user]);
+  const settingsDirty =
+    nicknameDraft.trim() !== user.nickname ||
+    statusDraft.trim() !== savedStatusDraft ||
+    avatarDraft !== user.avatarData ||
+    wallpaperDraft !== user.wallpaper ||
+    languageDraft !== user.language ||
+    themeDraft !== user.theme ||
+    accentColorDraft !== user.accentColor ||
+    transparencyDraft !== user.transparencyEnabled ||
+    iconSizeDraft !== user.desktopIconSize ||
+    hideIconsDraft !== user.hideDesktopIcons ||
+    allowGroupIdentityMessagesDraft !== (user.allowGroupIdentityMessages ?? true) ||
+    nameStyleIsDirty(nameStyleDraft ?? null, user.nameStyle ?? null) ||
+    profilePrimaryDraft !== (user.profilePrimaryColor || '#2AABEE') ||
+    profileAccentDraft !== (user.profileAccentColor || '#5865F2') ||
+    // Compare nameplate field-by-field to avoid JSON.stringify on every render.
+    nameplateIsDirty(nameplateDraft, user.nameplate ?? DEFAULT_NAMEPLATE) ||
+    timeFormat !== getSavedTimeFormat() ||
+    translateTarget !== getSavedTranslateTarget() ||
+    composerTranslateTarget !== getSavedComposerTranslateTarget() ||
+    connectionVisibilityDirty;
 
   // Close the settings window, shaking the relevant save bar if there are
   // unsaved edits (either the main settings draft or the Voice tab).
@@ -593,12 +1048,6 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
     void getMusicTracks(user.id).then((tracks) => {
       if (alive) setMusicTracks(tracks);
     });
-    void api.getStorage(token).then((payload) => {
-      if (!alive) return;
-      const items = ensureDesktopFolder(payload.items);
-      setStorageItems(items);
-      setStorageAudioFiles(items.filter(isAudioStorageItem));
-    });
 
     return () => {
       alive = false;
@@ -613,6 +1062,7 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
   useEffect(() => {
     function handleOpenProfile(event: CustomEvent<PublicUser>) {
       setProfileModalUser(event.detail);
+      setProfileAnchor(null);
     }
     window.addEventListener('open-profile', handleOpenProfile as EventListener);
     return () => window.removeEventListener('open-profile', handleOpenProfile as EventListener);
@@ -652,11 +1102,6 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
   }, [musicPlaying, currentTrackIndex]);
 
   useEffect(() => {
-    if (activeTab !== 'music') return;
-    void refreshStorageAudioFiles();
-  }, [activeTab]);
-
-  useEffect(() => {
     if (!volumeOpen) return;
 
     function closeOnOutsideClick(event: globalThis.MouseEvent) {
@@ -668,11 +1113,13 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
     return () => window.removeEventListener('mousedown', closeOnOutsideClick);
   }, [volumeOpen]);
 
-  function bringToFront(windowName: keyof typeof windowZ) {
-    const zIndex = nextZ + 1;
-    setNextZ(zIndex);
-    setWindowZ((value) => ({ ...value, [windowName]: zIndex }));
-  }
+  const bringToFront = useCallback((windowName: keyof typeof windowZ) => {
+    setNextZ((current) => {
+      const zIndex = current + 1;
+      setWindowZ((value) => ({ ...value, [windowName]: zIndex }));
+      return zIndex;
+    });
+  }, []);
 
   function pushNotification(notification: Omit<DesktopNotification, 'id'>) {
     const id = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -680,8 +1127,30 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
     window.setTimeout(() => setNotifications((current) => current.filter((item) => item.id !== id)), 5200);
   }
 
+  useEffect(() => {
+    const socket = sharedSocket;
+    if (!socket) return;
+
+    const onLocalEmojiBurst = (event: Event) => {
+      const detail = (event as CustomEvent<EmojiBurstEventDetail>).detail;
+      if (!detail) return;
+      socket.emit('emoji:burst', detail);
+    };
+    const onRemoteEmojiBurst = (detail: EmojiBurstEventDetail) => {
+      playEmojiBurst(detail);
+    };
+
+    window.addEventListener(EMOJI_BURST_EVENT, onLocalEmojiBurst as EventListener);
+    socket.on('emoji:burst', onRemoteEmojiBurst);
+
+    return () => {
+      window.removeEventListener(EMOJI_BURST_EVENT, onLocalEmojiBurst as EventListener);
+      socket.off('emoji:burst', onRemoteEmojiBurst);
+    };
+  }, [sharedSocket]);
+
   // Register socket event listeners on the shared socket from SocketProvider.
-  // No longer creates its own io() connection — that is handled by SocketProvider.
+  // No longer creates its own io() connection вЂ” that is handled by SocketProvider.
   useEffect(() => {
     const socket = sharedSocket;
     if (!socket) return;
@@ -723,15 +1192,10 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
       setRemoteDesktopUser((current) => (current?.id === payload.user.id ? payload.user : current));
     }
 
-    function onStorageChanged(payload: StoragePayload) {
-      const items = ensureDesktopFolder(payload.items);
-      setStorageItems(items);
-      setStorageAudioFiles(items.filter(isAudioStorageItem));
-    }
-
     function onMessengerMessage(payload: { message: MessengerMessage }) {
       if (payload.message.senderId === user.id) return;
       if (messengerWindow === 'open' && activeChatUserId === payload.message.senderId) return;
+      if (userStatus.status === 'dnd') return;
       void getOrFetchUser(payload.message.senderId, (id) =>
         api.getPublicUser(token, id).then((r) => r.user)
       ).then((sender) => {
@@ -745,8 +1209,40 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
       });
     }
 
-    function onPresenceSnapshot(payload: { onlineUserIds: string[] }) {
-      setOnlineUserIds(payload.onlineUserIds);
+    function onMessengerMention(payload: MentionSocketPayload) {
+      const message = payload.message;
+      const mention: MentionNotification = {
+        id: `${payload.kind}:${message.id}`,
+        kind: payload.kind,
+        messageId: message.id,
+        createdAt: message.createdAt,
+        sender: payload.sender,
+        body: message.body,
+        imageData: message.imageData,
+        imageName: message.imageName,
+        group: payload.kind === 'group' ? payload.group : undefined,
+        channelId: payload.kind === 'group' ? payload.message.channelId : null
+      };
+      setMentionNotifications((current) => {
+        if (current.some((item) => item.id === mention.id)) return current;
+        return [mention, ...current].slice(0, 100);
+      });
+
+      if (payload.kind !== 'group') return;
+      if (messengerWindow === 'open' && activeChatGroupId === payload.group.id) return;
+      if (userStatus.status === 'dnd') return;
+      pushNotification({
+        title: payload.group.name,
+        message: `${payload.sender.nickname}: ${notificationMessage(payload.message, language)}`,
+        avatarData: payload.group.avatarData || payload.sender.avatarData,
+        onOpen: () => openMessengerGroup(payload.group, payload.message.channelId)
+      });
+    }
+
+    function onPresenceSnapshot(payload: PresenceSnapshotPayload) {
+      const next = normalizePresenceSnapshot(payload);
+      setPresenceStatuses(next);
+      setOnlineUserIds(onlineIdsFromPresence(next));
     }
 
     function onCallIncoming(payload: { callId: string; callerId: string; callerNickname: string }) {
@@ -770,10 +1266,11 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
       });
     };
 
-    function onPresenceChanged(payload: { userId: string; online: boolean }) {
-      setOnlineUserIds((current) => {
-        if (payload.online) return current.includes(payload.userId) ? current : [...current, payload.userId];
-        return current.filter((userId) => userId !== payload.userId);
+    function onPresenceChanged(payload: PresenceChangedPayload) {
+      setPresenceStatuses((current) => {
+        const next = applyPresenceChange(current, payload);
+        setOnlineUserIds(onlineIdsFromPresence(next));
+        return next;
       });
     }
 
@@ -783,13 +1280,14 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
     socket.on('desktop:cursorLeave', onCursorLeave);
     socket.on('desktop:settingsChanged', onSettingsChanged);
     socket.on('desktop:userChanged', onUserChanged);
-    socket.on('storage:changed', onStorageChanged);
     socket.on('messenger:message', onMessengerMessage);
+    socket.on('messenger:mention', onMessengerMention);
     socket.on('presence:snapshot', onPresenceSnapshot);
     socket.on('call:incoming', onCallIncoming);
     socket.on('call:ended', dismissCallToast);
     socket.on('call:accepted', dismissCallToast);
     socket.on('presence:changed', onPresenceChanged);
+    socket.emit('presence:getSnapshot');
 
     // Emit screen size immediately in case 'system:ready' already fired.
     socket.emit('desktop:screen', { width: window.innerWidth, height: window.innerHeight });
@@ -801,15 +1299,48 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
       socket.off('desktop:cursorLeave', onCursorLeave);
       socket.off('desktop:settingsChanged', onSettingsChanged);
       socket.off('desktop:userChanged', onUserChanged);
-      socket.off('storage:changed', onStorageChanged);
       socket.off('messenger:message', onMessengerMessage);
+      socket.off('messenger:mention', onMessengerMention);
       socket.off('presence:snapshot', onPresenceSnapshot);
       socket.off('call:incoming', onCallIncoming);
       socket.off('call:ended', dismissCallToast);
       socket.off('call:accepted', dismissCallToast);
       socket.off('presence:changed', onPresenceChanged);
     };
-  }, [activeChatUserId, language, messengerWindow, onUserChange, sharedSocket, token, user.id]);
+  }, [activeChatGroupId, activeChatUserId, language, messengerWindow, onUserChange, sharedSocket, token, user.id, userStatus.status]);
+
+  useEffect(() => {
+    const socket = sharedSocket;
+    if (!socket) return;
+
+    function onInboxWallCreated(payload: { ownerId: string; message: DesktopWallMessage }) {
+      if (payload.ownerId !== user.id || payload.message.author.id === user.id) return;
+      setInboxWallMessages((current) => (
+        current.some((message) => message.id === payload.message.id)
+          ? current
+          : [payload.message, ...current].slice(0, 40)
+      ));
+    }
+
+    function onInboxWallDeleted(payload: { ownerId: string; messageId: string }) {
+      if (payload.ownerId !== user.id) return;
+      setInboxWallMessages((current) => current.filter((message) => message.id !== payload.messageId));
+    }
+
+    function onInboxFriendsChanged(payload: { requests: FriendRequests }) {
+      setInboxRequests(payload.requests);
+    }
+
+    socket.on('desktopWall:messageCreated', onInboxWallCreated);
+    socket.on('desktopWall:messageDeleted', onInboxWallDeleted);
+    socket.on('messenger:friendsChanged', onInboxFriendsChanged);
+
+    return () => {
+      socket.off('desktopWall:messageCreated', onInboxWallCreated);
+      socket.off('desktopWall:messageDeleted', onInboxWallDeleted);
+      socket.off('messenger:friendsChanged', onInboxFriendsChanged);
+    };
+  }, [sharedSocket, user.id]);
 
   useEffect(() => {
     if (desktopWatcherCount <= 0) return;
@@ -826,7 +1357,51 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
 
   useEffect(() => {
     let timer = 0;
+    const sizeKey = `notoc.desktop.size.${user.id}`;
+    const persistSize = (size: { width: number; height: number }) => {
+      iconRefSizeRef.current = size;
+      try { localStorage.setItem(sizeKey, JSON.stringify(size)); } catch { /* ignore */ }
+    };
+
+    // Rescale every icon's x/y from the reference size to the current desktop
+    // size so the layout stays proportional across window sizes.
+    function rescaleIcons() {
+      const rect = desktopRef.current?.getBoundingClientRect();
+      const prev = iconRefSizeRef.current;
+      if (!rect || rect.width <= 0 || rect.height <= 0 || !prev) return;
+      if (rect.width === prev.width && rect.height === prev.height) return;
+      const sx = rect.width / prev.width;
+      const sy = rect.height / prev.height;
+      persistSize({ width: rect.width, height: rect.height });
+      setIconPositions((current) => {
+        const next: PublicUser['desktopIcons'] = { ...current };
+        for (const [id, pos] of Object.entries(current)) {
+          if (!pos) continue;
+          next[id] = { ...pos, ...snapDesktopIconPosition(pos.x * sx, pos.y * sy, iconMetrics, rect) };
+        }
+        return next;
+      });
+    }
+
+    // On mount: if the desktop opens at a different size than positions were
+    // last saved at (e.g. saved fullscreen, reopened in a small window),
+    // rescale once so nothing lands off-screen.
+    const rect = desktopRef.current?.getBoundingClientRect();
+    if (rect && rect.width > 0 && rect.height > 0) {
+      let savedSize: { width: number; height: number } | null = null;
+      try { savedSize = JSON.parse(localStorage.getItem(sizeKey) ?? 'null'); } catch { /* ignore */ }
+      if (savedSize && savedSize.width > 0 && savedSize.height > 0
+        && (savedSize.width !== rect.width || savedSize.height !== rect.height)) {
+        iconRefSizeRef.current = savedSize;
+        rescaleIcons();
+      } else {
+        persistSize({ width: rect.width, height: rect.height });
+        setIconPositions((current) => snapDesktopIconPositions(current, iconMetrics, rect));
+      }
+    }
+
     function handleResize() {
+      rescaleIcons();
       window.clearTimeout(timer);
       timer = window.setTimeout(() => {
         socketRef.current?.emit('desktop:screen', { width: window.innerWidth, height: window.innerHeight });
@@ -837,7 +1412,7 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
       window.clearTimeout(timer);
       window.removeEventListener('resize', handleResize);
     };
-  }, []);
+  }, [iconMetrics, user.id]);
 
   function openContextMenu(event: MouseEvent<HTMLDivElement>) {
     event.preventDefault();
@@ -846,7 +1421,7 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
     // the desktop background should still open the desktop menu.
     if (updatesWindowOpen || profileModalUser || notice) return;
     const target = event.target as HTMLElement;
-    if (target.closest('.window-frame, .messenger-window, .explorer-window, .notepad-window, .remote-desktop-window, .music-player-window, .image-viewer-window, .modal-backdrop, .desktop-wall-shell, .taskbar')) return;
+    if (target.closest('.window-frame, .messenger-window, .remote-desktop-window, .modal-backdrop, .desktop-wall-shell, .taskbar')) return;
     setContextMenu({
       type: 'desktop',
       x: Math.min(event.clientX, window.innerWidth - 250),
@@ -855,18 +1430,22 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
   }
 
   function canDropIconOnDesktop(target: Element | null) {
-    return Boolean(target?.closest('.desktop')) && !target?.closest('.window-frame, .messenger-window, .explorer-window, .notepad-window, .remote-desktop-window, .music-player-window, .image-viewer-window, .desktop-wall-shell, .taskbar');
+    return Boolean(target?.closest('.desktop')) && !target?.closest('.window-frame, .messenger-window, .remote-desktop-window, .desktop-wall-shell, .taskbar');
   }
 
   function finishIconDrag(currentDrag: IconDragState, clientX: number, clientY: number) {
     const dx = clientX - currentDrag.startX;
     const dy = clientY - currentDrag.startY;
     const nextPositions = { ...iconPositions };
+    const bounds = desktopRef.current?.getBoundingClientRect();
 
     for (const id of currentDrag.ids) {
       const base = currentDrag.basePositions[id];
       if (!base) continue;
-      nextPositions[id] = { ...nextPositions[id], x: Math.max(8, base.x + dx), y: Math.max(8, base.y + dy) };
+      nextPositions[id] = {
+        ...nextPositions[id],
+        ...snapDesktopIconPosition(base.x + dx, base.y + dy, iconMetrics, bounds)
+      };
     }
 
     // Apply the final left/top and clear the transform offset in the same
@@ -909,7 +1488,7 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
       window.removeEventListener('mousemove', move);
       window.removeEventListener('mouseup', up);
     };
-  }, [dragState, iconPositions, onUserChange, token]);
+  }, [dragState, iconMetrics, iconPositions, onUserChange, token]);
 
   useEffect(() => {
     if (!selectionStart) return;
@@ -966,29 +1545,86 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
     };
   }, [desktopIcons, iconPositions, iconMetrics, selectionRect, selectionStart]);
 
-  function openSettings(tab: SettingsTab) {
+  const selectSettingsTab = useCallback((tab: SettingsTab, push = true) => {
     setActiveTab(tab);
+    if (push) {
+      setSettingsNav((nav) => {
+        const current = nav.entries[nav.index];
+        if (current === tab) return nav;
+        return {
+          entries: [...nav.entries.slice(0, nav.index + 1), tab],
+          index: nav.index + 1
+        };
+      });
+    }
+    window.requestAnimationFrame(() => {
+      settingsContentRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+    });
+  }, []);
+
+  function navigateSettingsHistory(delta: -1 | 1) {
+    const nextIndex = settingsNav.index + delta;
+    if (nextIndex < 0 || nextIndex >= settingsNav.entries.length) return;
+    const tab = settingsNav.entries[nextIndex];
+    setSettingsNav((nav) => ({ ...nav, index: nextIndex }));
+    selectSettingsTab(tab, false);
+  }
+
+  function scrollToSettingsHeading(id: string) {
+    const root = settingsContentRef.current;
+    if (!root) return;
+    const target = root.querySelector<HTMLElement>(`[data-settings-heading="${id}"]`);
+    if (!target) return;
+    root.scrollTo({
+      top: Math.max(0, target.offsetTop - root.offsetTop - 12),
+      behavior: 'smooth'
+    });
+    setHighlightSettingsHeading(null);
+    window.setTimeout(() => setHighlightSettingsHeading(id), 20);
+    window.setTimeout(() => setHighlightSettingsHeading((current) => current === id ? null : current), 900);
+  }
+
+  function settingsHeadingClass(id: string, base = '') {
+    return [base, highlightSettingsHeading === id ? 'settings-heading-flash' : ''].filter(Boolean).join(' ');
+  }
+
+  function renderSettingsHeadingLinks(tab: SettingsTab) {
+    if (activeTab !== tab) return null;
+    const headings = SETTINGS_HEADINGS[tab] ?? [];
+    if (!headings.length) return null;
+    return (
+      <div className="settings-heading-links">
+        {headings.map((heading) => (
+          <button key={heading.id} type="button" onClick={() => scrollToSettingsHeading(heading.id)}>
+            {t(language, heading.labelKey)}
+          </button>
+        ))}
+      </div>
+    );
+  }
+
+  const openSettings = useCallback((tab: SettingsTab) => {
+    selectSettingsTab(tab);
     setSettingsError('');
     setSettingsWindow('open');
     bringToFront('settings');
     setContextMenu(null);
-  }
+  }, [bringToFront, selectSettingsTab]);
 
-  function openExplorer(folderId: string | null = null) {
-    setExplorerFolderId(folderId);
-    setStorageWindow('open');
-    bringToFront('explorer');
-  }
-
-  function openMessenger() {
+  const openMessenger = useCallback(() => {
     setMessengerWindow('open');
     bringToFront('messenger');
-  }
+  }, [bringToFront]);
 
-  function openUpdates() {
+  const openInbox = useCallback(() => {
+    setInboxWindow('open');
+    bringToFront('inbox');
+  }, [bringToFront]);
+
+  const openUpdates = useCallback(() => {
     setUpdatesInitialId(null);
     setUpdatesWindowOpen(true);
-  }
+  }, []);
 
   function closeUpdates() {
     setUpdatesWindowOpen(false);
@@ -1001,35 +1637,38 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
     bringToFront('messenger');
   }
 
-  function openMusicPlayer(trackId?: string | null) {
-    if (trackId) setMusicPlayerInitialTrackId(trackId);
-    setMusicPlayerWindow('open');
-    bringToFront('musicPlayer');
+  function openMessengerGroup(group: Group, channelId: string | null = null) {
+    setMessengerGroupRequest((current) => ({ groupId: group.id, group, channelId, requestId: (current?.requestId ?? 0) + 1 }));
+    setMessengerWindow('open');
+    bringToFront('messenger');
   }
 
-  function openAiChat() {
+  const markGroupMentionsRead = useCallback((groupId: string) => {
+    setInboxReadIds((current) => {
+      let changed = false;
+      const next = new Set(current);
+      for (const mention of mentionNotifications) {
+        if (mention.kind === 'group' && mention.group?.id === groupId && !next.has(mentionReadKey(mention))) {
+          next.add(mentionReadKey(mention));
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [mentionNotifications]);
+
+  const openAiChat = useCallback(() => {
     setAiChatWindow('open');
     bringToFront('aiChat');
-  }
+  }, [bringToFront]);
 
-  function openNotepad(itemId: string, title?: string) {
-    setNotepadItemId(itemId);
-    setNotepadTitle(title ?? t(language, 'notepad'));
-    setNotepadWindow('open');
-    bringToFront('notepad');
-  }
-
-  function openImageViewer(itemId: string) {
-    setImageViewerItemId(itemId);
-    setImageViewerWindow('open');
-    bringToFront('imageViewer');
-  }
-
-  function openVideoViewer(itemId: string) {
-    setVideoViewerItemId(itemId);
-    setVideoViewerWindow('open');
-    bringToFront('videoViewer');
-  }
+  const openWatchTogether = useCallback((inviteCode?: string) => {
+    if (inviteCode) {
+      setWatchTogetherInvite({ code: inviteCode, requestId: Date.now() });
+    }
+    setWatchTogetherWindow('open');
+    bringToFront('watchTogether');
+  }, [bringToFront]);
 
   function makeCardId() {
     return crypto.randomUUID ? crypto.randomUUID() : `card-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -1071,59 +1710,60 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
     socketRef.current?.emit('desktop:pinnedCards', { cards: placements });
   }
 
-  function pinImage(item: StorageItem) {
-    if (!item.content) return;
-    const previous = pinnedCards;
-    const newCard: PinnedCard = {
-      id: makeCardId(),
-      imageData: item.content,
-      name: item.name,
-      kind: 'image',
-      // New cards are nudged so they do not stack exactly on existing ones.
-      x: Math.min(0.6, 0.04 + previous.length * 0.03),
-      y: Math.min(0.6, 0.12 + previous.length * 0.03),
-      width: 200,
-      height: 160
-    };
-    const next = [...previous, newCard];
-    setPinnedCards(next);
-    setImageViewerWindow('closed');
-    api.updateMe(token, { pinnedCards: next })
-      .then((result) => {
-        onUserChange(result.user);
-        broadcastPinnedCards(next.map(currentCardPlacement), true);
-      })
-      .catch(() => {
-        setPinnedCards(previous);
-        pushNotification({ title: t(language, 'pinToDesktop'), message: t(language, 'pinImageFailed') });
-      });
+  function cardPositionFromPoint(point: { x: number; y: number } | null, width: number, height: number) {
+    const bounds = desktopRef.current?.getBoundingClientRect();
+    const px = bounds ? point?.x ?? bounds.left + 120 : point?.x ?? 120;
+    const py = bounds ? point?.y ?? bounds.top + 120 : point?.y ?? 120;
+    const x = bounds ? Math.min(0.92, Math.max(0.02, (px - bounds.left) / Math.max(1, bounds.width))) : 0.08;
+    const y = bounds ? Math.min(0.86, Math.max(0.04, (py - bounds.top) / Math.max(1, bounds.height))) : 0.12;
+    return { x, y, width, height };
   }
 
-  function pinVideo(item: StorageItem) {
-    if (!item.content) return;
-    const previous = pinnedCards;
-    const newCard: PinnedCard = {
-      id: makeCardId(),
-      imageData: item.content,
-      name: item.name,
-      kind: 'video',
-      x: Math.min(0.6, 0.04 + previous.length * 0.03),
-      y: Math.min(0.6, 0.12 + previous.length * 0.03),
-      width: 240,
-      height: 160
-    };
-    const next = [...previous, newCard];
-    setPinnedCards(next);
-    setVideoViewerWindow('closed');
-    api.updateMe(token, { pinnedCards: next })
-      .then((result) => {
-        onUserChange(result.user);
-        broadcastPinnedCards(next.map(currentCardPlacement), true);
-      })
-      .catch(() => {
-        setPinnedCards(previous);
-        pushNotification({ title: t(language, 'pinToDesktop'), message: t(language, 'pinVideoFailed') });
-      });
+  async function addDesktopWidgetFromFile(file: File | undefined, kind: 'image' | 'video') {
+    if (!file) return;
+    const mimeType = inferMimeType(file);
+    if (kind === 'image' && !mimeType.startsWith('image/')) return;
+    if (kind === 'video' && !mimeType.startsWith('video/')) return;
+    if (file.size > maxImportSizeForFile(file)) {
+      window.alert(getErrorMessage(new Error(t(language, 'fileTooLarge')), language));
+      return;
+    }
+
+    beginOrUpdateUpload(0.05);
+    const previous = pinnedCardsRef.current;
+    try {
+      const dataUrl = dataUrlWithMime(await readFileAsDataUrl(file, (fraction) => beginOrUpdateUpload(Math.min(0.9, Math.max(0.05, fraction * 0.9)))), mimeType);
+      const size = kind === 'video' ? { width: 260, height: 170 } : { width: 220, height: 170 };
+      const newCard: PinnedCard = {
+        id: makeCardId(),
+        imageData: dataUrl,
+        name: file.name,
+        kind,
+        ...cardPositionFromPoint(widgetDropPointRef.current, size.width, size.height)
+      };
+      const next = [...previous, newCard];
+      setPinnedCards(next);
+      const result = await api.updateMe(token, { pinnedCards: next });
+      onUserChange(result.user);
+      broadcastPinnedCards(next.map(currentCardPlacement), true);
+      finishUpload();
+    } catch (error) {
+      finishUpload();
+      setPinnedCards(previous);
+      window.alert(getErrorMessage(error, language));
+    } finally {
+      widgetDropPointRef.current = null;
+    }
+  }
+
+  function chooseDesktopWidget(kind: 'image' | 'video', point: { x: number; y: number }) {
+    widgetDropPointRef.current = point;
+    setContextMenu(null);
+    const input = kind === 'image' ? widgetPhotoInputRef.current : widgetVideoInputRef.current;
+    if (input) {
+      input.value = '';
+      input.click();
+    }
   }
 
   // A single card moved/resized: broadcast the new placement of every card.
@@ -1153,7 +1793,23 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
 
   async function applyDesktopView(nextSize: DesktopIconSize) {
     setIconSizeDraft(nextSize);
-    const result = await api.updateMe(token, { desktopIconSize: nextSize });
+    const nextMetrics = ICON_METRICS[nextSize] ?? ICON_METRICS.medium;
+    const bounds = desktopRef.current?.getBoundingClientRect();
+    const nextPositions = { ...iconPositions };
+    [...desktopIcons]
+      .sort((left, right) => {
+        const leftPos = iconPositions[left.id] ?? DEFAULT_ICON_POSITIONS[left.id as keyof typeof DEFAULT_ICON_POSITIONS];
+        const rightPos = iconPositions[right.id] ?? DEFAULT_ICON_POSITIONS[right.id as keyof typeof DEFAULT_ICON_POSITIONS];
+        return (leftPos?.x ?? 0) - (rightPos?.x ?? 0) || (leftPos?.y ?? 0) - (rightPos?.y ?? 0) || left.label.localeCompare(right.label);
+      })
+      .forEach((icon, index) => {
+        nextPositions[icon.id] = {
+          ...nextPositions[icon.id],
+          ...desktopGridPositionByIndex(index, nextMetrics, bounds)
+        };
+      });
+    setIconPositions(nextPositions);
+    const result = await api.updateMe(token, { desktopIconSize: nextSize, desktopIcons: nextPositions });
     onUserChange(result.user);
   }
 
@@ -1164,7 +1820,7 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
   }
 
   function sortedIcons(sortBy: DesktopSort) {
-    const appOrder = { messenger: 0, storage: 1, musicPlayer: 2 };
+    const appOrder = { messenger: 0, inbox: 1, watchTogether: 2, updates: 3, aiChat: 4 };
     return [...desktopIcons].sort((left, right) => {
       const leftMeta = iconPositions[left.id];
       const rightMeta = iconPositions[right.id];
@@ -1177,14 +1833,13 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
 
   async function applySort(sortBy: DesktopSort) {
     const metrics = ICON_METRICS[user.desktopIconSize] ?? ICON_METRICS.medium;
+    const bounds = desktopRef.current?.getBoundingClientRect();
     const nextPositions = { ...iconPositions };
     sortedIcons(sortBy).forEach((icon, index) => {
-      const column = Math.floor(index / 6);
-      const row = index % 6;
+      const position = desktopGridPositionByIndex(index, metrics, bounds);
       nextPositions[icon.id] = {
         ...nextPositions[icon.id],
-        x: 18 + column * (metrics.width + 18),
-        y: 18 + row * (metrics.height + metrics.gap)
+        ...position
       };
     });
     setIconPositions(nextPositions);
@@ -1196,58 +1851,6 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
     await deleteMusicTrack(user.id, id);
     setMusicTracks((current) => current.filter((track) => track.id !== id));
     setCurrentTrackIndex(0);
-  }
-
-  async function refreshStorageAudioFiles() {
-    const payload = await api.getStorage(token);
-    const items = ensureDesktopFolder(payload.items);
-    setStorageItems(items);
-    setStorageAudioFiles(items.filter(isAudioStorageItem));
-  }
-
-  async function saveStorageItems(nextItems: StorageItem[]) {
-    const items = ensureDesktopFolder(nextItems);
-    setStorageItems(items);
-    const payload = await api.updateStorage(token, { items });
-    const savedItems = ensureDesktopFolder(payload.items);
-    setStorageItems(savedItems);
-    setStorageAudioFiles(savedItems.filter(isAudioStorageItem));
-  }
-
-  function shortcutMeta(item: StorageItem, x: number, y: number, index = 0) {
-    const bounds = desktopRef.current?.getBoundingClientRect();
-    const relativeX = bounds ? x - bounds.left : x;
-    const relativeY = bounds ? y - bounds.top : y;
-
-    return {
-      x: Math.max(8, relativeX - iconMetrics.width / 2 + index * Math.min(iconMetrics.width + 10, 132)),
-      y: Math.max(8, relativeY - iconMetrics.height / 2),
-      kind: 'storage-item' as const,
-      storageItemId: item.id,
-      label: item.name,
-      itemType: item.type,
-      size: item.size ?? item.content?.length ?? 0,
-      updatedAt: item.updatedAt
-    };
-  }
-
-  async function updateDesktopShortcutsForItems(items: StorageItem[], x: number, y: number) {
-    const nextPositions = { ...iconPositions };
-    items.forEach((item, index) => {
-      nextPositions[`file:${item.id}`] = shortcutMeta(item, x, y, index);
-    });
-    setIconPositions(nextPositions);
-    const result = await api.updateMe(token, { desktopIcons: nextPositions });
-    onUserChange(result.user);
-  }
-
-  async function placeStorageItemOnDesktop(item: StorageItem, x: number, y: number) {
-    if (item.id === DESKTOP_FOLDER_ID) return;
-    const timestamp = now();
-    const updatedItem = { ...item, parentId: DESKTOP_FOLDER_ID, updatedAt: timestamp };
-    const nextItems = ensureDesktopFolder(storageItems).map((candidate) => (candidate.id === item.id ? updatedItem : candidate));
-    await saveStorageItems(nextItems);
-    await updateDesktopShortcutsForItems([updatedItem], x, y);
   }
 
   // Show/advance the thin top upload progress bar (fraction 0..1).
@@ -1269,65 +1872,25 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
     }, 450);
   }
 
-  async function importFilesToDesktop(files: FileList, x: number, y: number) {
-    const incoming = Array.from(files);
-    const oversized = incoming.find((file) => file.size > maxImportSizeForFile(file));
-    if (oversized) {
-      const limitMb = Math.round(maxImportSizeForFile(oversized) / (1024 * 1024));
-      window.alert(`${oversized.name}: ${t(language, 'fileTooLargeLimit', { limit: String(limitMb) })}`);
+  async function addTrackFromLocalFile(file: File | undefined) {
+    if (!file) return;
+    const mimeType = inferMimeType(file);
+    if (!mimeType.startsWith('audio/')) return;
+    if (file.size > MAX_IMPORTED_FILE_SIZE) {
+      window.alert(getErrorMessage(new Error(t(language, 'fileTooLarge')), language));
       return;
     }
-
-    // Drive the thin top progress bar across the read phase of every file plus
-    // a final save phase, so the bar fills smoothly left-to-right.
-    const totalBytes = incoming.reduce((sum, file) => sum + file.size, 0) || 1;
-    const readBytes = new Array(incoming.length).fill(0);
-    // The read phase represents 90% of the bar; the save phase the last 10%.
-    const reportRead = () => {
-      const done = readBytes.reduce((sum, value) => sum + value, 0);
-      beginOrUpdateUpload((done / totalBytes) * 0.9);
-    };
-    beginOrUpdateUpload(0);
-
+    beginOrUpdateUpload(0.05);
     try {
-      const timestamp = now();
-      const imported = await Promise.all(
-        incoming.map(async (file, index) => {
-          const mimeType = inferMimeType(file);
-          const dataUrl = await readFileAsDataUrl(file, (fraction) => {
-            readBytes[index] = fraction * file.size;
-            reportRead();
-          });
-          readBytes[index] = file.size;
-          reportRead();
-          return {
-            id: makeStorageId(),
-            type: 'file' as const,
-            name: file.name,
-            parentId: DESKTOP_FOLDER_ID,
-            content: dataUrlWithMime(dataUrl, mimeType),
-            mimeType,
-            size: file.size,
-            createdAt: timestamp,
-            updatedAt: timestamp
-          };
-        })
-      );
-
-      beginOrUpdateUpload(0.92);
-      await saveStorageItems([...ensureDesktopFolder(storageItems), ...imported]);
-      await updateDesktopShortcutsForItems(imported, x, y);
+      const dataUrl = dataUrlWithMime(await readFileAsDataUrl(file, (fraction) => beginOrUpdateUpload(Math.min(0.9, Math.max(0.05, fraction * 0.9)))), mimeType);
+      const storageItemId = `local-audio:${file.name}:${file.size}:${file.lastModified}`;
+      const added = await addMusicTrack(user.id, { storageItemId, name: file.name, dataUrl });
+      setMusicTracks((current) => [...current.filter((track) => track.storageItemId !== storageItemId), added]);
       finishUpload();
     } catch (error) {
       finishUpload();
       window.alert(getErrorMessage(error, language));
     }
-  }
-
-  async function addTrackFromStorage(item: StorageItem) {
-    if (!item.content) return;
-    const added = await addMusicTrack(user.id, { storageItemId: item.id, name: item.name, dataUrl: item.content });
-    setMusicTracks((current) => [...current.filter((track) => track.storageItemId !== item.id), added]);
   }
 
   function previousTrack() {
@@ -1363,138 +1926,122 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
     setMusicPlaying(false);
   }
 
-  function openShortcut(iconId: string) {
-    if (iconId === 'storage') {
-      openExplorer(null);
-      return;
-    }
+  const openShortcut = useCallback(async (iconId: string) => {
     if (iconId === 'messenger') {
       openMessenger();
       return;
     }
-    if (iconId === 'musicPlayer') {
-      openMusicPlayer();
+    if (iconId === 'inbox') {
+      openInbox();
       return;
     }
     if (iconId === 'aiChat') {
       openAiChat();
       return;
     }
+    if (iconId === 'watchTogether') {
+      openWatchTogether();
+      return;
+    }
     if (iconId === 'updates') {
       openUpdates();
       return;
     }
-    const shortcut = iconPositions[iconId];
-    if (shortcut?.itemType === 'folder' && shortcut.storageItemId) openExplorer(shortcut.storageItemId);
-    if (shortcut?.itemType === 'text' && shortcut.storageItemId) openNotepad(shortcut.storageItemId, shortcut.label);
-    if (shortcut?.itemType === 'file' && shortcut.storageItemId) {
-      const item = storageItems.find((candidate) => candidate.id === shortcut.storageItemId);
-      if (item && isAudioStorageItem(item)) openMusicPlayer(item.id);
-      if (item && isImageStorageItem(item)) openImageViewer(item.id);
-      if (item && isVideoStorageItem(item)) openVideoViewer(item.id);
-    }
-  }
+  }, [openAiChat, openInbox, openMessenger, openUpdates, openWatchTogether]);
 
-  // Built-in app shortcuts cannot be renamed or deleted.
-  function isBuiltinApp(iconId: string) {
-    return iconId === 'messenger' || iconId === 'storage' || iconId === 'musicPlayer' || iconId === 'updates' || iconId === 'aiChat';
-  }
+  const handleDesktopIconMouseDown = useCallback((event: MouseEvent<HTMLButtonElement>, iconId: string) => {
+    const ids = selectedIconIds.includes(iconId) ? selectedIconIds : [iconId];
+    setSelectedIconIds(ids);
+    const basePositions = Object.fromEntries(
+      ids.map((id) => [id, { x: iconPositions[id]?.x ?? 8, y: iconPositions[id]?.y ?? 8 }])
+    );
+    setDragState({
+      ids,
+      startX: event.clientX,
+      startY: event.clientY,
+      basePositions,
+      moved: false
+    });
+    setDragDelta({ x: 0, y: 0 });
+  }, [iconPositions, selectedIconIds]);
 
-  // App shortcuts (messenger/storage/musicPlayer/updates) are not renameable.
-  function canRenameShortcut(iconId: string) {
-    return iconId.startsWith('file:');
-  }
+  const handleDesktopIconContextMenu = useCallback((event: MouseEvent<HTMLButtonElement>, iconId: string) => {
+    setSelectedIconIds([iconId]);
+    setContextMenu({ type: 'shortcut', iconId, x: event.clientX, y: event.clientY });
+  }, []);
 
-  // Returns the extension part (".jpg", ".mp3", ...) that must not be edited.
-  function shortcutExtension(iconId: string) {
-    const meta = iconPositions[iconId];
-    // Only real files carry an extension; folders and text notes do not.
-    if (!meta || meta.itemType !== 'file') return '';
-    const label = meta.label ?? '';
-    const dot = label.lastIndexOf('.');
-    if (dot <= 0 || dot === label.length - 1) return '';
-    return label.slice(dot);
-  }
-
-  function beginRenameShortcut(iconId: string) {
-    if (!canRenameShortcut(iconId)) return;
-    const currentName = iconPositions[iconId]?.label ?? desktopIcons.find((icon) => icon.id === iconId)?.label ?? '';
-    const ext = shortcutExtension(iconId);
-    // Edit only the base name; the extension is kept and re-appended on commit.
-    setRenameDraft(ext ? currentName.slice(0, currentName.length - ext.length) : currentName);
-    setRenamingIconId(iconId);
-    setContextMenu(null);
-  }
-
-  async function commitRenameShortcut(iconId: string) {
-    const ext = shortcutExtension(iconId);
-    const base = renameDraft.trim();
-    setRenamingIconId(null);
-    if (!base) return;
-    const nextName = `${base}${ext}`;
-    if (nextName === iconPositions[iconId]?.label) return;
-
-    const nextPositions = { ...iconPositions, [iconId]: { ...iconPositions[iconId], label: nextName } };
-    setIconPositions(nextPositions);
-
-    // Keep the underlying storage item name in sync when possible.
-    const storageItemId = iconPositions[iconId]?.storageItemId;
-    if (storageItemId) {
-      const target = storageItems.find((candidate) => candidate.id === storageItemId);
-      if (target && target.name !== nextName) {
-        void saveStorageItems(storageItems.map((item) => (item.id === storageItemId ? { ...item, name: nextName, updatedAt: now() } : item)));
-      }
-    }
-
-    const result = await api.updateMe(token, { desktopIcons: nextPositions });
-    onUserChange(result.user);
-  }
-
-  async function deleteShortcut(iconId: string) {
-    if (isBuiltinApp(iconId)) return;
-    setContextMenu(null);
-    const nextPositions = { ...iconPositions };
-    delete nextPositions[iconId];
-    // Apply the removal optimistically and keep it: the desktop icon list is
-    // derived from `iconPositions`, so removing the entry here makes the
-    // shortcut disappear immediately and stay gone.
-    setIconPositions(nextPositions);
-    setSelectedIconIds((ids) => ids.filter((id) => id !== iconId));
-    try {
-      const result = await api.updateMe(token, { desktopIcons: nextPositions });
-      onUserChange(result.user);
-    } catch {
-      // On failure, restore the shortcut so the desktop stays consistent.
-      setIconPositions(iconPositions);
-    }
-  }
+  const handleDesktopIconDoubleClick = useCallback((iconId: string) => {
+    void openShortcut(iconId);
+  }, [openShortcut]);
 
   async function saveSettings() {
     setSaving(true);
     setSettingsError('');
+    const nextTheme = themeDraft;
+    const nextAccent = accentColorDraft;
+    const nextTransparency = transparencyDraft;
+    const previousAppearance = {
+      theme: user.theme,
+      accentColor: user.accentColor,
+      transparencyEnabled: user.transparencyEnabled
+    };
+
+    if (
+      nextTheme !== user.theme ||
+      nextAccent !== user.accentColor ||
+      nextTransparency !== user.transparencyEnabled
+    ) {
+      applyAppearanceToDocument(nextTheme, nextAccent, nextTransparency);
+    }
 
     try {
-      const result = await api.updateMe(token, {
-        nickname: nicknameDraft.trim(),
-        status: statusDraft.trim(),
-        avatarData: avatarDraft,
-        wallpaper: wallpaperDraft,
-        language: languageDraft,
-        theme: themeDraft,
-        accentColor: accentColorDraft,
-        transparencyEnabled: transparencyDraft,
-        desktopIconSize: iconSizeDraft,
-        hideDesktopIcons: hideIconsDraft,
-        desktopIcons: iconPositions,
-        nameStyle: nameStyleDraft,
-        profilePrimaryColor: profilePrimaryDraft,
-        profileAccentColor: profileAccentDraft,
-        nameplate: nameplateDraft
-      });
-      onUserChange(result.user);
+      const input: Parameters<typeof api.updateMe>[1] = {};
+      const nextNickname = nicknameDraft.trim();
+      const nextStatusDraft = statusDraft.trim();
+      const statusChanged = nextStatusDraft !== customEmojiToShortcodes(user.status ?? '').trim();
+
+      if (nextNickname !== user.nickname) input.nickname = nextNickname;
+      if (statusChanged) input.status = expandCustomEmojiShortcodes(nextStatusDraft);
+      if (avatarDraft !== user.avatarData) input.avatarData = avatarDraft;
+      if (wallpaperDraft !== user.wallpaper) input.wallpaper = wallpaperDraft;
+      if (languageDraft !== user.language) input.language = languageDraft;
+      if (nextTheme !== user.theme) input.theme = nextTheme;
+      if (nextAccent !== user.accentColor) input.accentColor = nextAccent;
+      if (nextTransparency !== user.transparencyEnabled) input.transparencyEnabled = nextTransparency;
+      if (iconSizeDraft !== user.desktopIconSize) input.desktopIconSize = iconSizeDraft;
+      if (hideIconsDraft !== user.hideDesktopIcons) input.hideDesktopIcons = hideIconsDraft;
+      if (allowGroupIdentityMessagesDraft !== (user.allowGroupIdentityMessages ?? true)) input.allowGroupIdentityMessages = allowGroupIdentityMessagesDraft;
+      if (desktopIconsChanged(iconPositions, user.desktopIcons)) input.desktopIcons = iconPositions;
+      if (nameStyleIsDirty(nameStyleDraft ?? null, user.nameStyle ?? null)) input.nameStyle = nameStyleDraft;
+      if (profilePrimaryDraft !== (user.profilePrimaryColor || '#2AABEE')) input.profilePrimaryColor = profilePrimaryDraft;
+      if (profileAccentDraft !== (user.profileAccentColor || '#5865F2')) input.profileAccentColor = profileAccentDraft;
+      if (nameplateIsDirty(nameplateDraft, user.nameplate ?? DEFAULT_NAMEPLATE)) input.nameplate = nameplateDraft;
+
+      if (Object.keys(input).length > 0) {
+        const result = await api.updateMe(token, input);
+        onUserChange(result.user);
+      }
+      for (const connection of connections) {
+        if (!connection.connected || !connectionVisibilityIsDirty(connection, connectionVisibilityDraft)) continue;
+        const payload = await api.updateConnectionVisibility(token, connection.provider, connectionVisibilityDraft[connection.provider]);
+        if (payload.connection) {
+          setConnections((current) => current.map((item) => (
+            item.provider === connection.provider ? payload.connection! : item
+          )));
+          setConnectionVisibilityDraft((current) => ({
+            ...current,
+            [connection.provider]: readConnectionVisibility(payload.connection)
+          }));
+        }
+      }
       saveTimeFormat(timeFormat);
-      void saveMusicTracksOrder(user.id, musicTracks);
+      saveTranslateTarget(translateTarget);
+      saveComposerTranslateTarget(composerTranslateTarget);
+      // Language is applied through App state via onUserChange. A hard reload
+      // here can leave the Electron shell on a white screen while boot caches
+      // and sockets are being recreated.
     } catch (error) {
+      applyAppearanceToDocument(previousAppearance.theme, previousAppearance.accentColor, previousAppearance.transparencyEnabled);
       setSettingsError(getErrorMessage(error, language));
     } finally {
       setSaving(false);
@@ -1578,34 +2125,11 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
     }
   }
 
-  function createStorageShortcut(item: StorageItem, x: number, y: number) {
-    const bounds = desktopRef.current?.getBoundingClientRect();
-    const relativeX = bounds ? x - bounds.left : x;
-    const relativeY = bounds ? y - bounds.top : y;
-    const id = `file:${item.id}`;
-    const nextPositions = {
-      ...iconPositions,
-      [id]: {
-        x: Math.max(8, relativeX - iconMetrics.width / 2),
-        y: Math.max(8, relativeY - iconMetrics.height / 2),
-        kind: 'storage-item' as const,
-        storageItemId: item.id,
-        label: item.name,
-        itemType: item.type,
-        size: item.size ?? item.content?.length ?? 0,
-        updatedAt: item.updatedAt
-      }
-    };
-
-    setIconPositions(nextPositions);
-    void api.updateMe(token, { desktopIcons: nextPositions }).then((result) => onUserChange(result.user));
-  }
-
-  function openRemoteDesktopWindow(owner: PublicUser) {
+  const openRemoteDesktopWindow = useCallback((owner: PublicUser) => {
     setRemoteDesktopUser(owner);
     setRemoteDesktopWindow('open');
     bringToFront('remoteDesktop');
-  }
+  }, [bringToFront]);
 
   async function openRemoteDesktopById(remoteUserId: string) {
     try {
@@ -1616,9 +2140,74 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
     }
   }
 
-  function viewRemoteDesktop(owner: PublicUser) {
+  const viewRemoteDesktop = useCallback((owner: PublicUser) => {
     openRemoteDesktopWindow(owner);
-  }
+  }, [openRemoteDesktopWindow]);
+
+  const focusMessengerWindow = useCallback(() => bringToFront('messenger'), [bringToFront]);
+  const closeMessengerWindow = useCallback(() => setMessengerWindow('closed'), []);
+  const minimizeMessengerWindow = useCallback(() => setMessengerWindow('minimized'), []);
+  const toggleMessengerMaximized = useCallback(() => setMessengerMaximized((value) => !value), []);
+  const editProfileFromMessenger = useCallback(() => openSettings('profile'), [openSettings]);
+
+  const messengerNode = useMemo(() => {
+    if (messengerWindow === 'closed' && !ongoingCall && !pendingCallAccept) return null;
+    return (
+      <MessengerWindow
+        token={token}
+        language={language}
+        currentUser={user}
+        initialChatUserId={messengerChatRequest?.userId ?? null}
+        initialChatRequestId={messengerChatRequest?.requestId ?? 0}
+        initialGroupRequest={messengerGroupRequest}
+        maximized={messengerMaximized}
+        minimized={messengerWindow !== 'open'}
+        zIndex={windowZ.messenger}
+        pendingCallAccept={pendingCallAccept}
+        onPendingCallHandled={handlePendingCallHandled}
+        onCallStateChange={handleCallStateChange}
+        onFocus={focusMessengerWindow}
+        onClose={closeMessengerWindow}
+        onMinimize={minimizeMessengerWindow}
+        onToggleMaximize={toggleMessengerMaximized}
+        onViewDesktop={viewRemoteDesktop}
+        onActiveChatChange={setActiveChatUserId}
+        onActiveGroupChange={setActiveChatGroupId}
+        groupMentionCounts={groupMentionCounts}
+        onGroupMentionsRead={markGroupMentionsRead}
+        onUserChange={onUserChange}
+        onEditProfile={editProfileFromMessenger}
+        onOpenWatchTogether={openWatchTogether}
+        onOpenInbox={openInbox}
+        inboxUnreadCount={inboxUnreadCount}
+      />
+    );
+  }, [
+    closeMessengerWindow,
+    editProfileFromMessenger,
+    focusMessengerWindow,
+    groupMentionCounts,
+    handleCallStateChange,
+    handlePendingCallHandled,
+    inboxUnreadCount,
+    language,
+    markGroupMentionsRead,
+    messengerChatRequest,
+    messengerGroupRequest,
+    messengerMaximized,
+    messengerWindow,
+    minimizeMessengerWindow,
+    onUserChange,
+    ongoingCall,
+    openInbox,
+    openWatchTogether,
+    pendingCallAccept,
+    toggleMessengerMaximized,
+    token,
+    user,
+    viewRemoteDesktop,
+    windowZ.messenger
+  ]);
 
   return (
     <main
@@ -1626,25 +2215,17 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
       className="desktop"
       style={{ backgroundImage: wallpaperToBackground(user.wallpaper, user.theme) }}
       onContextMenu={openContextMenu}
-      onDragOver={(event) => {
-        if (event.dataTransfer.types.includes('application/notoc-storage-item') || Array.from(event.dataTransfer.types).includes('Files')) event.preventDefault();
-      }}
+      onDragOver={() => undefined}
       onDrop={(event) => {
         if (event.dataTransfer.files.length) {
           event.preventDefault();
-          void importFilesToDesktop(event.dataTransfer.files, event.clientX, event.clientY);
           return;
         }
-
-        const raw = event.dataTransfer.getData('application/notoc-storage-item');
-        if (!raw) return;
-        event.preventDefault();
-        void placeStorageItemOnDesktop(JSON.parse(raw) as StorageItem, event.clientX, event.clientY);
       }}
       onMouseDown={(event) => {
         if (event.button !== 0) return;
         const target = event.target as HTMLElement;
-        if (target.closest('.desktop-tile, .taskbar, .desktop-wall-shell, .settings-window, .notice-window, .explorer-window, .notepad-window, .messenger-window, .remote-desktop-window, .music-player-window, .image-viewer-window, .ai-chat-window, .window-frame, .context-menu, .desktop-profile-info')) return;
+        if (target.closest('.desktop-tile, .taskbar, .desktop-wall-shell, .settings-window, .notice-window, .messenger-window, .remote-desktop-window, .ai-chat-window, .window-frame, .context-menu, .desktop-profile-info')) return;
         const bounds = event.currentTarget.getBoundingClientRect();
         const x = event.clientX - bounds.left;
         const y = event.clientY - bounds.top;
@@ -1654,6 +2235,27 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
       }}
       onClick={() => setContextMenu(null)}
     >
+      <input
+        ref={widgetPhotoInputRef}
+        type="file"
+        accept="image/*"
+        hidden
+        onChange={(event) => void addDesktopWidgetFromFile(event.currentTarget.files?.[0], 'image')}
+      />
+      <input
+        ref={widgetVideoInputRef}
+        type="file"
+        accept="video/*"
+        hidden
+        onChange={(event) => void addDesktopWidgetFromFile(event.currentTarget.files?.[0], 'video')}
+      />
+      <input
+        ref={playlistAudioInputRef}
+        type="file"
+        accept="audio/*"
+        hidden
+        onChange={(event) => void addTrackFromLocalFile(event.currentTarget.files?.[0])}
+      />
       {uploadProgress !== null ? (
         <div className="desktop-upload-bar" role="progressbar" aria-label={t(language, 'uploading')} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(uploadProgress * 100)}>
           <span className="desktop-upload-bar-fill" style={{ width: `${Math.round(uploadProgress * 100)}%` }} />
@@ -1729,81 +2331,24 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
           language={language}
           owner={user}
           currentUser={user}
-          onOpenProfile={(author) => setProfileModalUser(author)}
+          onOpenProfile={(author, anchorRect) => { setProfileModalUser(author); setProfileAnchor(anchorRect ?? null); }}
         />
 
-      <section className={`${dragState?.moved ? 'desktop-icons dragging' : 'desktop-icons'} icon-size-${user.desktopIconSize}`} aria-label={t(language, 'desktopSettings')} hidden={user.hideDesktopIcons}>
-        {!user.hideDesktopIcons && desktopIcons.map((icon) => (
-          <button
-            key={icon.id}
-            className={selectedIconIds.includes(icon.id) ? 'desktop-tile selected' : 'desktop-tile'}
-            style={{
-              left: iconPositions[icon.id].x,
-              top: iconPositions[icon.id].y,
-              transform: dragState?.ids.includes(icon.id) ? `translate3d(${dragDelta.x}px, ${dragDelta.y}px, 0)` : undefined
-            }}
-            type="button"
-            draggable={false}
-            data-dragging={dragState?.ids.includes(icon.id) ? 'true' : undefined}
-            onDragStart={(event) => {
-              event.preventDefault();
-            }}
-            onMouseDown={(event) => {
-              if (event.button !== 0) return;
-              event.stopPropagation();
-              const ids = selectedIconIds.includes(icon.id) ? selectedIconIds : [icon.id];
-              setSelectedIconIds(ids);
-              // Reveal the full label of the icon the user clicked; clicking
-              const basePositions = Object.fromEntries(
-                ids.map((id) => [id, { x: iconPositions[id]?.x ?? 8, y: iconPositions[id]?.y ?? 8 }])
-              );
-              setDragState({
-                ids,
-                startX: event.clientX,
-                startY: event.clientY,
-                basePositions,
-                moved: false
-              });
-              setDragDelta({ x: 0, y: 0 });
-            }}
-            onContextMenu={(event) => {
-              event.preventDefault();
-              event.stopPropagation();
-              setSelectedIconIds([icon.id]);
-              setContextMenu({ type: 'shortcut', iconId: icon.id, x: event.clientX, y: event.clientY });
-            }}
-            onDoubleClick={(event) => {
-              event.stopPropagation();
-              openShortcut(icon.id);
-            }}
-          >
-            <span className={`tile-icon tile-icon-${icon.iconType}`}>{icon.letters}</span>
-            {renamingIconId === icon.id ? (
-              <input
-                className="desktop-tile-rename"
-                autoFocus
-                value={renameDraft}
-                onMouseDown={(event) => event.stopPropagation()}
-                onClick={(event) => event.stopPropagation()}
-                onDoubleClick={(event) => event.stopPropagation()}
-                onChange={(event) => setRenameDraft(event.target.value)}
-                onBlur={() => void commitRenameShortcut(icon.id)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter') {
-                    event.preventDefault();
-                    void commitRenameShortcut(icon.id);
-                  } else if (event.key === 'Escape') {
-                    event.preventDefault();
-                    setRenamingIconId(null);
-                  }
-                }}
-              />
-            ) : (
-              <span className={selectedIconIds.length === 1 && selectedIconIds[0] === icon.id ? 'tile-label expanded' : 'tile-label'} title={icon.label}>{icon.label}</span>
-            )}
-          </button>
-        ))}
-      </section>
+      <DesktopIcons
+        language={language}
+        user={user}
+        desktopIcons={desktopIcons}
+        iconPositions={iconPositions}
+        iconMetrics={iconMetrics}
+        selectedIconIds={selectedIconIds}
+        renamingIconId={null}
+        renameDraft=""
+        dragState={dragState}
+        dragDelta={dragDelta}
+        onMouseDown={handleDesktopIconMouseDown}
+        onContextMenu={handleDesktopIconContextMenu}
+        onDoubleClick={handleDesktopIconDoubleClick}
+      />
 
       {selectionRect ? (
         <div
@@ -1816,29 +2361,23 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
         <div className="context-menu desktop-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }}>
           {contextMenu.type === 'shortcut' ? (
             <>
-              <button type="button" onClick={() => openShortcut(contextMenu.iconId)}>{t(language, 'open')}</button>
-              {canRenameShortcut(contextMenu.iconId) ? (
-                <button type="button" onClick={() => beginRenameShortcut(contextMenu.iconId)}>{t(language, 'rename')}</button>
-              ) : null}
-              {!isBuiltinApp(contextMenu.iconId) ? (
-                <button className="danger-text" type="button" onClick={() => void deleteShortcut(contextMenu.iconId)}>{t(language, 'delete')}</button>
-              ) : null}
+              <button type="button" onClick={() => void openShortcut(contextMenu.iconId)}>{t(language, 'open')}</button>
             </>
           ) : (
             <>
               <div className="context-submenu-host">
-                <button type="button">{t(language, 'view')} <span>›</span></button>
+                <button type="button">{t(language, 'view')} <span>{'>'}</span></button>
                 <div className="context-submenu">
-                  <button type="button" onClick={() => void applyDesktopView('small')}>{user.desktopIconSize === 'small' ? '✓ ' : ''}{t(language, 'smallIcons')}</button>
-                  <button type="button" onClick={() => void applyDesktopView('medium')}>{user.desktopIconSize === 'medium' ? '✓ ' : ''}{t(language, 'mediumIcons')}</button>
-                  <button type="button" onClick={() => void applyDesktopView('large')}>{user.desktopIconSize === 'large' ? '✓ ' : ''}{t(language, 'largeIcons')}</button>
+                  <button type="button" onClick={() => void applyDesktopView('small')}>{user.desktopIconSize === 'small' ? '\u2713 ' : ''}{t(language, 'smallIcons')}</button>
+                  <button type="button" onClick={() => void applyDesktopView('medium')}>{user.desktopIconSize === 'medium' ? '\u2713 ' : ''}{t(language, 'mediumIcons')}</button>
+                  <button type="button" onClick={() => void applyDesktopView('large')}>{user.desktopIconSize === 'large' ? '\u2713 ' : ''}{t(language, 'largeIcons')}</button>
                   <button type="button" onClick={() => void toggleHideDesktopIcons(!user.hideDesktopIcons)}>
-                    {user.hideDesktopIcons ? '✓ ' : ''}{t(language, 'hideShortcuts')}
+                    {user.hideDesktopIcons ? '\u2713 ' : ''}{t(language, 'hideShortcuts')}
                   </button>
                 </div>
               </div>
               <div className="context-submenu-host">
-                <button type="button">{t(language, 'sortBy')} <span>›</span></button>
+                <button type="button">{t(language, 'sortBy')} <span>{'>'}</span></button>
                 <div className="context-submenu">
                   <button type="button" onClick={() => void applySort('name')}>{t(language, 'sortName')}</button>
                   <button type="button" onClick={() => void applySort('type')}>{t(language, 'sortType')}</button>
@@ -1846,8 +2385,14 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
                   <button type="button" onClick={() => void applySort('date')}>{t(language, 'sortDate')}</button>
                 </div>
               </div>
+              <div className="context-submenu-host">
+                <button type="button">{language === 'ru' ? 'Виджет' : language === 'uk' ? 'Віджет' : 'Widget'} <span>{'>'}</span></button>
+                <div className="context-submenu">
+                  <button type="button" onClick={() => chooseDesktopWidget('image', { x: contextMenu.x, y: contextMenu.y })}>{language === 'ru' ? 'Фото' : language === 'uk' ? 'Фото' : 'Photo'}</button>
+                  <button type="button" onClick={() => chooseDesktopWidget('video', { x: contextMenu.x, y: contextMenu.y })}>{language === 'ru' ? 'Видео' : language === 'uk' ? 'Відео' : 'Video'}</button>
+                </div>
+              </div>
               <button type="button" onClick={() => openSettings('desktop')}>{t(language, 'openSettings')}</button>
-              <button type="button" onClick={() => openExplorer(null)}>{t(language, 'openStorage')}</button>
             </>
           )}
         </div>
@@ -1857,11 +2402,22 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
         <WindowFrame
           language={language}
           title={t(language, 'settings')}
-          eyebrow=""
+          titleContent={(
+            <div className="settings-title-nav">
+              <button type="button" className="messenger-title-nav-button" aria-label="Back" disabled={settingsNav.index <= 0} onClick={() => navigateSettingsHistory(-1)}>
+                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6" /></svg>
+              </button>
+              <button type="button" className="messenger-title-nav-button" aria-label="Forward" disabled={settingsNav.index >= settingsNav.entries.length - 1} onClick={() => navigateSettingsHistory(1)}>
+                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M9 18l6-6-6-6" /></svg>
+              </button>
+            </div>
+          )}
           className="settings-window"
           maximized={settingsMaximized}
           zIndex={windowZ.settings}
           defaultPosition={{ x: Math.max(32, window.innerWidth / 2 - 380), y: 64 }}
+          minSize={{ width: 820, height: 620 }}
+          defaultSize={{ width: 940, height: 720 }}
           storageKey="settings"
           onFocus={() => bringToFront('settings')}
           onClose={requestCloseSettingsWindow}
@@ -1870,13 +2426,14 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
         >
               <div className="settings-shell">
               <div className="settings-sidebar">
-                <button className={activeTab === 'profile' ? 'settings-profile-head active' : 'settings-profile-head'} type="button" onClick={() => setActiveTab('profile')}>
+                <button className={activeTab === 'profile' ? 'settings-profile-head active' : 'settings-profile-head'} type="button" onClick={() => selectSettingsTab('profile')}>
                   <img className="settings-avatar-small" src={avatarDraft} alt="" />
                   <div className="settings-profile-info">
                     <strong>{user.nickname}</strong>
                     <span>{t(language, 'editProfile')}</span>
                   </div>
                 </button>
+                {renderSettingsHeadingLinks('profile')}
                 <div className="settings-search-wrap">
                   <span className="settings-search-icon">⌕</span>
                   <input
@@ -1895,14 +2452,16 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
                       const query = settingsSearch.toLowerCase();
                       return label.includes(query);
                     }).map((tab) => (
-                      <button
-                        key={tab.id}
-                        className={activeTab === tab.id ? 'settings-tab active' : 'settings-tab'}
-                        type="button"
-                        onClick={() => setActiveTab(tab.id)}
-                      >
-                        {t(language, tab.labelKey)}
-                      </button>
+                      <div className="settings-tab-group" key={tab.id}>
+                        <button
+                          className={activeTab === tab.id ? 'settings-tab active' : 'settings-tab'}
+                          type="button"
+                          onClick={() => selectSettingsTab(tab.id)}
+                        >
+                          {t(language, tab.labelKey)}
+                        </button>
+                        {renderSettingsHeadingLinks(tab.id)}
+                      </div>
                     ))}
                   </nav>
                   <button className="settings-logout" type="button" onClick={() => setConfirmLogout(true)}>
@@ -1918,10 +2477,10 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
                 </div>
               </div>
 
-              <div className="settings-content">
+              <div className="settings-content" ref={settingsContentRef}>
                 {activeTab === 'profile' ? (
                   <section className="settings-section">
-                    <h3>{t(language, 'profile')}</h3>
+                    <h3 className={settingsHeadingClass('profile-main')} data-settings-heading="profile-main">{t(language, 'profile')}</h3>
                     <div className="profile-layout">
                       <div className="profile-fields">
                         <div className="settings-avatar-row">
@@ -1950,7 +2509,7 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
                           maxLength={24}
                           onChange={(event) => setNicknameDraft(event.target.value)}
                         />
-                        <p className="field-label">{t(language, 'displayNameStyles')}</p>
+                        <p className={settingsHeadingClass('profile-style', 'field-label')} data-settings-heading="profile-style">{t(language, 'displayNameStyles')}</p>
                         <div className="name-style-controls">
                           <button
                             className="secondary-action"
@@ -1968,7 +2527,7 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
                             {t(language, 'deleteStyle')}
                           </button>
                         </div>
-                        <p className="field-label">{t(language, 'profileTheme')}</p>
+                        <p className={settingsHeadingClass('profile-theme', 'field-label')} data-settings-heading="profile-theme">{t(language, 'profileTheme')}</p>
                         <div className="profile-theme-row">
                           <label className="profile-theme-swatch" style={{ background: profilePrimaryDraft }}>
                             <span className="profile-theme-swatch-label">{t(language, 'profileThemePrimary')}</span>
@@ -1990,7 +2549,7 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
                           </label>
                         </div>
 
-                        <p className="field-label">{t(language, 'nameplate')}</p>
+                        <p className={settingsHeadingClass('profile-nameplate', 'field-label')} data-settings-heading="profile-nameplate">{t(language, 'nameplate')}</p>
                         <div className="nameplate-editor">
                           <small className="muted-line">{t(language, 'nameplateHint')}</small>
                           <div
@@ -2043,50 +2602,50 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
                           ) : null}
                         </div>
 
-                        <label className="field-label" htmlFor="settings-status">
+                        <label className={settingsHeadingClass('profile-status', 'field-label')} data-settings-heading="profile-status" htmlFor="settings-status">
                           {t(language, 'profileStatus')}
                     </label>
-                    <textarea
-                      id="settings-status"
-                      className="text-field"
-                      value={statusDraft}
-                      maxLength={200}
-                      rows={3}
-                      onChange={(event) => setStatusDraft(event.target.value)}
-                    />
+                    <div className="status-field-wrap">
+                      <textarea
+                        id="settings-status"
+                        className="text-field"
+                        value={statusDraft}
+                        maxLength={200}
+                        rows={3}
+                        onChange={(event) => setStatusDraft(event.target.value)}
+                      />
+                      <button
+                        type="button"
+                        ref={statusEmojiAnchorRef}
+                        className="status-emoji-button"
+                        aria-label={t(language, 'emoji')}
+                        onClick={() => setStatusEmojiOpen((open) => !open)}
+                      >
+                        <EmojiToggleIcon />
+                      </button>
+                      {statusEmojiOpen ? (
+                        <EmojiPicker
+                          language={language}
+                          anchorRef={statusEmojiAnchorRef}
+                          placement="bottom-end"
+                          onSelect={(emoji) => setStatusDraft((value) => customEmojiToShortcodes(`${value}${emoji}`))}
+                          onClose={() => setStatusEmojiOpen(false)}
+                        />
+                      ) : null}
+                    </div>
                     </div>
                     <div className="profile-preview">
-                      <div
-                        className="profile-modal-card profile-themed"
-                        style={{
-                          position: 'relative',
-                          boxShadow: 'none',
-                          width: '100%',
-                          ['--profile-primary' as string]: profilePrimaryDraft,
-                          ['--profile-accent' as string]: profileAccentDraft
-                        } as CSSProperties}
-                      >
-                        <div className="profile-banner" style={{ backgroundImage: wallpaperToBackground(wallpaperDraft, themeDraft), height: 100 }} />
-                        <div className="profile-body">
-                          <div className="profile-main">
-                            <div className="profile-avatar-wrap">
-                              <img src={avatarDraft} alt="" />
-                              <span className="profile-presence online" />
-                            </div>
-                            <div className="profile-info">
-                              <div className="profile-name-row">
-                                <h3 className={nameStyleClass(nameStyleDraft)} style={nameStyleToCss(nameStyleDraft)}>{nicknameDraft || t(language, 'nickname')}</h3>
-                                <small className="profile-state online">{t(language, 'online')}</small>
-                              </div>
-                              <UserBadges user={user} language={language} />
-                              {statusDraft ? <p className="profile-status">{statusDraft}</p> : null}
-                              <div className="profile-dates">
-                                <span>{t(language, 'memberSince')} {new Date(user.createdAt).toLocaleDateString()}</span>
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
+                      <ProfilePreviewCard
+                        user={user}
+                        language={language}
+                        bannerBackground={wallpaperToBackground(wallpaperDraft, themeDraft)}
+                        avatar={avatarDraft}
+                        nickname={nicknameDraft}
+                        status={expandCustomEmojiShortcodes(statusDraft)}
+                        nameStyle={nameStyleDraft}
+                        primaryColor={profilePrimaryDraft}
+                        accentColor={profileAccentDraft}
+                      />
                     </div>
                   </div>
                   </section>
@@ -2094,7 +2653,7 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
 
                 {activeTab === 'desktop' ? (
                   <section className="settings-section">
-                    <h3>{t(language, 'wallpaper')}</h3>
+                    <h3 className={settingsHeadingClass('desktop-wallpaper')} data-settings-heading="desktop-wallpaper">{t(language, 'wallpaper')}</h3>
                     <p className="settings-hint">{t(language, 'wallpaperHint')}</p>
                     <div className="settings-grid-2col">
                       <div className="settings-grid-col">
@@ -2146,7 +2705,7 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
                       </div>
                       <div className="settings-grid-col">
                         <div className="settings-subsection">
-                          <p className="field-label compact">{t(language, 'iconLayout')}</p>
+                          <p className={settingsHeadingClass('desktop-icons', 'field-label compact')} data-settings-heading="desktop-icons">{t(language, 'iconLayout')}</p>
                           <div className="choice-list theme-choice-list">
                             {(['small', 'medium', 'large'] as DesktopIconSize[]).map((size) => (
                               <button className={iconSizeDraft === size ? 'choice-item active' : 'choice-item'} key={size} type="button" onClick={() => setIconSizeDraft(size)}>
@@ -2167,7 +2726,7 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
 
                 {activeTab === 'appearance' ? (
                   <section className="settings-section">
-                    <h3>{t(language, 'appearanceSettings')}</h3>
+                    <h3 className={settingsHeadingClass('appearance-preview')} data-settings-heading="appearance-preview">{t(language, 'appearanceSettings')}</h3>
                     <div className="settings-grid-2col">
                       <div className="settings-grid-col">
                         <div className="appearance-preview" style={{ '--preview-accent': accentColorDraft } as CSSProperties}>
@@ -2179,7 +2738,7 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
                           </div>
                         </div>
                         <div className="settings-subsection">
-                          <p className="field-label compact">{t(language, 'recentColors')}</p>
+                          <p className={settingsHeadingClass('appearance-accent', 'field-label compact')} data-settings-heading="appearance-accent">{t(language, 'recentColors')}</p>
                           <div className="accent-grid">
                             {ACCENT_COLORS.slice(0, 5).map((color) => (
                               <button
@@ -2216,14 +2775,14 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
                       </div>
                       <div className="settings-grid-col">
                         <div className="settings-subsection">
-                          <p className="field-label compact">{t(language, 'customColor')}</p>
+                          <p className={settingsHeadingClass('appearance-theme', 'field-label compact')} data-settings-heading="appearance-theme">{t(language, 'customColor')}</p>
                           <div className="choice-list theme-choice-list">
                             {THEMES.map((item) => (
                               <button
                                 key={item.code}
                                 className={themeDraft === item.code ? 'choice-item active' : 'choice-item'}
                                 type="button"
-                                onClick={() => setThemeDraft(item.code)}
+                                onClick={() => updateThemeDraftWithWave(item.code)}
                               >
                                 <span className={`theme-swatch ${item.code}`} />
                                 {t(language, item.nameKey)}
@@ -2233,7 +2792,7 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
                         </div>
                         <label className="toggle-row">
                           <input type="checkbox" checked={transparencyDraft} onChange={(event) => setTransparencyDraft(event.target.checked)} />
-                          <span>{t(language, 'transparencyEffects')}</span>
+                          <span className={settingsHeadingClass('appearance-transparency')} data-settings-heading="appearance-transparency">{t(language, 'transparencyEffects')}</span>
                           <strong>{transparencyDraft ? t(language, 'transparencyOn') : t(language, 'transparencyOff')}</strong>
                         </label>
                       </div>
@@ -2243,7 +2802,7 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
 
                 {activeTab === 'region' ? (
                   <section className="settings-section">
-                    <h3>{t(language, 'languageAndTime')}</h3>
+                    <h3 className={settingsHeadingClass('region-language')} data-settings-heading="region-language">{t(language, 'languageAndTime')}</h3>
                     <div className="settings-subsection">
                       <p className="settings-hint">{t(language, 'chooseLanguage')}</p>
                       <div style={{ position: 'relative' }}>
@@ -2254,7 +2813,7 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
                           onClick={() => setLanguageOpen((v) => !v)}
                         >
                           <span><span className="flag-label">{LANGUAGES.find((l) => l.code === languageDraft)?.label}</span> {LANGUAGES.find((l) => l.code === languageDraft)?.name}</span>
-                          <span style={{ color: 'var(--muted)', fontSize: 12 }}>▼</span>
+                          <span style={{ color: 'var(--muted)', fontSize: 12 }}>v</span>
                         </button>
                         {languageOpen ? (
                           <div style={{
@@ -2301,7 +2860,187 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
                       </div>
                     </div>
                     <div className="settings-subsection">
-                      <p className="field-label compact">{t(language, 'timeFormat')}</p>
+                      <p className={settingsHeadingClass('region-translate', 'field-label compact')} data-settings-heading="region-translate">{t(language, 'translateTo')}</p>
+                      <p className="settings-hint">{t(language, 'translateToHint')}</p>
+                      <div style={{ position: 'relative' }}>
+                        <button
+                          className="choice-item"
+                          type="button"
+                          style={{ width: '100%', justifyContent: 'space-between' }}
+                          onClick={() => { setTranslateTargetOpen((v) => !v); setTranslateSearch(''); }}
+                        >
+                          <span>{findTranslateLanguage(translateTarget)?.native ?? findTranslateLanguage(translateTarget)?.name ?? translateTarget}</span>
+                          <span style={{ color: 'var(--muted)', fontSize: 12 }}>v</span>
+                        </button>
+                        {translateTargetOpen ? (
+                          <div style={{
+                            position: 'absolute',
+                            top: '100%',
+                            left: 0,
+                            right: 0,
+                            zIndex: 10,
+                            marginTop: 4,
+                            padding: 4,
+                            border: '1px solid var(--line)',
+                            borderRadius: 10,
+                            background: 'var(--panel)',
+                            boxShadow: '0 4px 16px rgba(0,0,0,0.12)'
+                          }}>
+                            <input
+                              type="text"
+                              autoFocus
+                              value={translateSearch}
+                              onChange={(e) => setTranslateSearch(e.target.value)}
+                              placeholder={t(language, 'searchLanguage')}
+                              style={{
+                                width: '100%',
+                                boxSizing: 'border-box',
+                                padding: '8px 10px',
+                                marginBottom: 4,
+                                border: '1px solid var(--line)',
+                                borderRadius: 6,
+                                background: 'var(--bg-soft)',
+                                color: 'var(--text)',
+                                fontSize: 13,
+                                outline: 'none'
+                              }}
+                            />
+                            <div style={{ maxHeight: 240, overflowY: 'auto' }}>
+                              {(() => {
+                                const q = translateSearch.trim().toLowerCase();
+                                const list = q
+                                  ? TRANSLATE_LANGUAGES.filter((item) =>
+                                      item.name.toLowerCase().includes(q) ||
+                                      item.native.toLowerCase().includes(q) ||
+                                      item.code.toLowerCase().includes(q))
+                                  : TRANSLATE_LANGUAGES;
+                                if (list.length === 0) {
+                                  return <p className="settings-hint" style={{ padding: '8px 10px', margin: 0 }}>{t(language, 'noPeopleFound')}</p>;
+                                }
+                                return list.map((item) => (
+                                  <button
+                                    key={item.code}
+                                    type="button"
+                                    style={{
+                                      display: 'flex',
+                                      alignItems: 'center',
+                                      gap: 8,
+                                      width: '100%',
+                                      padding: '8px 10px',
+                                      border: 'none',
+                                      borderRadius: 6,
+                                      background: translateTarget === item.code ? 'var(--bg-soft)' : 'transparent',
+                                      color: 'var(--text)',
+                                      textAlign: 'left',
+                                      cursor: 'pointer',
+                                      fontSize: 13
+                                    }}
+                                    onClick={() => { setTranslateTarget(item.code); setTranslateTargetOpen(false); }}
+                                    onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--bg-soft)'; }}
+                                    onMouseLeave={(e) => { if (translateTarget !== item.code) (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
+                                  >
+                                    <span>{item.native}</span>
+                                    {item.native !== item.name ? <span style={{ color: 'var(--muted)', fontSize: 12 }}>{item.name}</span> : null}
+                                  </button>
+                                ));
+                              })()}
+                            </div>
+                          </div>
+                        ) : null}
+                      </div>
+                    </div>
+                    <div className="settings-subsection">
+                      <p className={settingsHeadingClass('region-composer', 'field-label compact')} data-settings-heading="region-composer">{t(language, 'composerTranslateTo')}</p>
+                      <p className="settings-hint">{t(language, 'composerTranslateToHint')}</p>
+                      <div style={{ position: 'relative' }}>
+                        <button
+                          className="choice-item"
+                          type="button"
+                          style={{ width: '100%', justifyContent: 'space-between' }}
+                          onClick={() => { setComposerTranslateTargetOpen((v) => !v); setComposerTranslateSearch(''); }}
+                        >
+                          <span>{findTranslateLanguage(composerTranslateTarget)?.native ?? findTranslateLanguage(composerTranslateTarget)?.name ?? composerTranslateTarget}</span>
+                          <span style={{ color: 'var(--muted)', fontSize: 12 }}>v</span>
+                        </button>
+                        {composerTranslateTargetOpen ? (
+                          <div style={{
+                            position: 'absolute',
+                            top: '100%',
+                            left: 0,
+                            right: 0,
+                            zIndex: 10,
+                            marginTop: 4,
+                            padding: 4,
+                            border: '1px solid var(--line)',
+                            borderRadius: 10,
+                            background: 'var(--panel)',
+                            boxShadow: '0 4px 16px rgba(0,0,0,0.12)'
+                          }}>
+                            <input
+                              type="text"
+                              autoFocus
+                              value={composerTranslateSearch}
+                              onChange={(e) => setComposerTranslateSearch(e.target.value)}
+                              placeholder={t(language, 'searchLanguage')}
+                              style={{
+                                width: '100%',
+                                boxSizing: 'border-box',
+                                padding: '8px 10px',
+                                marginBottom: 4,
+                                border: '1px solid var(--line)',
+                                borderRadius: 6,
+                                background: 'var(--bg-soft)',
+                                color: 'var(--text)',
+                                fontSize: 13,
+                                outline: 'none'
+                              }}
+                            />
+                            <div style={{ maxHeight: 240, overflowY: 'auto' }}>
+                              {(() => {
+                                const q = composerTranslateSearch.trim().toLowerCase();
+                                const list = q
+                                  ? TRANSLATE_LANGUAGES.filter((item) =>
+                                      item.name.toLowerCase().includes(q) ||
+                                      item.native.toLowerCase().includes(q) ||
+                                      item.code.toLowerCase().includes(q))
+                                  : TRANSLATE_LANGUAGES;
+                                if (list.length === 0) {
+                                  return <p className="settings-hint" style={{ padding: '8px 10px', margin: 0 }}>{t(language, 'noPeopleFound')}</p>;
+                                }
+                                return list.map((item) => (
+                                  <button
+                                    key={item.code}
+                                    type="button"
+                                    style={{
+                                      display: 'flex',
+                                      alignItems: 'center',
+                                      gap: 8,
+                                      width: '100%',
+                                      padding: '8px 10px',
+                                      border: 'none',
+                                      borderRadius: 6,
+                                      background: composerTranslateTarget === item.code ? 'var(--bg-soft)' : 'transparent',
+                                      color: 'var(--text)',
+                                      textAlign: 'left',
+                                      cursor: 'pointer',
+                                      fontSize: 13
+                                    }}
+                                    onClick={() => { setComposerTranslateTarget(item.code); setComposerTranslateTargetOpen(false); }}
+                                    onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--bg-soft)'; }}
+                                    onMouseLeave={(e) => { if (composerTranslateTarget !== item.code) (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
+                                  >
+                                    <span>{item.native}</span>
+                                    {item.native !== item.name ? <span style={{ color: 'var(--muted)', fontSize: 12 }}>{item.name}</span> : null}
+                                  </button>
+                                ));
+                              })()}
+                            </div>
+                          </div>
+                        ) : null}
+                      </div>
+                    </div>
+                    <div className="settings-subsection">
+                      <p className={settingsHeadingClass('region-time', 'field-label compact')} data-settings-heading="region-time">{t(language, 'timeFormat')}</p>
                       <div className="choice-list" style={{ display: 'flex', gap: 6 }}>
                         <button
                           className={timeFormat === '24h' ? 'choice-item active' : 'choice-item'}
@@ -2324,31 +3063,127 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
                   </section>
                 ) : null}
 
+                {activeTab === 'connections' ? (
+                  <section className="settings-section connections-settings">
+                    <h3>{t(language, 'connectionsSettings')}</h3>
+                    <p className="settings-hint">Connect external accounts to show Spotify listening status and League of Legends activity on your profile.</p>
+
+                    {(() => {
+                      const spotify = connections.find((connection) => connection.provider === 'spotify' && connection.connected);
+                      const riot = connections.find((connection) => connection.provider === 'riot' && connection.connected);
+                      const spotifyShowProfile = connectionVisibilityDraft.spotify.showProfile;
+                      const spotifyShowActivity = connectionVisibilityDraft.spotify.showActivity;
+                      const riotShowProfile = connectionVisibilityDraft.riot.showProfile;
+                      const riotShowActivity = connectionVisibilityDraft.riot.showActivity;
+                      return (
+                        <div className="connections-list">
+                          <div className="connection-card spotify">
+                            <div className="connection-card-main">
+                              <img className="connection-service-icon" src={CONNECTION_ICONS.spotify} alt="" />
+                              <span>
+                                <strong>Spotify</strong>
+                                <small>{spotify ? spotify.displayName : 'Show currently playing track in profile'}</small>
+                              </span>
+                            </div>
+                            <div className="connection-actions">
+                              {spotify ? (
+                                <button className="secondary-action danger-text" type="button" onClick={() => void disconnectProvider('spotify')}>Disconnect</button>
+                              ) : (
+                                <button className="primary-action" type="button" disabled={connectionsLoading} onClick={() => void connectSpotify()}>
+                                  Connect
+                                </button>
+                              )}
+                            </div>
+                            {!spotifyConfigured ? <p className="settings-hint">Set SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET on the server.</p> : null}
+                            {spotify ? (
+                              <div className="connection-visibility">
+                                <label className="connection-toggle-row">
+                                  <span>
+                                    <strong>Show in profile</strong>
+                                    <small>Display Spotify in your profile connections.</small>
+                                  </span>
+                                  <input type="checkbox" checked={spotifyShowProfile} onChange={(event) => void updateConnectionVisibility('spotify', { showProfile: event.target.checked })} />
+                                </label>
+                                <label className="connection-toggle-row">
+                                  <span>
+                                    <strong>Show activity</strong>
+                                    <small>Display the track you are listening to now.</small>
+                                  </span>
+                                  <input type="checkbox" checked={spotifyShowActivity} onChange={(event) => void updateConnectionVisibility('spotify', { showActivity: event.target.checked })} />
+                                </label>
+                              </div>
+                            ) : null}
+                          </div>
+
+                          <div className="connection-card riot">
+                            <div className="connection-card-main">
+                              <img className="connection-service-icon" src={CONNECTION_ICONS.riot} alt="" />
+                              <span>
+                                <strong>Riot Games</strong>
+                                <small>{riot ? riot.displayName : 'Show active League of Legends game in profile'}</small>
+                              </span>
+                            </div>
+                            <div className="riot-connect-form">
+                              <input className="text-field" value={riotGameName} placeholder="Riot name" onChange={(event) => setRiotGameName(event.target.value)} />
+                              <input className="text-field" value={riotTagLine} placeholder="TAG" onChange={(event) => setRiotTagLine(event.target.value)} />
+                              <select className="text-field" value={riotRegion} onChange={(event) => setRiotRegion(event.target.value)}>
+                                {RIOT_REGIONS.map((region) => <option key={region} value={region}>{region.toUpperCase()}</option>)}
+                              </select>
+                            </div>
+                            <div className="connection-actions">
+                              <button className="primary-action" type="button" disabled={connectionsLoading || !riotGameName.trim() || !riotTagLine.trim()} onClick={() => void connectRiot()}>
+                                {riot ? 'Update' : 'Connect'}
+                              </button>
+                              {riot ? <button className="secondary-action danger-text" type="button" onClick={() => void disconnectProvider('riot')}>Disconnect</button> : null}
+                            </div>
+                            {!riotConfigured ? <p className="settings-hint">Set RIOT_API_KEY on the server to validate Riot IDs and read LoL activity.</p> : null}
+                            {riot ? (
+                              <div className="connection-visibility">
+                                <label className="connection-toggle-row">
+                                  <span>
+                                    <strong>Show in profile</strong>
+                                    <small>Display Riot Games in your profile connections.</small>
+                                  </span>
+                                  <input type="checkbox" checked={riotShowProfile} onChange={(event) => void updateConnectionVisibility('riot', { showProfile: event.target.checked })} />
+                                </label>
+                                <label className="connection-toggle-row">
+                                  <span>
+                                    <strong>Show activity</strong>
+                                    <small>Display active League of Legends game status.</small>
+                                  </span>
+                                  <input type="checkbox" checked={riotShowActivity} onChange={(event) => void updateConnectionVisibility('riot', { showActivity: event.target.checked })} />
+                                </label>
+                              </div>
+                            ) : null}
+                          </div>
+                        </div>
+                      );
+                    })()}
+
+                    {connectionsLoading ? <p className="settings-hint">Loading connections...</p> : null}
+                    {connectionsStatus ? <p className="settings-hint">{connectionsStatus}</p> : null}
+                  </section>
+                ) : null}
+
                 {activeTab === 'music' ? (
                   <section className="settings-section settings-music-section">
                     <h3>{t(language, 'playlist')}</h3>
-                    <div className="settings-music-shell">
-                      <div className="settings-music-panel">
-                        <header>
-                          <strong>{t(language, 'addFromStorage')}</strong>
-                          <button className="secondary-action compact" type="button" onClick={() => void refreshStorageAudioFiles()}>
-                            {t(language, 'openStorage')}
-                          </button>
-                        </header>
-                        <div className="settings-music-list">
-                          {storageAudioFiles.length === 0 ? <div className="explorer-empty">{t(language, 'noAudioFiles')}</div> : null}
-                          {storageAudioFiles.map((item) => (
-                            <button className="settings-music-row" key={item.id} type="button" onClick={() => void addTrackFromStorage(item)}>
-                              <span>♪</span>
-                              <strong>{item.name}</strong>
-                              <small>{Math.ceil((item.size ?? 0) / 1024)} KB</small>
-                            </button>
-                          ))}
-                        </div>
-                      </div>
+                    <div className="settings-music-shell single">
                       <div className="settings-music-panel">
                         <header>
                           <strong>{t(language, 'playlist')}</strong>
+                          <button
+                            className="secondary-action compact"
+                            type="button"
+                            onClick={() => {
+                              if (playlistAudioInputRef.current) {
+                                playlistAudioInputRef.current.value = '';
+                                playlistAudioInputRef.current.click();
+                              }
+                            }}
+                          >
+                            {language === 'ru' ? 'Из ПК' : language === 'uk' ? 'З ПК' : 'Add from PC'}
+                          </button>
                         </header>
                         <div className="settings-music-list">
                           {musicTracks.length === 0 ? <div className="explorer-empty">{t(language, 'emptyPlaylist')}</div> : null}
@@ -2385,7 +3220,7 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
                                   setMusicPlaying(true);
                                 }}
                               >
-                                <span>{index === currentTrackIndex ? '▶' : '♪'}</span>
+                                <span>{index === currentTrackIndex ? '>' : '-'}</span>
                                 <strong>{track.name}</strong>
                               </button>
                               <button className="icon-action danger-text" type="button" onClick={() => void removeTrack(track.id)}>
@@ -2400,7 +3235,32 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
                 ) : null}
 
                 {activeTab === 'voice' ? (
-                  <VoiceSettings language={language} onDirtyChange={handleVoiceDirtyChange} />
+                  <section className="settings-section">
+                    <VoiceSettings language={language} onDirtyChange={handleVoiceDirtyChange} />
+                  </section>
+                ) : null}
+
+                {activeTab === 'customEmoji' ? (
+                  <section className="settings-section">
+                    <CustomEmojiSettings language={language} currentUser={user} />
+                  </section>
+                ) : null}
+
+                {activeTab === 'privacy' ? (
+                  <section className="settings-section">
+                    <h3 className={settingsHeadingClass('privacy-group-identity')} data-settings-heading="privacy-group-identity">{t(language, 'privacySettings')}</h3>
+                    <label className="settings-toggle-row">
+                      <span>
+                        <strong>{t(language, 'groupIdentityMessages')}</strong>
+                        <small>{t(language, 'groupIdentityMessagesHint')}</small>
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={allowGroupIdentityMessagesDraft}
+                        onChange={(event) => setAllowGroupIdentityMessagesDraft(event.target.checked)}
+                      />
+                    </label>
+                  </section>
                 ) : null}
 
                 {activeTab === 'security' ? (
@@ -2443,12 +3303,12 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
                     <div className="payment-card-preview">
                       <span>NotOS Premium</span>
                       <strong>{cardNumberDraft.replace(/\d(?=\d{4})/g, '•') || '•••• •••• •••• ••••'}</strong>
-                      <small>{cardHolderDraft || t(language, 'cardHolder')} · {cardExpiryDraft || 'MM/YY'}</small>
+                      <small>{cardHolderDraft || t(language, 'cardHolder')} В· {cardExpiryDraft || 'MM/YY'}</small>
                     </div>
                     <label className="field-label" htmlFor="premium-card-number">{t(language, 'cardNumber')}</label>
                     <input id="premium-card-number" className="text-field" inputMode="numeric" value={cardNumberDraft} placeholder="4242 4242 4242 4242" onChange={(event) => setCardNumberDraft(event.target.value)} />
                     <label className="field-label" htmlFor="premium-card-holder">{t(language, 'cardHolder')}</label>
-                    <input id="premium-card-holder" className="text-field" value={cardHolderDraft} placeholder="NOTOC USER" onChange={(event) => setCardHolderDraft(event.target.value.toUpperCase())} />
+                    <input id="premium-card-holder" className="text-field" value={cardHolderDraft} placeholder="NOTOS USER" onChange={(event) => setCardHolderDraft(event.target.value.toUpperCase())} />
                     <div className="payment-grid">
                       <label className="field-label" htmlFor="premium-card-expiry">{t(language, 'cardExpiry')}</label>
                       <label className="field-label" htmlFor="premium-card-cvc">{t(language, 'cardCvc')}</label>
@@ -2493,7 +3353,7 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
                 <section className="legal-window" onClick={(event) => event.stopPropagation()}>
                   <div className="legal-header">
                     <h2>{t(language, legalContent === 'privacy' ? 'privacyPolicy' : 'termsOfService')}</h2>
-                    <button className="icon-action" type="button" onClick={() => setLegalContent(null)}>✕</button>
+                    <button className="icon-action" type="button" onClick={() => setLegalContent(null)}>x</button>
                   </div>
                   <div className="legal-body">
                     <h3>1. {t(language, 'informationCollection')}</h3>
@@ -2517,7 +3377,7 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
                   nickname: nicknameDraft || user.nickname,
                   avatarData: avatarDraft,
                   wallpaper: wallpaperDraft,
-                  status: statusDraft,
+                  status: expandCustomEmojiShortcodes(statusDraft),
                   profilePrimaryColor: profilePrimaryDraft,
                   profileAccentColor: profileAccentDraft
                 }}
@@ -2608,56 +3468,33 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
         <UpdatesWindow language={language} initialUpdateId={updatesInitialId} onClose={closeUpdates} />
       ) : null}
 
-      {storageWindow === 'open' ? (
-        <VirtualExplorer
+      {inboxWindow !== 'closed' ? (
+        <InboxWindow
+          token={token}
           language={language}
-          items={storageItems}
-          maximized={storageMaximized}
-          zIndex={windowZ.explorer}
-          initialFolderId={explorerFolderId}
-          onFocus={() => bringToFront('explorer')}
-          onClose={() => setStorageWindow('closed')}
-          onMinimize={() => setStorageWindow('minimized')}
-          onToggleMaximize={() => setStorageMaximized((value) => !value)}
-          onOpenTextFile={(item) => openNotepad(item.id, item.name)}
-          onOpenAudioFile={(item) => openMusicPlayer(item.id)}
-          onOpenImageFile={(item) => openImageViewer(item.id)}
-          onOpenVideoFile={(item) => openVideoViewer(item.id)}
-          onSaveItems={saveStorageItems}
-          onUploadProgress={(fraction) => {
-            if (fraction === null) finishUpload();
-            else beginOrUpdateUpload(fraction);
+          currentUser={user}
+          minimized={inboxWindow === 'minimized'}
+          maximized={inboxMaximized}
+          zIndex={windowZ.inbox}
+          readIds={inboxReadIds}
+          initialRequests={inboxRequests}
+          initialWallMessages={inboxWallMessages}
+          mentionItems={mentionNotifications}
+          initialLoading={inboxLoading}
+          onReadIdsChange={setInboxReadIds}
+          onUnreadCountChange={setInboxUnreadCount}
+          onFocus={() => bringToFront('inbox')}
+          onClose={() => setInboxWindow('closed')}
+          onMinimize={() => setInboxWindow('minimized')}
+          onToggleMaximize={() => setInboxMaximized((value) => !value)}
+          onOpenProfile={(profileUser, anchorRect) => { setProfileModalUser(profileUser); setProfileAnchor(anchorRect ?? null); }}
+          onOpenMention={(mention) => {
+            if (mention.kind === 'group' && mention.group) {
+              openMessengerGroup(mention.group, mention.channelId ?? null);
+            } else {
+              openMessengerChat(mention.sender.id);
+            }
           }}
-        />
-      ) : null}
-
-      {imageViewerWindow !== 'closed' && imageViewerItem ? (
-        <ImageViewerWindow
-          language={language}
-          item={imageViewerItem}
-          minimized={imageViewerWindow === 'minimized'}
-          maximized={imageViewerMaximized}
-          zIndex={windowZ.imageViewer}
-          onFocus={() => bringToFront('imageViewer')}
-          onClose={() => setImageViewerWindow('closed')}
-          onMinimize={() => setImageViewerWindow('minimized')}
-          onToggleMaximize={() => setImageViewerMaximized((value) => !value)}
-          onPin={() => pinImage(imageViewerItem)}
-        />
-      ) : null}
-
-      {videoViewerWindow !== 'closed' && videoViewerItem ? (
-        <VideoViewerWindow
-          language={language}
-          item={videoViewerItem}
-          minimized={videoViewerWindow === 'minimized'}
-          maximized={videoViewerMaximized}
-          zIndex={windowZ.videoViewer}
-          onFocus={() => bringToFront('videoViewer')}
-          onClose={() => setVideoViewerWindow('closed')}
-          onMinimize={() => setVideoViewerWindow('minimized')}
-          onToggleMaximize={() => setVideoViewerMaximized((value) => !value)}
-          onPin={() => pinVideo(videoViewerItem)}
         />
       ) : null}
 
@@ -2694,61 +3531,67 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
         </div>
       ))}
 
-      {musicPlayerWindow !== 'closed' ? (
-        <MusicPlayerWindow
+      {watchTogetherWindow !== 'closed' ? (
+        <WatchTogetherWindow
           language={language}
-          tracks={storageAudioFiles}
-          initialTrackId={musicPlayerInitialTrackId}
-          minimized={musicPlayerWindow === 'minimized'}
-          maximized={musicPlayerMaximized}
-          zIndex={windowZ.musicPlayer}
-          onFocus={() => bringToFront('musicPlayer')}
-          onClose={() => setMusicPlayerWindow('closed')}
-          onMinimize={() => setMusicPlayerWindow('minimized')}
-          onToggleMaximize={() => setMusicPlayerMaximized((value) => !value)}
-          onPlayStart={pauseDesktopMusic}
-          onRefresh={refreshStorageAudioFiles}
+          currentUser={user}
+          token={token}
+          minimized={watchTogetherWindow === 'minimized'}
+          maximized={watchTogetherMaximized}
+          zIndex={windowZ.watchTogether}
+          initialInvite={watchTogetherInvite}
+          onFocus={() => bringToFront('watchTogether')}
+          onClose={() => setWatchTogetherWindow('closed')}
+          onMinimize={() => setWatchTogetherWindow('minimized')}
+          onToggleMaximize={() => setWatchTogetherMaximized((value) => !value)}
         />
       ) : null}
 
       {aiChatWindow !== 'closed' ? (
-        <AiChatWindow
-          token={token}
-          userId={user.id}
-          language={language}
-          minimized={aiChatWindow === 'minimized'}
-          maximized={aiChatMaximized}
-          zIndex={windowZ.aiChat}
-          onFocus={() => bringToFront('aiChat')}
-          onClose={() => setAiChatWindow('closed')}
-          onMinimize={() => setAiChatWindow('minimized')}
-          onToggleMaximize={() => setAiChatMaximized((value) => !value)}
-        />
+        <ErrorBoundary
+          fallback={(error, reset) => (
+            <WindowFrame
+              language={language}
+              title={t(language, 'aiChat')}
+              className="ai-chat-window"
+              minimized={aiChatWindow === 'minimized'}
+              maximized={aiChatMaximized}
+              zIndex={windowZ.aiChat}
+              storageKey="ai-chat"
+              defaultPosition={{ x: 160, y: 80 }}
+              minSize={{ width: 760, height: 520 }}
+              defaultSize={{ width: 960, height: 680 }}
+              onFocus={() => bringToFront('aiChat')}
+              onClose={() => setAiChatWindow('closed')}
+              onMinimize={() => setAiChatWindow('minimized')}
+              onToggleMaximize={() => setAiChatMaximized((value) => !value)}
+            >
+              <div className="ai-chat-crash">
+                <strong>{language === 'ru' ? 'AI Chat не смог открыться' : language === 'uk' ? 'AI Chat не вдалося відкрити' : 'AI Chat could not open'}</strong>
+                <p>{error?.message || t(language, 'aiError')}</p>
+                <button className="primary-action" type="button" onClick={reset}>
+                  {t(language, 'retry')}
+                </button>
+              </div>
+            </WindowFrame>
+          )}
+        >
+          <AiChatWindow
+            token={token}
+            userId={user.id}
+            language={language}
+            minimized={aiChatWindow === 'minimized'}
+            maximized={aiChatMaximized}
+            zIndex={windowZ.aiChat}
+            onFocus={() => bringToFront('aiChat')}
+            onClose={() => setAiChatWindow('closed')}
+            onMinimize={() => setAiChatWindow('minimized')}
+            onToggleMaximize={() => setAiChatMaximized((value) => !value)}
+          />
+        </ErrorBoundary>
       ) : null}
 
-      {messengerWindow !== 'closed' || ongoingCall || pendingCallAccept ? (
-        <MessengerWindow
-          token={token}
-          language={language}
-          currentUser={user}
-          initialChatUserId={messengerChatRequest?.userId ?? null}
-          initialChatRequestId={messengerChatRequest?.requestId ?? 0}
-          maximized={messengerMaximized}
-          minimized={messengerWindow !== 'open'}
-          zIndex={windowZ.messenger}
-          pendingCallAccept={pendingCallAccept}
-          onPendingCallHandled={handlePendingCallHandled}
-          onCallStateChange={handleCallStateChange}
-          onFocus={() => bringToFront('messenger')}
-          onClose={() => setMessengerWindow('closed')}
-          onMinimize={() => setMessengerWindow('minimized')}
-          onToggleMaximize={() => setMessengerMaximized((value) => !value)}
-          onViewDesktop={viewRemoteDesktop}
-          onActiveChatChange={setActiveChatUserId}
-          onUserChange={onUserChange}
-          onEditProfile={() => openSettings('profile')}
-        />
-      ) : null}
+      {messengerNode}
 
       {remoteDesktopWindow !== 'closed' && remoteDesktopUser ? (
         <RemoteDesktopWindow
@@ -2763,23 +3606,6 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
           onClose={() => setRemoteDesktopWindow('closed')}
           onMinimize={() => setRemoteDesktopWindow('minimized')}
           onToggleMaximize={() => setRemoteDesktopMaximized((value) => !value)}
-        />
-      ) : null}
-
-      {notepadWindow === 'open' && notepadItemId ? (
-        <NotepadWindow
-          token={token}
-          language={language}
-          itemId={notepadItemId}
-          items={storageItems}
-          maximized={notepadMaximized}
-          zIndex={windowZ.notepad}
-          onFocus={() => bringToFront('notepad')}
-          onClose={() => setNotepadWindow('closed')}
-          onMinimize={() => setNotepadWindow('minimized')}
-          onToggleMaximize={() => setNotepadMaximized((value) => !value)}
-          onTitleChange={setNotepadTitle}
-          onSaveItems={saveStorageItems}
         />
       ) : null}
 
@@ -2900,7 +3726,7 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
             <strong>{ongoingCall.peer.nickname}</strong>
             <small>
               {ongoingCall.phase === 'active'
-                ? `${t(language, 'ongoingCall')} · ${formatCallDuration(ongoingCall.elapsed)}`
+                ? `${t(language, 'ongoingCall')} В· ${formatCallDuration(ongoingCall.elapsed)}`
                 : t(language, 'callConnecting')}
             </small>
           </div>
@@ -2921,26 +3747,84 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
       ) : null}
 
       <footer className="taskbar">
-        <button
-          className="profile-start"
-          type="button"
-          onClick={() => setProfileModalUser(user)}
-          onContextMenu={(event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            setTaskbarMenu({ x: event.clientX, y: event.clientY });
-          }}
-        >
-          <img src={user.avatarData} alt="" />
-          <UserName user={user} />
-        </button>
+        <div className="profile-start-wrap">
+          <button
+            ref={statusTriggerRef}
+            className="profile-start"
+            type="button"
+            onClick={openStatusPanel}
+            onContextMenu={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              setTaskbarMenu({
+                x: Math.min(Math.max(event.clientX, 8), window.innerWidth - 260 - 8),
+                y: Math.max(event.clientY - 8, 8)
+              });
+            }}
+          >
+            <span className="profile-start-avatar">
+              <img src={user.avatarData} alt="" />
+              <i className={`presence-dot status-${userStatus.status}`} />
+            </span>
+            <span className="profile-start-name"><UserName user={user} /></span>
+          </button>
+          <div className="profile-start-voice" aria-label={t(language, 'voiceVideoSettings')}>
+            <button
+              type="button"
+              className={userStatus.voice.muted ? 'profile-voice-btn danger' : 'profile-voice-btn'}
+              title={userStatus.voice.muted ? t(language, 'unmuteMic') : t(language, 'muteMic')}
+              aria-pressed={userStatus.voice.muted}
+              onClick={(event) => {
+                event.stopPropagation();
+                toggleSelfMute();
+              }}
+            >
+              {userStatus.voice.muted ? (
+                <svg viewBox="0 0 24 24" width="17" height="17" fill="currentColor"><path d="M2.7 3.7 1.3 5.1l8.7 8.7V14a2 2 0 0 0 2 2c.3 0 .6-.1.8-.2l1.5 1.5A6 6 0 0 1 6 12H4a8 8 0 0 0 7 7.9V22h2v-2.1c1.1-.1 2.2-.5 3.2-1.1l3.5 3.5 1.4-1.4L2.7 3.7zM14 11.2V5a2 2 0 0 0-4 0v2.2l4 4zM18 12c0 .9-.2 1.7-.5 2.4l1.5 1.5c.6-1.1 1-2.4 1-3.9h-2z"/></svg>
+              ) : (
+                <svg viewBox="0 0 24 24" width="17" height="17" fill="currentColor"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.9V21h2v-3.1A7 7 0 0 0 19 11h-2z"/></svg>
+              )}
+            </button>
+            <button
+              type="button"
+              className={userStatus.voice.deafened ? 'profile-voice-btn danger' : 'profile-voice-btn'}
+              title={userStatus.voice.deafened ? t(language, 'undeafen') : t(language, 'deafen')}
+              aria-pressed={userStatus.voice.deafened}
+              onClick={(event) => {
+                event.stopPropagation();
+                toggleSelfDeafen();
+              }}
+            >
+              {userStatus.voice.deafened ? (
+                <svg viewBox="0 0 24 24" width="17" height="17" fill="currentColor"><path d="M2.7 3.7 1.3 5.1 4.4 8.2A9 9 0 0 0 3 13v4a3 3 0 0 0 3 3h1v-7H5v-1a7 7 0 0 1 .9-3.4l13 13 1.4-1.4L2.7 3.7zM12 4a9 9 0 0 1 9 9v4a3 3 0 0 1-1.6 2.6L17 17.2V13h2a7 7 0 0 0-9.3-6.6L8.1 4.8A9 9 0 0 1 12 4z"/></svg>
+              ) : (
+                <svg viewBox="0 0 24 24" width="17" height="17" fill="currentColor"><path d="M12 3a9 9 0 0 0-9 9v5a3 3 0 0 0 3 3h1v-7H5v-1a7 7 0 0 1 14 0v1h-2v7h1a3 3 0 0 0 3-3v-5a9 9 0 0 0-9-9z"/></svg>
+              )}
+            </button>
+          </div>
+        </div>
+        {statusPanel ? (
+          <UserStatusPanel
+            language={language}
+            user={user}
+            status={userStatus.status}
+            voice={userStatus.voice}
+            anchor={statusPanel}
+            triggerElement={statusTriggerRef.current}
+            onSelectStatus={selectUserStatus}
+            onToggleMute={toggleSelfMute}
+            onToggleDeafen={toggleSelfDeafen}
+            onOpenVoiceSettings={() => { setStatusPanel(null); openSettings('voice'); }}
+            onClose={() => setStatusPanel(null)}
+          />
+        ) : null}
         {taskbarMenu ? createPortal(
           <div
-            className="context-menu messenger-user-menu"
+            className="context-menu messenger-user-menu taskbar-user-menu"
             style={{ left: taskbarMenu.x, top: taskbarMenu.y }}
             onMouseDown={(event) => event.stopPropagation()}
           >
-            <button type="button" onClick={() => { setProfileModalUser(user); setTaskbarMenu(null); }}>
+            <button type="button" onClick={() => { setProfileModalUser(user); setProfileAnchor({ left: taskbarMenu.x, top: taskbarMenu.y, right: taskbarMenu.x, bottom: taskbarMenu.y }); setTaskbarMenu(null); }}>
               {t(language, 'viewProfile')}
             </button>
           </div>,
@@ -2952,22 +3836,27 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
             user={profileModalUser}
             currentUser={user}
             onlineUserIds={onlineUserIds}
+            presenceStatuses={presenceStatuses}
             language={language}
             token={token}
             translucent
             zIndex={Math.max(...Object.values(windowZ)) + 1}
-            onClose={() => setProfileModalUser(null)}
+            anchorRect={profileAnchor}
+            onClose={() => { setProfileModalUser(null); setProfileAnchor(null); }}
             onUserChange={(updatedUser) => {
               onUserChange(updatedUser);
             }}
+            onOpenChat={openMessengerChat}
             onOpenDesktop={openRemoteDesktopWindow}
-            onOpenProfile={(nextUser) => setProfileModalUser(nextUser)}
+            onOpenProfile={(nextUser) => { setProfileModalUser(nextUser); setProfileAnchor(null); }}
             onOpenGroup={() => {
               setProfileModalUser(null);
+              setProfileAnchor(null);
               openMessenger();
             }}
             onEditProfile={() => {
               setProfileModalUser(null);
+              setProfileAnchor(null);
               openSettings('profile');
             }}
           />
@@ -2977,17 +3866,8 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
             setSettingsWindow('open');
             bringToFront('settings');
           }}>
-            <span>ST</span>
+            <span className="taskbar-app-icon tile-icon tile-icon-settings">ST</span>
             {t(language, 'settings')}
-          </button>
-        ) : null}
-        {storageWindow !== 'closed' ? (
-          <button className={storageWindow === 'open' ? 'taskbar-app active' : 'taskbar-app'} type="button" onClick={() => {
-            setStorageWindow('open');
-            bringToFront('explorer');
-          }}>
-            <span>DB</span>
-            {t(language, 'explorer')}
           </button>
         ) : null}
         {messengerWindow !== 'closed' ? (
@@ -2995,17 +3875,31 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
             setMessengerWindow('open');
             bringToFront('messenger');
           }}>
-            <span>M</span>
+            <span className="taskbar-app-icon tile-icon tile-icon-messenger">M</span>
             {t(language, 'messenger')}
           </button>
         ) : null}
-        {musicPlayerWindow !== 'closed' ? (
-          <button className={musicPlayerWindow === 'open' ? 'taskbar-app active' : 'taskbar-app'} type="button" onClick={() => {
-            setMusicPlayerWindow('open');
-            bringToFront('musicPlayer');
+        {inboxWindow !== 'closed' ? (
+          <button className={inboxWindow === 'open' ? 'taskbar-app active' : 'taskbar-app'} type="button" onClick={() => {
+            setInboxWindow('open');
+            bringToFront('inbox');
           }}>
-            <span>MP</span>
-            {t(language, 'musicPlayer')}
+            <span className="taskbar-app-icon tile-icon tile-icon-inbox">
+              IN
+              {inboxUnreadCount > 0 ? (
+                <span className="unread-badge taskbar-icon-badge">{inboxUnreadCount > 9 ? '9+' : inboxUnreadCount}</span>
+              ) : null}
+            </span>
+            {language === 'ru' ? 'Почта' : language === 'uk' ? 'Пошта' : 'Mail'}
+          </button>
+        ) : null}
+        {watchTogetherWindow !== 'closed' ? (
+          <button className={watchTogetherWindow === 'open' ? 'taskbar-app active' : 'taskbar-app'} type="button" onClick={() => {
+            setWatchTogetherWindow('open');
+            bringToFront('watchTogether');
+          }}>
+            <span className="taskbar-app-icon tile-icon tile-icon-watch-together">WT</span>
+            {t(language, 'watchTogether')}
           </button>
         ) : null}
         {aiChatWindow !== 'closed' ? (
@@ -3013,26 +3907,8 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
             setAiChatWindow('open');
             bringToFront('aiChat');
           }}>
-            <span>AI</span>
+            <span className="taskbar-app-icon tile-icon tile-icon-ai-chat">AI</span>
             {t(language, 'aiChat')}
-          </button>
-        ) : null}
-        {imageViewerWindow !== 'closed' && imageViewerItem ? (
-          <button className={imageViewerWindow === 'open' ? 'taskbar-app active' : 'taskbar-app'} type="button" onClick={() => {
-            setImageViewerWindow('open');
-            bringToFront('imageViewer');
-          }}>
-            <span>IMG</span>
-            {imageViewerItem.name}
-          </button>
-        ) : null}
-        {videoViewerWindow !== 'closed' && videoViewerItem ? (
-          <button className={videoViewerWindow === 'open' ? 'taskbar-app active' : 'taskbar-app'} type="button" onClick={() => {
-            setVideoViewerWindow('open');
-            bringToFront('videoViewer');
-          }}>
-            <span>VID</span>
-            {videoViewerItem.name}
           </button>
         ) : null}
         {remoteDesktopWindow !== 'closed' && remoteDesktopUser ? (
@@ -3040,17 +3916,8 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
             setRemoteDesktopWindow('open');
             bringToFront('remoteDesktop');
           }}>
-            <span>PC</span>
+            <span className="taskbar-app-icon tile-icon tile-icon-remote">PC</span>
             {remoteDesktopUser.nickname}
-          </button>
-        ) : null}
-        {notepadWindow !== 'closed' && notepadItemId ? (
-          <button className={notepadWindow === 'open' ? 'taskbar-app active' : 'taskbar-app'} type="button" onClick={() => {
-            setNotepadWindow('open');
-            bringToFront('notepad');
-          }}>
-            <span>TXT</span>
-            {notepadTitle}
           </button>
         ) : null}
         <div className="taskbar-spacer" />

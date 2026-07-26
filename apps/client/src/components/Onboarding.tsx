@@ -1,7 +1,8 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { LANGUAGES, THEMES, t } from '../i18n';
 import type { Language, Theme } from '../api/types';
 import { storeTheme, getStoredTheme } from '../i18n';
+import { assetUrl } from '../utils/assets';
 
 type OnboardingStep = 'welcome' | 'language' | 'theme' | 'ready';
 
@@ -17,10 +18,35 @@ export function Onboarding({ language, onLanguageChange, onComplete }: Onboardin
   const [step, setStep] = useState<OnboardingStep>('welcome');
   const [theme, setTheme] = useState<Theme>(() => getStoredTheme());
   const [mounted, setMounted] = useState(false);
+  const [introDone, setIntroDone] = useState(false);
+  const introVideoRef = useRef<HTMLVideoElement | null>(null);
 
   useEffect(() => {
     const id = window.setTimeout(() => setMounted(true), 40);
     return () => window.clearTimeout(id);
+  }, []);
+
+  useEffect(() => {
+    const video = introVideoRef.current;
+    if (!video) return undefined;
+
+    video.volume = 0.28;
+    void video.play().catch(() => undefined);
+
+    const fallback = window.setTimeout(() => setIntroDone(true), 10050);
+    const fadeAudio = window.setInterval(() => {
+      if (!Number.isFinite(video.duration) || video.duration <= 0) return;
+      const remaining = video.duration - video.currentTime;
+      if (remaining <= 1.25) {
+        video.volume = Math.max(0, Math.min(0.28, 0.28 * (remaining / 1.25)));
+      }
+    }, 80);
+
+    return () => {
+      window.clearTimeout(fallback);
+      window.clearInterval(fadeAudio);
+      video.pause();
+    };
   }, []);
 
   const goNext = useCallback(() => {
@@ -55,13 +81,32 @@ export function Onboarding({ language, onLanguageChange, onComplete }: Onboardin
 
   return (
     <main className={mounted ? 'onboarding-shell mounted' : 'onboarding-shell'}>
+      {!introDone ? (
+        <div className="onboarding-lava-intro" aria-hidden="true">
+          <video
+            ref={introVideoRef}
+            className="onboarding-lava-video"
+            src={assetUrl('Lava_Lamp.mp4')}
+            autoPlay
+            playsInline
+            preload="auto"
+            onEnded={() => setIntroDone(true)}
+          />
+          <span className="onboarding-lava-video-vignette" />
+          <div className="onboarding-intro-brand">
+            <img className="onboarding-intro-mark" src={assetUrl('Emoji/app-icon.png')} alt="" />
+            <strong>NotOS</strong>
+          </div>
+        </div>
+      ) : null}
+
       <div className="onboarding-aurora" aria-hidden="true">
         <span className="onboarding-aurora-blob a" />
         <span className="onboarding-aurora-blob b" />
         <span className="onboarding-aurora-blob c" />
       </div>
 
-      <div className="onboarding-progress" aria-hidden="true">
+      <div className={introDone ? 'onboarding-progress ready' : 'onboarding-progress'} aria-hidden="true">
         {STEP_ORDER.map((stepName, index) => (
           <span
             key={stepName}
@@ -70,11 +115,11 @@ export function Onboarding({ language, onLanguageChange, onComplete }: Onboardin
         ))}
       </div>
 
-      <div className="onboarding-stage" key={step}>
+      <div className={introDone ? 'onboarding-stage ready' : 'onboarding-stage'} key={step}>
         {step === 'welcome' ? (
           <section className="onboarding-card welcome">
             <div className="onboarding-logo-wrap">
-              <div className="onboarding-logo">N</div>
+              <img className="onboarding-logo" src={assetUrl('Emoji/app-icon.png')} alt="" />
               <span className="onboarding-logo-ring" aria-hidden="true" />
               <span className="onboarding-logo-glow" aria-hidden="true" />
             </div>

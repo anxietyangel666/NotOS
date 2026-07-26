@@ -1,5 +1,6 @@
 import type { PublicUser, Language } from '../api/types';
 import { t } from '../i18n';
+import { Tooltip } from './Tooltip';
 
 type BadgeDef = {
   id: string;
@@ -21,20 +22,27 @@ function badgesForUser(user: Pick<PublicUser, 'role'>): BadgeDef[] {
 type UserBadgesProps = {
   user: Pick<PublicUser, 'role'>;
   language: Language;
+  /**
+   * Larger badges used on the profile card. They render at roughly double size
+   * and reveal an enlarged description popup that flies upward on hover.
+   */
+  large?: boolean;
 };
 
 // Small non-selectable badges shown under a nickname. Hovering shows a tooltip
-// describing the badge.
-export function UserBadges({ user, language }: UserBadgesProps) {
+// describing the badge. On the profile card (`large`) the badge and its hover
+// popup are enlarged.
+export function UserBadges({ user, language, large = false }: UserBadgesProps) {
   const badges = badgesForUser(user);
   if (badges.length === 0) return null;
   return (
-    <span className="user-badges" aria-hidden="false">
+    <span className={large ? 'user-badges user-badges-large' : 'user-badges'} aria-hidden="false">
       {badges.map((badge) => (
-        <span key={badge.id} className={`user-badge ${badge.className}`} role="img" aria-label={t(language, badge.labelKey)}>
-          <span className="user-badge-glyph">{badge.glyph}</span>
-          <span className="user-badge-tooltip" role="tooltip">{t(language, badge.labelKey)}</span>
-        </span>
+        <Tooltip key={badge.id} label={t(language, badge.labelKey)}>
+          <span className={`user-badge ${badge.className}`} role="img" aria-label={t(language, badge.labelKey)}>
+            <span className="user-badge-glyph">{badge.glyph}</span>
+          </span>
+        </Tooltip>
       ))}
     </span>
   );

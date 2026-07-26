@@ -1,16 +1,28 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 import { api } from '../api/client';
-import type { Group, GroupRole, Language, PublicUser } from '../api/types';
+import { cacheUser } from '../api/user-cache';
+import type { Group, GroupRole, Language, PublicUser, UserConnection } from '../api/types';
 import { LOCALES, t } from '../i18n';
 import { buildProfileLink } from '../utils/profile-link';
+import { buildGroupInviteLink } from '../utils/group-invite-link';
 import { InviteEmbed } from './InviteEmbed';
 import { nameStyleClass, nameStyleToCss } from '../utils/name-style';
-import { Twemoji } from './Twemoji';
+import { Twemoji, MessagePreviewText } from './Twemoji';
 import { UserBadges } from './UserBadges';
 import { EmojiPicker } from './EmojiPicker';
+import { customEmojiToShortcodes, expandCustomEmojiShortcodes } from '../utils/custom-emoji';
 import { EmojiToggleIcon } from './ChatComposeIcons';
-import { SaveBar } from './SaveBar';
+import { saveUserStatus, useUserStatus, type PresenceStatus } from '../utils/user-status';
+import { UserStatusPanel } from './UserStatusPanel';
+import { ProfilePreviewCard } from './ProfilePreviewCard';
+import { currentActivityProgressMs, useUserActivities } from './UserActivityStatus';
+import { assetUrl } from '../utils/assets';
+
+const CONNECTION_ICONS = {
+  spotify: assetUrl('Icons/spotify.png'),
+  riot: assetUrl('Icons/riot.png')
+};
 
 export type ProfileModalProps = {
   user: PublicUser;
@@ -21,11 +33,19 @@ export type ProfileModalProps = {
   /** Preloaded roles held by the viewed member, shown instantly on open. */
   initialUserRoles?: GroupRole[];
   onlineUserIds?: string[];
+  presenceStatuses?: Record<string, PresenceStatus>;
   language: Language;
   token: string;
   zIndex?: number;
   /** When opened from the desktop, render the card semi-transparent. */
   translucent?: boolean;
+  /**
+   * Plain viewport rect of the avatar/element the profile was opened from. When
+   * provided, the card pops out anchored next to it (Discord-style) instead of
+   * the centered, blurred modal. Captured at click time so it survives the
+   * portal without a live ref.
+   */
+  anchorRect?: { left: number; top: number; right: number; bottom: number } | null;
   onClose: () => void;
   onUserChange?: (user: PublicUser) => void;
   onOpenChat?: (userId: string) => void;
@@ -34,6 +54,10 @@ export type ProfileModalProps = {
   onOpenGroup?: (group: Group) => void;
   onEditProfile?: () => void;
 };
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), Math.max(min, max));
+}
 
 function wallpaperToBackground(value: string, theme: string) {
   const isDark = theme === 'dark' || theme === 'system-black';
@@ -46,6 +70,13 @@ function wallpaperToBackground(value: string, theme: string) {
   return value;
 }
 
+function formatActivityTime(ms: number) {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+}
+
 export function ProfileModal({
   user,
   currentUser,
@@ -53,10 +84,12 @@ export function ProfileModal({
   initialGroupRoles,
   initialUserRoles,
   onlineUserIds,
+  presenceStatuses,
   language,
   token,
   zIndex,
   translucent = false,
+  anchorRect,
   onClose,
   onUserChange,
   onOpenChat,
@@ -66,17 +99,30 @@ export function ProfileModal({
   onEditProfile
 }: ProfileModalProps) {
   const isSelf = user.id === currentUser.id;
-  const isOnline = isSelf || (onlineUserIds ?? []).includes(user.id);
-  const [statusDraft, setStatusDraft] = useState(user.status ?? '');
+  const selfStatus = useUserStatus();
+  const remoteStatus = presenceStatuses?.[user.id] ?? ((onlineUserIds ?? []).includes(user.id) ? 'online' : null);
+  const profilePresenceClass = isSelf
+    ? `profile-presence presence-dot status-${selfStatus.status}`
+    : remoteStatus
+      ? `profile-presence presence-dot status-${remoteStatus}`
+      : 'profile-presence presence-dot';
+  // Authors embedded in message lists arrive "lite" (no wallpaper) to keep
+  // those payloads small. We fetch the full user on open and store the heavy
+  // wallpaper here so the card background fills in once available.
+  const [fullWallpaper, setFullWallpaper] = useState(user.wallpaper);
+  const [statusDraft, setStatusDraft] = useState(() => customEmojiToShortcodes(user.status ?? ''));
   const [savingStatus, setSavingStatus] = useState(false);
   const [editingStatus, setEditingStatus] = useState(false);
-  const [messageDraft, setMessageDraft] = useState('');
-  const [sending, setSending] = useState(false);
   const [friendSince, setFriendSince] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
+  const [profileLinkCopied, setProfileLinkCopied] = useState(false);
   const [mutualTab, setMutualTab] = useState<'friends' | 'groups'>('friends');
   const [mutualFriends, setMutualFriends] = useState<PublicUser[] | null>(null);
   const [mutualGroups, setMutualGroups] = useState<Group[] | null>(null);
+  const [profileConnections, setProfileConnections] = useState<UserConnection[]>([]);
+  const [connectionsExpanded, setConnectionsExpanded] = useState(false);
+  const { activities, loadedAt: activitiesLoadedAt } = useUserActivities(token, user.id, 20_000);
+  const [activityNow, setActivityNow] = useState(Date.now());
   const [avatarMenu, setAvatarMenu] = useState<{ x: number; y: number } | null>(null);
   const [mutualFriendMenu, setMutualFriendMenu] = useState<{ x: number; y: number; friend: PublicUser } | null>(null);
   // Seed from preloaded data (passed by the group view) so roles show instantly
@@ -94,26 +140,105 @@ export function ProfileModal({
   const [inviteSentGroupId, setInviteSentGroupId] = useState<string | null>(null);
   const moreMenuRef = useRef<HTMLDivElement | null>(null);
   const moreBtnRef = useRef<HTMLButtonElement | null>(null);
-  const [profileEmojiOpen, setProfileEmojiOpen] = useState(false);
-  const profileEmojiAnchorRef = useRef<HTMLDivElement | null>(null);
+  const [statusEmojiOpen, setStatusEmojiOpen] = useState(false);
+  const statusEmojiAnchorRef = useRef<HTMLButtonElement | null>(null);
+  const statusTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const [currentGroupRoleIds, setCurrentGroupRoleIds] = useState<string[]>([]);
+  const [removingGroupRoleId, setRemovingGroupRoleId] = useState<string | null>(null);
+  const [presencePanel, setPresencePanel] = useState<{ left: number; bottom: number } | null>(null);
+  const presenceAnchorRef = useRef<HTMLSpanElement | null>(null);
   // Bumped to shake the save bar when the user tries to close the profile
   // card while the status editor has unsaved changes.
-  const [profileBarShake, setProfileBarShake] = useState(0);
 
-  const statusDirty = isSelf && editingStatus && statusDraft.trim() !== (user.status ?? '').trim();
+  // Anchored (Discord-style) popout positioning. Only used when `anchorRect`
+  // is supplied by the opener; otherwise the card stays centered.
+  const anchored = !!anchorRect;
+  const cardRef = useRef<HTMLDivElement | null>(null);
+  const [popoverPos, setPopoverPos] = useState<CSSProperties>(
+    anchored ? { position: 'fixed', left: 0, top: 0, visibility: 'hidden' } : {}
+  );
+
+  useLayoutEffect(() => {
+    if (!anchorRect) return;
+    const card = cardRef.current;
+    if (!card) return;
+
+    function place() {
+      const node = cardRef.current;
+      if (!node || !anchorRect) return;
+      // On small screens there is no room beside an avatar — fall back to a
+      // centered card (the CSS media query also relaxes the fixed sizing).
+      if (window.innerWidth <= 800) {
+        setPopoverPos({});
+        return;
+      }
+      const gap = 12;
+      const margin = 12;
+      const availableRight = window.innerWidth - anchorRect.right - gap - margin;
+      const availableLeft = anchorRect.left - gap - margin;
+      const compactWidth = Math.min(440, window.innerWidth * 0.92);
+      const side: 'right' | 'left' = availableRight >= compactWidth || availableRight >= availableLeft ? 'right' : 'left';
+      const maxWidth = Math.max(280, side === 'right' ? availableRight : availableLeft);
+      const maxHeight = Math.min(680, window.innerHeight * 0.86);
+      const height = Math.min(node.offsetHeight, maxHeight);
+      // Vertically align the card's top with the avatar, clamped to viewport.
+      let top = anchorRect.top;
+      top = clamp(top, margin, window.innerHeight - height - margin);
+      const nextPos: CSSProperties = {
+        position: 'fixed',
+        top,
+        maxWidth,
+        transformOrigin: `${side === 'right' ? 'left' : 'right'} top`,
+        visibility: 'visible'
+      };
+      if (side === 'right') {
+        nextPos.left = Math.max(margin, anchorRect.right + gap);
+        nextPos.right = 'auto';
+      } else {
+        nextPos.left = 'auto';
+        nextPos.right = Math.max(margin, window.innerWidth - anchorRect.left + gap);
+      }
+      setPopoverPos(nextPos);
+    }
+
+    // Measure after layout so width/height reflect the rendered card.
+    const raf = window.requestAnimationFrame(place);
+    window.addEventListener('resize', place);
+    window.addEventListener('scroll', place, true);
+    return () => {
+      window.cancelAnimationFrame(raf);
+      window.removeEventListener('resize', place);
+      window.removeEventListener('scroll', place, true);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [anchorRect]);
+
+  useLayoutEffect(() => {
+    if (!editingStatus) return;
+    const node = statusTextareaRef.current;
+    if (!node) return;
+    const maxHeight = 132;
+    node.style.height = '46px';
+    const nextHeight = Math.min(Math.max(46, node.scrollHeight), maxHeight);
+    node.style.height = `${nextHeight}px`;
+    node.style.overflowY = node.scrollHeight > maxHeight ? 'auto' : 'hidden';
+  }, [editingStatus, statusDraft]);
+
+  const statusDirty = isSelf && editingStatus && statusDraft.trim() !== customEmojiToShortcodes(user.status ?? '').trim();
+  const canManageProfileRoles = Boolean(
+    group && (
+      currentUser.id === group.ownerId ||
+      groupRoles.some((role) => currentGroupRoleIds.includes(role.id) && (role.isOwner || role.permissions.includes('ManageRoles')))
+    )
+  );
 
   function requestCloseProfile() {
-    if (statusDirty) {
-      setProfileBarShake((n) => n + 1);
-      return;
-    }
+    if (statusDirty) return;
     onClose();
   }
 
   useEffect(() => {
     if (group) {
-      // Show preloaded roles immediately (if the opener provided them), then
-      // revalidate from the network in the background.
       if (initialGroupRoles) setGroupRoles(initialGroupRoles);
       if (initialUserRoles) setUserRoles(initialUserRoles);
       // Fetch roles and members in parallel so the profile fills in quickly
@@ -123,6 +248,12 @@ export function ProfileModal({
         api.getGroupMembers(token, group.id)
       ]).then(([rolePayload, memPayload]) => {
         setGroupRoles(rolePayload.roles);
+        const currentMember = memPayload.members.find((m) => m.user.id === currentUser.id);
+        setCurrentGroupRoleIds(
+          currentMember?.roleIds && currentMember.roleIds.length > 0
+            ? currentMember.roleIds
+            : currentMember?.roleId ? [currentMember.roleId] : []
+        );
         const member = memPayload.members.find((m) => m.user.id === user.id);
         if (!member) return;
         // Show every role the member holds (primary + customization roles),
@@ -141,17 +272,18 @@ export function ProfileModal({
     } else {
       setGroupRoles([]);
       setUserRoles([]);
+      setCurrentGroupRoleIds([]);
     }
-  }, [token, group, user.id, initialGroupRoles, initialUserRoles]);
+  }, [token, group, user.id, currentUser.id, initialGroupRoles, initialUserRoles]);
 
   useEffect(() => {
-    setStatusDraft(user.status ?? '');
+    setStatusDraft(customEmojiToShortcodes(user.status ?? ''));
     setEditingStatus(false);
   }, [user.status, user.id]);
 
   useEffect(() => {
     if (isSelf) {
-      setStatusDraft(currentUser.status ?? '');
+      setStatusDraft(customEmojiToShortcodes(currentUser.status ?? ''));
     }
   }, [currentUser.status, currentUser.id, isSelf]);
 
@@ -166,6 +298,41 @@ export function ProfileModal({
         .catch(() => setFriendSince(null));
     }
   }, [token, user.id, isSelf]);
+
+  // Authors embedded in lists (wall, chat) are sent "lite" without the heavy
+  // base64 wallpaper to keep those payloads small. Show whatever the prop
+  // carries first, then fetch the full user on open to fill in the real
+  // wallpaper. For self we already hold the complete user.
+  useEffect(() => {
+    setFullWallpaper(user.wallpaper);
+    if (user.wallpaper) return; // already complete, nothing to upgrade
+    // Even for our own profile the prop can arrive "lite" (opened from a list),
+    // so fetch the full user whenever the wallpaper is missing.
+    let alive = true;
+    api.getPublicUser(token, user.id)
+      .then(({ user: full }) => {
+        if (!alive) return;
+        cacheUser(full);
+        setFullWallpaper(full.wallpaper);
+      })
+      .catch(() => { /* keep the lite data already shown */ });
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token, user.id, user.wallpaper]);
+
+  useEffect(() => {
+    if (!activities.some((activity) => activity.provider === 'spotify')) return;
+    const timer = window.setInterval(() => setActivityNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [activities]);
+
+  useEffect(() => {
+    let alive = true;
+    api.getUserConnections(token, user.id)
+      .then((payload) => { if (alive) setProfileConnections(payload.connections); })
+      .catch(() => { if (alive) setProfileConnections([]); });
+    return () => { alive = false; };
+  }, [token, user.id]);
 
   useEffect(() => {
     if (isSelf) return;
@@ -225,7 +392,9 @@ export function ProfileModal({
 
 
   useEffect(() => {
-    if (expanded && !isSelf) {
+    if (!isSelf) {
+      setMutualFriends(null);
+      setMutualGroups(null);
       api.getMutualFriends(token, user.id)
         .then((result) => setMutualFriends(result.friends))
         .catch(() => setMutualFriends([]));
@@ -233,7 +402,7 @@ export function ProfileModal({
         .then((result) => setMutualGroups(result.groups))
         .catch(() => setMutualGroups([]));
     }
-  }, [expanded, token, user.id, isSelf]);
+  }, [token, user.id, isSelf]);
 
   useEffect(() => {
     if (!moreMenuOpen) return;
@@ -262,7 +431,7 @@ export function ProfileModal({
 
   async function sendGroupInvite(group: Group) {
     try {
-      await api.sendMessage(token, user.id, `notoc://invite/${group.inviteCode}`);
+      await api.sendMessage(token, user.id, buildGroupInviteLink(group.inviteCode));
       setInviteSentGroupId(group.id);
       setTimeout(() => setInviteSentGroupId(null), 2000);
     } catch {
@@ -299,10 +468,10 @@ export function ProfileModal({
     if (!isSelf) return;
     setSavingStatus(true);
     try {
-      const result = await api.updateMe(token, { status: statusDraft.trim() });
+      const result = await api.updateMe(token, { status: expandCustomEmojiShortcodes(statusDraft.trim()) });
       onUserChange?.(result.user);
       // Close the editor and show the saved status once persisted.
-      setStatusDraft(result.user.status ?? '');
+      setStatusDraft(customEmojiToShortcodes(result.user.status ?? ''));
       setEditingStatus(false);
     } catch {
       // ignore
@@ -311,39 +480,83 @@ export function ProfileModal({
     }
   }
 
-  async function sendMessage() {
-    if (!messageDraft.trim() || isSelf) return;
-    setSending(true);
+  function selectPresenceStatus(status: PresenceStatus) {
+    saveUserStatus({ ...selfStatus, status });
+    setPresencePanel(null);
+  }
+
+  async function removeProfileGroupRole(role: GroupRole) {
+    if (!group || !canManageProfileRoles || role.isOwner || removingGroupRoleId) return;
+    const previousRoles = userRoles;
+    setRemovingGroupRoleId(role.id);
+    setUserRoles((current) => current.filter((item) => item.id !== role.id));
     try {
-      await api.sendMessage(token, user.id, messageDraft.trim());
-      setMessageDraft('');
-      onOpenChat?.(user.id);
+      const payload = await api.updateGroupMemberRole(token, group.id, user.id, { removeRoleId: role.id });
+      const member = payload.members.find((item) => item.user.id === user.id);
+      const heldRoleIds = new Set(
+        member?.roleIds && member.roleIds.length > 0
+          ? member.roleIds
+          : member?.roleId ? [member.roleId] : []
+      );
+      const currentMember = payload.members.find((item) => item.user.id === currentUser.id);
+      setCurrentGroupRoleIds(
+        currentMember?.roleIds && currentMember.roleIds.length > 0
+          ? currentMember.roleIds
+          : currentMember?.roleId ? [currentMember.roleId] : []
+      );
+      setUserRoles(groupRoles.filter((item) => heldRoleIds.has(item.id)).sort((a, b) => a.position - b.position));
     } catch {
-      // ignore
+      setUserRoles(previousRoles);
     } finally {
-      setSending(false);
+      setRemovingGroupRoleId(null);
     }
+  }
+
+  function copyProfileLink() {
+    navigator.clipboard.writeText(buildProfileLink(user.id)).catch(() => {});
+    setProfileLinkCopied(true);
+    window.setTimeout(() => setProfileLinkCopied(false), 1400);
+  }
+
+  function toggleFullProfile() {
+    setExpanded((open) => !open);
+  }
+
+  function toggleMutualPanel(tab: 'friends' | 'groups') {
+    if (expanded && mutualTab === tab) {
+      setExpanded(false);
+      return;
+    }
+    setMutualTab(tab);
+    setExpanded(true);
   }
 
   return createPortal(
     <div
-      className="modal-backdrop important"
+      className={anchored ? 'profile-popover-backdrop' : 'modal-backdrop important'}
       style={zIndex !== undefined ? { zIndex } : undefined}
       onClick={(event) => {
         if (event.target === event.currentTarget) requestCloseProfile();
       }}
+      onContextMenu={(event) => {
+        if (event.target !== event.currentTarget) return;
+        event.preventDefault();
+        requestCloseProfile();
+      }}
     >
       <div
-        className={`profile-modal-card profile-themed${expanded ? ' expanded' : ''}${translucent ? ' translucent' : ''}`}
+        ref={cardRef}
+        className={`profile-modal-card profile-view-card profile-themed${expanded ? ' expanded' : ''}${translucent ? ' translucent' : ''}${anchored ? ' profile-anchored' : ''}`}
         style={{
           ['--profile-primary' as string]: user.profilePrimaryColor || '#2AABEE',
-          ['--profile-accent' as string]: user.profileAccentColor || '#5865F2'
+          ['--profile-accent' as string]: user.profileAccentColor || '#5865F2',
+          ...popoverPos
         }}
         onClick={(event) => event.stopPropagation()}
       >
         <div
           className="profile-banner"
-          style={{ backgroundImage: wallpaperToBackground(user.wallpaper, user.theme) }}
+          style={{ backgroundImage: wallpaperToBackground(fullWallpaper, user.theme) }}
         >
           {!isSelf ? (
             <div className="profile-banner-actions">
@@ -386,79 +599,165 @@ export function ProfileModal({
         </div>
         <div className="profile-body">
           <div className="profile-main">
-            <div
-              className="profile-avatar-wrap"
-              style={{ cursor: isSelf ? undefined : 'pointer' }}
-              onClick={() => {
-                if (!isSelf) setExpanded((v) => !v);
-              }}
-              onContextMenu={isSelf ? undefined : (event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                setAvatarMenu({ x: event.clientX, y: event.clientY });
-              }}
-            >
-              <img src={user.avatarData} alt="" draggable={false} />
-              <span className={isOnline ? 'profile-presence online' : 'profile-presence'} />
-            </div>
-            <div className="profile-link-row">
-              <input
-                className="text-field profile-link-input"
-                type="text"
-                readOnly
-                value={buildProfileLink(user.id)}
-                onFocus={(event) => event.currentTarget.select()}
-              />
+            <div className="profile-avatar-status-row">
+              <div className="profile-badges-anchor">
+                <UserBadges user={user} language={language} large />
+              </div>
+              <div
+                className="profile-avatar-wrap"
+                style={{ cursor: isSelf ? undefined : 'default' }}
+                onContextMenu={isSelf ? undefined : (event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  setAvatarMenu({ x: event.clientX, y: event.clientY });
+                }}
+              >
+                <img src={user.avatarData} alt="" draggable={false} />
+                <span
+                  ref={presenceAnchorRef}
+                  className={profilePresenceClass}
+                  role={isSelf ? 'button' : undefined}
+                  tabIndex={isSelf ? 0 : undefined}
+                  onClick={isSelf ? (event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    const rect = event.currentTarget.getBoundingClientRect();
+                    setPresencePanel((current) => current ? null : { left: rect.left, bottom: rect.top });
+                  } : undefined}
+                  onKeyDown={isSelf ? (event) => {
+                    if (event.key !== 'Enter' && event.key !== ' ') return;
+                    event.preventDefault();
+                    event.stopPropagation();
+                    const rect = event.currentTarget.getBoundingClientRect();
+                    setPresencePanel((current) => current ? null : { left: rect.left, bottom: rect.top });
+                  } : undefined}
+                />
+              </div>
+              {!editingStatus ? (
+                <div
+                  className={isSelf ? 'profile-status-bubble editable' : 'profile-status-bubble'}
+                  onDoubleClick={isSelf ? () => setEditingStatus(true) : undefined}
+                >
+                  {user.status ? <MessagePreviewText text={user.status} size={18} /> : t(language, 'noStatus')}
+                </div>
+              ) : null}
             </div>
             <div className="profile-info">
               <div className="profile-name-row">
-                <h3 className={nameStyleClass(user.nameStyle)} style={nameStyleToCss(user.nameStyle)}>{user.nickname}</h3>
-                <small className={isOnline ? 'profile-state online' : 'profile-state'}>
-                  {isOnline ? t(language, 'online') : t(language, 'offline')}
-                </small>
+                <h3>
+                  <button
+                    type="button"
+                    className={`profile-name-copy ${nameStyleClass(user.nameStyle)}`}
+                    style={nameStyleToCss(user.nameStyle)}
+                    title={profileLinkCopied ? t(language, 'profileLinkCopied') : t(language, 'copyProfileLink')}
+                    onClick={copyProfileLink}
+                  >
+                    {user.nickname}
+                  </button>
+                </h3>
               </div>
-              <UserBadges user={user} language={language} />
+              {profileLinkCopied ? <span className="profile-copy-hint">{t(language, 'profileLinkCopied')}</span> : null}
               {group && userRoles.length > 0 ? (
                 <div className="profile-group-roles">
-                  {userRoles.map((role) => (
-                    <span key={role.id} className="profile-group-role" style={{ color: role.color }}>
-                      {role.name}
-                    </span>
+                  {userRoles.map((role) => {
+                    const removable = canManageProfileRoles && !role.isOwner;
+                    return (
+                      <span key={role.id} className={removable ? 'profile-group-role removable' : 'profile-group-role'} style={{ color: role.color }}>
+                        <span className="profile-group-role-name">{role.name}</span>
+                        {removable ? (
+                          <button
+                            type="button"
+                            className="profile-group-role-remove"
+                            aria-label={language === 'ru' ? 'Снять роль' : language === 'uk' ? 'Зняти роль' : 'Remove role'}
+                            disabled={removingGroupRoleId === role.id}
+                            onClick={(event) => {
+                              event.preventDefault();
+                              event.stopPropagation();
+                              void removeProfileGroupRole(role);
+                            }}
+                          >
+                            x
+                          </button>
+                        ) : null}
+                      </span>
+                    );
+                  })}
+                </div>
+              ) : null}
+
+              <div className="profile-dates">
+                <small>
+                  <span>{t(language, 'memberSince')}</span>
+                  <strong>{formatDate(user.createdAt)}</strong>
+                </small>
+                {!isSelf && friendSince ? (
+                  <small>
+                    <span>{t(language, 'friendsSince')}</span>
+                    <strong>{formatDate(friendSince)}</strong>
+                  </small>
+                ) : null}
+              </div>
+
+              {activities.length > 0 ? (
+                <div className="profile-activities">
+                  {activities.map((activity) => (
+                    <div className={`profile-activity ${activity.provider}`} key={`${activity.provider}:${activity.title}`}>
+                      {activity.provider === 'spotify' ? (
+                        (() => {
+                          const progressMs = currentActivityProgressMs(activity, activitiesLoadedAt, activityNow);
+                          const progressPercent = activity.durationMs > 0 ? Math.min(100, Math.max(0, (progressMs / activity.durationMs) * 100)) : 0;
+                          return <>
+                          {activity.imageUrl ? <img src={activity.imageUrl} alt="" /> : <img src={CONNECTION_ICONS.spotify} alt="" />}
+                          <div className="profile-activity-copy">
+                            <div className="profile-activity-heading">
+                              <small>Listening to Spotify</small>
+                              <strong>{activity.title}</strong>
+                              <span>{activity.subtitle}</span>
+                            </div>
+                            {activity.durationMs > 0 ? (
+                              <div className="profile-activity-progress">
+                                <div className="profile-activity-progress-track"><div style={{ width: `${progressPercent}%` }} /></div>
+                                <em>{formatActivityTime(progressMs)} / {formatActivityTime(activity.durationMs)}</em>
+                              </div>
+                            ) : null}
+                          </div>
+                          </>;
+                        })()
+                      ) : (
+                        <>
+                          <img src={CONNECTION_ICONS.riot} alt="" />
+                          <div className="profile-activity-copy">
+                            <small>Playing</small>
+                            <strong>{activity.title}</strong>
+                            <span>{activity.subtitle} - {activity.riotId} - {activity.region.toUpperCase()}</span>
+                          </div>
+                        </>
+                      )}
+                    </div>
                   ))}
                 </div>
               ) : null}
 
-              {isSelf ? (
-                editingStatus ? (
-                  <div className="profile-status-editor">
-                    <label className="field-label compact">{t(language, 'profileStatus')}</label>
-                    <div style={{ position: 'relative' }}>
-                      <textarea
-                        className="text-field"
-                        value={statusDraft}
-                        maxLength={200}
-                        rows={3}
-                        style={{ resize: 'none' }}
-                        onChange={(event) => setStatusDraft(event.target.value)}
-                      />
-                      <span className="char-count" style={{ position: 'absolute', top: 6, right: 10, pointerEvents: 'none' }}>{statusDraft.length}/200</span>
-                    </div>
-                  </div>
-                ) : (
-                  <p className="profile-status" style={{ cursor: 'pointer' }} onDoubleClick={() => setEditingStatus(true)}>
-                    {user.status || t(language, 'noStatus')}
-                  </p>
-                )
-              ) : (
-                <p className="profile-status">{user.status || t(language, 'noStatus')}</p>
-              )}
-
-              <div className="profile-dates">
-                <small>{t(language, 'memberSince')}: {formatDate(user.createdAt)}</small>
-                {!isSelf && friendSince ? (
-                  <small>{t(language, 'friendsSince')}: {formatDate(friendSince)}</small>
-                ) : null}
-              </div>
+              {!isSelf ? (
+                <div className="profile-mutual-summary" aria-label={language === 'ru' ? 'Общее' : 'Mutuals'}>
+                  <button
+                    type="button"
+                    className="profile-mutual-summary-card"
+                    onClick={() => toggleMutualPanel('friends')}
+                  >
+                    <strong>{mutualFriends === null ? '...' : mutualFriends.length}</strong>
+                    <span>{t(language, 'mutualFriends')}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="profile-mutual-summary-card"
+                    onClick={() => toggleMutualPanel('groups')}
+                  >
+                    <strong>{mutualGroups === null ? '...' : mutualGroups.length}</strong>
+                    <span>{t(language, 'mutualGroups')}</span>
+                  </button>
+                </div>
+              ) : null}
 
               {isSelf && onEditProfile ? (
                 <div className="profile-actions">
@@ -476,52 +775,49 @@ export function ProfileModal({
               ) : null}
 
               {!isSelf ? (
-                <div className="profile-message-area">
-                  <div className="emoji-input-shell profile-message-compose">
-                    <input
-                      className="emoji-inline-input"
-                      type="text"
-                      placeholder={t(language, 'typeMessage')}
-                      value={messageDraft}
-                      maxLength={2000}
-                      disabled={sending}
-                      onChange={(event) => setMessageDraft(event.target.value)}
-                      onKeyDown={(event) => {
-                        if (event.key === 'Enter' && !event.shiftKey) {
-                          event.preventDefault();
-                          void sendMessage();
-                        }
-                      }}
-                    />
-                    <div ref={profileEmojiAnchorRef} className="emoji-host inline">
-                      <button
-                        className="emoji-toggle inline"
-                        type="button"
-                        aria-label={t(language, 'emoji')}
-                        onMouseDown={(event) => event.stopPropagation()}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          setProfileEmojiOpen((v) => !v);
-                        }}
-                      >
-                        <EmojiToggleIcon />
-                      </button>
-                      {profileEmojiOpen ? (
-                        <EmojiPicker
-                          language={language}
-                          anchorRef={profileEmojiAnchorRef}
-                          placement="top-end"
-                          onSelect={(emoji) => {
-                            setMessageDraft((v) => `${v}${emoji}`);
-                            setProfileEmojiOpen(false);
-                          }}
-                          onClose={() => setProfileEmojiOpen(false)}
-                        />
-                      ) : null}
-                    </div>
-                  </div>
+                <div className="profile-primary-actions">
+                  <button
+                    type="button"
+                    className="primary-action"
+                    onClick={() => {
+                      onOpenChat?.(user.id);
+                      onClose();
+                    }}
+                  >
+                    {t(language, 'message')}
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary-action"
+                    onClick={toggleFullProfile}
+                  >
+                    {language === 'ru' ? 'Посмотреть полный профиль' : language === 'uk' ? 'Переглянути повний профіль' : 'View full profile'}
+                  </button>
                 </div>
               ) : null}
+
+              <div className={connectionsExpanded ? 'profile-connections-block expanded' : 'profile-connections-block'}>
+                <button
+                  className="profile-connections-toggle"
+                  type="button"
+                  aria-expanded={connectionsExpanded}
+                  onClick={() => setConnectionsExpanded((value) => !value)}
+                >
+                  <span>{language === 'ru' ? 'Подключения' : language === 'uk' ? 'Підключення' : 'Connections'}</span>
+                  <strong>{profileConnections.length}</strong>
+                </button>
+                <div className="profile-connections-list" aria-hidden={!connectionsExpanded}>
+                  {profileConnections.map((connection) => (
+                    <div className={`profile-connection-row ${connection.provider}`} key={connection.provider}>
+                      <img src={CONNECTION_ICONS[connection.provider]} alt="" />
+                      <span>
+                        <small>{connection.provider === 'spotify' ? 'Spotify' : 'Riot Games'}</small>
+                        <strong>{connection.displayName}</strong>
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
             </div>
           </div>
 
@@ -533,7 +829,7 @@ export function ProfileModal({
                   role="tab"
                   aria-selected={mutualTab === 'friends'}
                   className={mutualTab === 'friends' ? 'profile-mutual-tab active' : 'profile-mutual-tab'}
-                  onClick={() => setMutualTab('friends')}
+                  onClick={() => toggleMutualPanel('friends')}
                 >
                   {t(language, 'mutualFriends')}
                 </button>
@@ -542,7 +838,7 @@ export function ProfileModal({
                   role="tab"
                   aria-selected={mutualTab === 'groups'}
                   className={mutualTab === 'groups' ? 'profile-mutual-tab active' : 'profile-mutual-tab'}
-                  onClick={() => setMutualTab('groups')}
+                  onClick={() => toggleMutualPanel('groups')}
                 >
                   {t(language, 'mutualGroups')}
                 </button>
@@ -599,17 +895,100 @@ export function ProfileModal({
           ) : null}
         </div>
 
-        {isSelf ? (
-          <SaveBar
+        {isSelf && presencePanel ? (
+          <UserStatusPanel
             language={language}
-            dirty={!!statusDirty}
-            shakeKey={profileBarShake}
-            saving={savingStatus}
-            onReset={() => { setEditingStatus(false); setStatusDraft(user.status ?? ''); }}
-            onSave={() => void saveStatus()}
+            user={currentUser}
+            status={selfStatus.status}
+            voice={selfStatus.voice}
+            anchor={presencePanel}
+            triggerElement={presenceAnchorRef.current}
+            statusOnly
+            onSelectStatus={selectPresenceStatus}
+            onToggleMute={() => undefined}
+            onToggleDeafen={() => undefined}
+            onOpenVoiceSettings={() => undefined}
+            onClose={() => setPresencePanel(null)}
           />
         ) : null}
       </div>
+
+      {isSelf && editingStatus ? createPortal(
+        <div
+          className="profile-status-modal-backdrop"
+          style={{ zIndex: (zIndex ?? 1000) + 20 }}
+          onClick={() => {
+            setEditingStatus(false);
+            setStatusEmojiOpen(false);
+            setStatusDraft(customEmojiToShortcodes(user.status ?? ''));
+          }}
+        >
+          <section className="profile-status-modal" onClick={(event) => event.stopPropagation()}>
+            <button
+              className="profile-status-modal-close"
+              type="button"
+              aria-label={t(language, 'cancel')}
+              onClick={() => {
+                setEditingStatus(false);
+                setStatusEmojiOpen(false);
+                setStatusDraft(customEmojiToShortcodes(user.status ?? ''));
+              }}
+            >
+              x
+            </button>
+            <div className="profile-status-modal-preview">
+              <ProfilePreviewCard
+                user={user}
+                language={language}
+                bannerBackground={wallpaperToBackground(fullWallpaper, user.theme)}
+                status={expandCustomEmojiShortcodes(statusDraft.trim())}
+              />
+            </div>
+            <label className="field-label compact">{t(language, 'profileStatus')}</label>
+            <div className="profile-status-modal-input">
+              <textarea
+                ref={statusTextareaRef}
+                autoFocus
+                className="text-field status-emoji-textarea"
+                value={statusDraft}
+                maxLength={200}
+                rows={1}
+                onChange={(event) => setStatusDraft(event.target.value)}
+              />
+              <span className="char-count">{statusDraft.length}/200</span>
+              <button
+                type="button"
+                ref={statusEmojiAnchorRef}
+                className="status-emoji-button"
+                aria-label={t(language, 'emoji')}
+                onMouseDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setStatusEmojiOpen((open) => !open);
+                }}
+              >
+                <EmojiToggleIcon size={20} />
+              </button>
+              {statusEmojiOpen ? (
+                <EmojiPicker
+                  language={language}
+                  anchorRef={statusEmojiAnchorRef}
+                  placement="top-end"
+                  zIndex={(zIndex ?? 1000) + 40}
+                  onSelect={(emoji) => setStatusDraft((value) => customEmojiToShortcodes(`${value}${emoji}`))}
+                  onClose={() => setStatusEmojiOpen(false)}
+                />
+              ) : null}
+            </div>
+            <div className="profile-status-modal-actions">
+              <button className="primary-action" type="button" disabled={!statusDirty || savingStatus} onClick={() => void saveStatus()}>
+                {savingStatus ? '…' : t(language, 'save')}
+              </button>
+            </div>
+          </section>
+        </div>,
+        document.body
+      ) : null}
 
       {confirmRemove ? createPortal(
         <div
@@ -648,7 +1027,7 @@ export function ProfileModal({
                 className="primary-action danger-text"
                 type="button"
                 onClick={() => {
-                  // Block action placeholder — wire to API when endpoint is ready
+                  void api.blockUser(token, user.id).catch(() => undefined);
                   setConfirmBlock(false);
                   onClose();
                 }}
@@ -731,7 +1110,7 @@ export function ProfileModal({
             {t(language, 'viewProfile')}
           </button>
           {onOpenDesktop ? (
-            <button type="button" onClick={() => { onOpenDesktop(user); setAvatarMenu(null); }}>
+            <button type="button" onClick={() => { onOpenDesktop(user); setAvatarMenu(null); onClose(); }}>
               {t(language, 'viewDesktop')}
             </button>
           ) : null}

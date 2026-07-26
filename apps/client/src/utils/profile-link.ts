@@ -1,6 +1,6 @@
 // Profile deep-links.
 //
-// A profile link is a short token of the form `np_<userId>` (np = NotOC profile).
+// A profile link is a short token of the form `np_<userId>` (np = NotOS profile).
 // It is embedded into chat messages so the recipient can render a rich profile
 // embed (avatar, nickname, "send message" and "add friend" actions).
 //

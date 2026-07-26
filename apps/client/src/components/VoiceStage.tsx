@@ -4,14 +4,17 @@ import { createPortal } from 'react-dom';
 import type { Language, PublicUser, VoiceChatMessage } from '../api/types';
 import type { VoiceRoom } from '../hooks/use-voice-room';
 import { t, getSavedTimeFormat, LOCALES } from '../i18n';
-import { MessageText } from './Twemoji';
-import { EmojiToggleIcon } from './ChatComposeIcons';
+import { MessageBody } from './Twemoji';
+import { EmojiInlineInput, type EmojiInlineInputHandle } from './EmojiInlineInput';
+import { EmojiToggleIcon, GifIcon } from './ChatComposeIcons';
 import { useAvatarColor } from './CallOverlay';
 import { UserName } from './UserName';
 import { EmojiPicker } from './EmojiPicker';
+import { expandCustomEmojiShortcodes } from '../utils/custom-emoji';
+import type { TenorGif } from '../utils/tenor';
 
 // A single screen-share tile in the Discord-style voice grid.
-function ScreenTile({ stream, label, focused, onFocus }: { stream: MediaStream; label: string; focused: boolean; onFocus: () => void }) {
+function ScreenTile({ stream, label, focused, onFocus, onFullscreen }: { stream: MediaStream; label: string; focused: boolean; onFocus: () => void; onFullscreen: () => void }) {
   const ref = useRef<HTMLVideoElement | null>(null);
   useEffect(() => {
     const video = ref.current;
@@ -25,7 +28,7 @@ function ScreenTile({ stream, label, focused, onFocus }: { stream: MediaStream; 
     return () => { stream.removeEventListener('addtrack', onTrackChange); };
   }, [stream]);
   return (
-    <button type="button" className={`dvoice-tile dvoice-tile-screen${focused ? ' focused' : ''}`} onClick={onFocus} title={label}>
+    <button type="button" className={`dvoice-tile dvoice-tile-screen${focused ? ' focused' : ''}`} onClick={onFocus} onDoubleClick={onFullscreen} title={label}>
       <video ref={ref} autoPlay playsInline muted />
       <span className="dvoice-tile-name">{label}</span>
       <span className="dvoice-tile-live">LIVE</span>
@@ -63,29 +66,39 @@ type VoiceStageProps = {
   currentUser: PublicUser;
   channelName: string;
   voiceRoom: VoiceRoom;
+  token?: string;
 };
 
 // Discord-style voice channel view. The stage shows a responsive grid of
 // participant/screen-share tiles (exactly like Discord's call grid). A floating
 // control pill sits at the bottom-center. The ephemeral voice chat lives in a
 // collapsible side panel on the right, matching Discord's layout.
-export function VoiceStage({ language, currentUser, channelName, voiceRoom }: VoiceStageProps) {
+export function VoiceStage({ language, currentUser, channelName, voiceRoom, token }: VoiceStageProps) {
   const [draft, setDraft] = useState('');
   const [focusId, setFocusId] = useState<string | null>(null);
   const [emojiOpen, setEmojiOpen] = useState(false);
+  const [pickerTab, setPickerTab] = useState<'emoji' | 'gif'>('emoji');
   const [chatOpen, setChatOpen] = useState(true);
+  const [fullscreen, setFullscreen] = useState(false);
   // Right-click menu (edit/delete) for one of the user's own voice-chat messages.
   const [messageMenu, setMessageMenu] = useState<{ x: number; y: number; message: VoiceChatMessage } | null>(null);
   // The message currently being edited inline, plus the working draft text.
   const [editingMessage, setEditingMessage] = useState<VoiceChatMessage | null>(null);
   const [editDraft, setEditDraft] = useState('');
   const threadRef = useRef<HTMLDivElement | null>(null);
-  const inputRef = useRef<HTMLInputElement | null>(null);
+  const inputRef = useRef<EmojiInlineInputHandle | null>(null);
   const emojiAnchorRef = useRef<HTMLDivElement | null>(null);
+  const stageRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (threadRef.current) threadRef.current.scrollTop = threadRef.current.scrollHeight;
   }, [voiceRoom.chat.length]);
+
+  useEffect(() => {
+    const handleFullscreenChange = () => setFullscreen(document.fullscreenElement === stageRef.current);
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
+  }, []);
 
   // Dismiss the message context menu on any outside click or Escape.
   useEffect(() => {
@@ -118,7 +131,7 @@ export function VoiceStage({ language, currentUser, channelName, voiceRoom }: Vo
 
   function saveEdit() {
     if (!editingMessage) return;
-    const body = editDraft.trim();
+    const body = expandCustomEmojiShortcodes(editDraft.trim());
     if (body && body !== editingMessage.body) voiceRoom.editChat(editingMessage.id, body);
     setEditingMessage(null);
     setEditDraft('');
@@ -130,15 +143,21 @@ export function VoiceStage({ language, currentUser, channelName, voiceRoom }: Vo
   }
 
   function send() {
-    const body = draft.trim();
+    const body = expandCustomEmojiShortcodes(draft.trim());
     if (!body) return;
     voiceRoom.sendChat(body);
     setDraft('');
   }
 
   function insertEmoji(emoji: string) {
-    setDraft((value) => `${value}${emoji}`);
-    window.setTimeout(() => inputRef.current?.focus(), 0);
+    inputRef.current?.insertText(emoji);
+  }
+
+  // Voice chat has no image payload, so a chosen GIF is sent as its URL which
+  // renders as a link/inline media in the chat list.
+  function sendGif(gif: TenorGif) {
+    voiceRoom.sendChat(gif.url);
+    setEmojiOpen(false);
   }
 
   // Build every tile: participants first, then screen shares.
@@ -181,6 +200,14 @@ export function VoiceStage({ language, currentUser, channelName, voiceRoom }: Vo
   // Discord caps the columns so tiles stay large; pick columns from the count.
   const columns = tileCount <= 1 ? 1 : tileCount <= 4 ? 2 : tileCount <= 9 ? 3 : 4;
 
+  function toggleFullscreen() {
+    if (document.fullscreenElement) {
+      void document.exitFullscreen().catch(() => undefined);
+    } else if (stageRef.current) {
+      void stageRef.current.requestFullscreen().catch(() => undefined);
+    }
+  }
+
   function renderTile(tile: Tile) {
     if (tile.kind === 'person') {
       return (
@@ -190,12 +217,12 @@ export function VoiceStage({ language, currentUser, channelName, voiceRoom }: Vo
     }
     return (
       <ScreenTile key={tile.id} stream={tile.stream} label={`${tile.label} · ${t(language, 'screenSharing')}`}
-        focused={focused?.id === tile.id} onFocus={() => setFocusId((id) => (id === tile.id ? null : tile.id))} />
+        focused={focused?.id === tile.id} onFocus={() => setFocusId((id) => (id === tile.id ? null : tile.id))} onFullscreen={toggleFullscreen} />
     );
   }
 
   return (
-    <div className={`dvoice${chatOpen ? ' chat-open' : ''}`}>
+    <div ref={stageRef} className={`dvoice${chatOpen ? ' chat-open' : ''}${fullscreen ? ' group-fullscreen' : ''}`}>
       {/* Voice stage: header + tile grid + floating controls. */}
       <div className="dvoice-stage">
         <div className="dvoice-grid-wrap">
@@ -222,9 +249,25 @@ export function VoiceStage({ language, currentUser, channelName, voiceRoom }: Vo
               <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z"/></svg>
             )}
           </button>
+          <button className={`dvoice-ctrl${voiceRoom.deafened ? ' danger-active' : ''}`} type="button" onClick={() => voiceRoom.toggleDeafen()} title={voiceRoom.deafened ? t(language, 'undeafen') : t(language, 'deafen')}>
+            {voiceRoom.deafened ? (
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M2.7 3.7 1.3 5.1 4.4 8.2A9 9 0 0 0 3 13v4a3 3 0 0 0 3 3h1v-7H5v-1a7 7 0 0 1 .9-3.4l13 13 1.4-1.4L2.7 3.7zM12 4a9 9 0 0 1 9 9v4a3 3 0 0 1-1.6 2.6L17 17.2V13h2a7 7 0 0 0-9.3-6.6L8.1 4.8A9 9 0 0 1 12 4z"/></svg>
+            ) : (
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M12 3a9 9 0 0 0-9 9v5a3 3 0 0 0 3 3h1v-7H5v-1a7 7 0 0 1 14 0v1h-2v7h1a3 3 0 0 0 3-3v-5a9 9 0 0 0-9-9z"/></svg>
+            )}
+          </button>
           <button className={`dvoice-ctrl${voiceRoom.sharingScreen ? ' active' : ''}`} type="button" onClick={() => void voiceRoom.requestScreenShare()} title={voiceRoom.sharingScreen ? t(language, 'stopScreenShare') : t(language, 'shareScreen')}>
             <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M20 4H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h6v2H8v2h8v-2h-2v-2h6a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2zm0 12H4V6h16v10z"/></svg>
           </button>
+          {firstScreen ? (
+            <button className={`dvoice-ctrl${fullscreen ? ' active' : ''}`} type="button" onClick={toggleFullscreen} title={fullscreen ? t(language, 'callExitFullscreen') : t(language, 'callFullscreen')}>
+              {fullscreen ? (
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z"/></svg>
+              ) : (
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>
+              )}
+            </button>
+          ) : null}
           <button className={`dvoice-ctrl${chatOpen ? ' active' : ''}`} type="button" onClick={() => setChatOpen((v) => !v)} title={t(language, 'voiceChat')}>
             <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M20 2H4a2 2 0 0 0-2 2v18l4-4h14a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2zm-2 12H6v-2h12v2zm0-3H6V9h12v2zm0-4H6V6h12v1z"/></svg>
           </button>
@@ -264,7 +307,7 @@ export function VoiceStage({ language, currentUser, channelName, voiceRoom }: Vo
                     </strong>
                     {editing ? (
                       <div className="dvoice-chat-edit">
-                        <input
+                        <EmojiInlineInput
                           autoFocus
                           className="emoji-inline-input messenger-input"
                           value={editDraft}
@@ -280,7 +323,7 @@ export function VoiceStage({ language, currentUser, channelName, voiceRoom }: Vo
                         </div>
                       </div>
                     ) : (
-                      <p><MessageText text={m.body} /></p>
+                      <p><MessageBody text={expandCustomEmojiShortcodes(m.body)} /></p>
                     )}
                   </div>
                 </div>
@@ -289,19 +332,28 @@ export function VoiceStage({ language, currentUser, channelName, voiceRoom }: Vo
           </div>
           <form className="messenger-compose dvoice-chat-compose" onSubmit={(e) => { e.preventDefault(); send(); }}>
             <div className="emoji-input-shell messenger-emoji-input">
-              <input ref={inputRef} className="emoji-inline-input messenger-input" value={draft} placeholder={`${t(language, 'voiceChat')} #${channelName}`}
+              <EmojiInlineInput ref={inputRef} className="emoji-inline-input messenger-input" value={draft} placeholder={`${t(language, 'voiceChat')} #${channelName}`}
                 onChange={(e) => setDraft(e.target.value)} />
+              <button
+                className="emoji-toggle inline chat-gif-toggle"
+                type="button"
+                aria-label="GIF"
+                onMouseDown={(event) => event.stopPropagation()}
+                onClick={(event) => { event.stopPropagation(); setPickerTab('gif'); setEmojiOpen((value) => !(value && pickerTab === 'gif')); }}
+              >
+                <GifIcon />
+              </button>
               <div ref={emojiAnchorRef} className="emoji-host inline">
                 <button
                   className="emoji-toggle inline"
                   type="button"
                   aria-label={t(language, 'emoji')}
                   onMouseDown={(event) => event.stopPropagation()}
-                  onClick={(event) => { event.stopPropagation(); setEmojiOpen((value) => !value); }}
+                  onClick={(event) => { event.stopPropagation(); setPickerTab('emoji'); setEmojiOpen((value) => !(value && pickerTab === 'emoji')); }}
                 >
                   <EmojiToggleIcon />
                 </button>
-                {emojiOpen ? <EmojiPicker language={language} enlarged anchorRef={emojiAnchorRef} placement="top-end" onSelect={insertEmoji} onClose={() => setEmojiOpen(false)} /> : null}
+                {emojiOpen ? <EmojiPicker language={language} enlarged initialTab={pickerTab} anchorRef={emojiAnchorRef} placement="top-end" onSelect={insertEmoji} onSelectGif={sendGif} onClose={() => setEmojiOpen(false)} token={token} currentUser={currentUser} /> : null}
               </div>
             </div>
             {/* Submit on Enter; hidden submit keeps form submission working without a send button. */}

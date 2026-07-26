@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import type { Language, NameStyle, PublicUser } from '../api/types';
 import { LOCALES, t } from '../i18n';
 import { UserBadges } from './UserBadges';
+import { MessagePreviewText } from './Twemoji';
 import {
   DEFAULT_NAME_STYLE,
   NAME_STYLE_COLORS,
@@ -190,7 +191,7 @@ export function NameStyleModal({ language, user, initialStyle, zIndex, onCancel,
                       <small className="profile-state online">{t(language, 'online')}</small>
                     </div>
                     <UserBadges user={user} language={language} />
-                    {user.status ? <p className="profile-status">{user.status}</p> : null}
+                    {user.status ? <p className="profile-status"><MessagePreviewText text={user.status} size={16} /></p> : null}
                     <div className="profile-dates">
                       <small>{t(language, 'memberSince')}: {formatDate(user.createdAt)}</small>
                     </div>

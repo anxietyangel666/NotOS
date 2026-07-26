@@ -4,14 +4,16 @@
 // The icons are rendered as CSS masks filled with `currentColor`, so they
 // inherit the player button's color and automatically follow the active theme
 // (light / dark / mint / ocean / system-black).
-const PLAY_ICON = '/Emoji/play.png';
-const PAUSE_ICON = '/Emoji/pause.png';
-const PREV_ICON = '/Emoji/left-arrow.png';
-const NEXT_ICON = '/Emoji/right-arrow.png';
-const VOLUME_ON_ICON = '/Emoji/volume-unmute.png';
-const VOLUME_MUTED_ICON = '/Emoji/volume_mute.png';
-const MUTE_ICON = '/Emoji/mute.png';
-const MONITOR_ICON = '/Emoji/monitor.png';
+import { assetUrl } from '../utils/assets';
+
+const PLAY_ICON = assetUrl('Emoji/play.png');
+const PAUSE_ICON = assetUrl('Emoji/pause.png');
+const PREV_ICON = assetUrl('Emoji/left-arrow.png');
+const NEXT_ICON = assetUrl('Emoji/right-arrow.png');
+const VOLUME_ON_ICON = assetUrl('Emoji/volume-unmute.png');
+const VOLUME_MUTED_ICON = assetUrl('Emoji/volume_mute.png');
+const MUTE_ICON = assetUrl('Emoji/mute.png');
+const MONITOR_ICON = assetUrl('Emoji/monitor.png');
 
 function maskStyle(url: string): React.CSSProperties {
   return {

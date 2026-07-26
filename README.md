@@ -1,4 +1,4 @@
-# NotOC
+# NotOS
 
 Desktop-приложение на React + Electron с API на Node.js, realtime-слоем Socket.IO и PostgreSQL.
 

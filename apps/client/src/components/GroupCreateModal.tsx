@@ -5,6 +5,7 @@ import type { Group, Language, NamePlate } from '../api/types';
 import { DEFAULT_NAMEPLATE, nameplateToCss } from '../api/types';
 import { t } from '../i18n';
 import { AvatarCropper } from './AvatarCropper';
+import { extractGroupInviteCode } from '../utils/group-invite-link';
 
 type GroupCreateModalProps = {
   token: string;
@@ -12,8 +13,6 @@ type GroupCreateModalProps = {
   onClose: () => void;
   onCreated: (group: Group) => void;
 };
-
-const INVITE_RE = /gc_[A-Za-z0-9]{12}/;
 
 type Step = 'landing' | 'create' | 'join';
 
@@ -102,13 +101,8 @@ export function GroupCreateModal({ token, language, onClose, onCreated }: GroupC
     }
   }
 
-  function extractInviteCode(text: string) {
-    const match = INVITE_RE.exec(text.trim());
-    return match?.[0] ?? null;
-  }
-
   async function handleJoin() {
-    const code = extractInviteCode(inviteText);
+    const code = extractGroupInviteCode(inviteText);
     if (!code) { setJoinError(t(language, 'inviteInvalid')); return; }
     setJoining(true);
     setJoinError('');

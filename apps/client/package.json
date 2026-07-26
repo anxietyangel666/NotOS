@@ -1,6 +1,6 @@
 {
   "name": "@notoc/client",
-  "version": "0.1.0",
+  "version": "0.5.0",
   "private": true,
   "type": "module",
   "main": "electron/main.cjs",
@@ -9,15 +9,17 @@
     "desktop": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && electron .\"",
     "build": "tsc && vite build",
     "dist:win": "npm run build && electron-builder --win portable --x64",
-    "pack:win": "npm run build && electron-packager . NotOC --platform=win32 --arch=x64 --out=release-packaged --overwrite --ignore=src --ignore=release --ignore=release-packaged",
+    "pack:win": "npm run build && electron-packager . NotOS --platform=win32 --arch=x64 --out=release-packaged --overwrite --ignore=src --ignore=release --ignore=release-packaged --icon=public/Emoji/app-icon.ico",
     "preview": "vite preview --host 0.0.0.0"
   },
   "build": {
     "appId": "local.notoc.client",
-    "productName": "NotOC",
+    "productName": "NotOS",
+    "asar": false,
     "directories": {
       "output": "release"
     },
+    "icon": "public/Emoji/app-icon.ico",
     "files": [
       "dist/**/*",
       "electron/**/*",
@@ -32,10 +34,11 @@
           ]
         }
       ],
-      "artifactName": "NotOC-${version}-${arch}.${ext}"
+      "artifactName": "NotOS-${version}-${arch}.${ext}"
     }
   },
   "dependencies": {
+    "@shiguredo/rnnoise-wasm": "^2025.1.5",
     "@vitejs/plugin-react": "^4.3.4",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

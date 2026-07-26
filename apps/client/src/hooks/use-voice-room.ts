@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Socket } from 'socket.io-client';
 import type { PublicUser, VoiceChatMessage, VoiceParticipant } from '../api/types';
-import { loadCallSettings, type CallSettings } from '../utils/call-settings';
+import { applyCallAudioConstraints, audioConstraintsFromCallSettings, loadCallSettings, type CallSettings } from '../utils/call-settings';
+import { createRnnoiseNode, destroyRnnoiseNode, setRnnoiseEnabled } from '../utils/rnnoise';
+import { loadUserStatus, patchVoiceState, STATUS_CHANGED_EVENT, type UserStatusState } from '../utils/user-status';
 import type { ScreenSource } from './use-voice-call';
 
 const ICE_SERVERS: RTCIceServer[] = [
@@ -18,6 +20,7 @@ export type VoiceRoomState = {
   remoteVideo: Map<string, MediaStream>; // userId -> screen-share stream
   chat: VoiceChatMessage[];
   muted: boolean;
+  deafened: boolean;
   sharingScreen: boolean;
   localScreenStream: MediaStream | null;
   joining: boolean;
@@ -44,7 +47,8 @@ export function useVoiceRoom({ socket, currentUser }: UseVoiceRoomArgs) {
   const [remoteStreams, setRemoteStreams] = useState<Map<string, MediaStream>>(new Map());
   const [remoteVideo, setRemoteVideo] = useState<Map<string, MediaStream>>(new Map());
   const [chat, setChat] = useState<VoiceChatMessage[]>([]);
-  const [muted, setMuted] = useState(false);
+  const [muted, setMuted] = useState(() => loadUserStatus().voice.muted);
+  const [deafened, setDeafened] = useState(() => loadUserStatus().voice.deafened);
   const [sharingScreen, setSharingScreen] = useState(false);
   const [localScreenStream, setLocalScreenStream] = useState<MediaStream | null>(null);
   const [joining, setJoining] = useState(false);
@@ -56,19 +60,24 @@ export function useVoiceRoom({ socket, currentUser }: UseVoiceRoomArgs) {
   const channelRef = useRef<string | null>(null);
   const peersRef = useRef<Map<string, PeerEntry>>(new Map());
   const localStreamRef = useRef<MediaStream | null>(null);
+  const rawMicStreamRef = useRef<MediaStream | null>(null);
+  const rawMicTrackRef = useRef<MediaStreamTrack | null>(null);
   const micTrackRef = useRef<MediaStreamTrack | null>(null);
   const screenStreamRef = useRef<MediaStream | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const gainRef = useRef<GainNode | null>(null);
+  const rnnoiseNodeRef = useRef<AudioWorkletNode | null>(null);
   const talkingRafRef = useRef<number | null>(null);
   const settingsRef = useRef<CallSettings>(loadCallSettings());
   const mutedRef = useRef(false);
+  const deafenedRef = useRef(false);
   const pttActiveRef = useRef(false);
 
   socketRef.current = socket;
   channelRef.current = activeChannelId;
   mutedRef.current = muted;
+  deafenedRef.current = deafened;
 
   const setMicEnabled = (enabled: boolean) => {
     if (micTrackRef.current) micTrackRef.current.enabled = enabled;
@@ -85,10 +94,22 @@ export function useVoiceRoom({ socket, currentUser }: UseVoiceRoomArgs) {
     if (gain) gain.gain.value = Math.max(0, settingsRef.current.micVolume / 100);
   }
 
+  function syncVoiceStateFromStore() {
+    const persisted = loadUserStatus().voice;
+    const effectiveMuted = persisted.muted || persisted.deafened;
+    setMuted(effectiveMuted);
+    setDeafened(persisted.deafened);
+    mutedRef.current = effectiveMuted;
+    deafenedRef.current = persisted.deafened;
+    return { muted: effectiveMuted, deafened: persisted.deafened };
+  }
+
   // Re-read the saved call settings and apply them to the live room (mic gain,
   // push-to-talk, mute). Output volume is applied by the audio sink.
   const refreshSettings = useCallback(() => {
     settingsRef.current = loadCallSettings();
+    void applyCallAudioConstraints(rawMicTrackRef.current, settingsRef.current);
+    setRnnoiseEnabled(rnnoiseNodeRef.current, settingsRef.current.noiseSuppression);
     applyMicVolume();
     if (settingsRef.current.pushToTalk) {
       setMicEnabled(pttActiveRef.current && !mutedRef.current);
@@ -100,15 +121,12 @@ export function useVoiceRoom({ socket, currentUser }: UseVoiceRoomArgs) {
   const buildLocalAudio = useCallback(async (): Promise<MediaStream> => {
     const s = settingsRef.current;
     const raw = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        deviceId: s.inputDeviceId && s.inputDeviceId !== 'default' ? { exact: s.inputDeviceId } : undefined,
-        noiseSuppression: s.noiseSuppression,
-        echoCancellation: s.echoCancellation,
-        autoGainControl: s.autoGainControl
-      },
+      audio: audioConstraintsFromCallSettings(s),
       video: false
     });
-    const ctx = new AudioContext();
+    rawMicStreamRef.current = raw;
+    rawMicTrackRef.current = raw.getAudioTracks()[0] ?? null;
+    const ctx = new AudioContext({ sampleRate: 48000 });
     audioCtxRef.current = ctx;
     const source = ctx.createMediaStreamSource(raw);
     const gain = ctx.createGain();
@@ -118,9 +136,16 @@ export function useVoiceRoom({ socket, currentUser }: UseVoiceRoomArgs) {
     analyser.fftSize = 512;
     analyserRef.current = analyser;
     const dest = ctx.createMediaStreamDestination();
+    const rnnoiseNode = await createRnnoiseNode(ctx, s.noiseSuppression);
+    rnnoiseNodeRef.current = rnnoiseNode;
     source.connect(gain);
-    gain.connect(analyser);
-    gain.connect(dest);
+    if (rnnoiseNode) {
+      gain.connect(rnnoiseNode);
+      rnnoiseNode.connect(analyser);
+    } else {
+      gain.connect(analyser);
+    }
+    analyser.connect(dest);
     const processed = dest.stream;
     micTrackRef.current = processed.getAudioTracks()[0] ?? null;
     localStreamRef.current = processed;
@@ -261,14 +286,19 @@ export function useVoiceRoom({ socket, currentUser }: UseVoiceRoomArgs) {
     if (talkingRafRef.current) cancelAnimationFrame(talkingRafRef.current);
     talkingRafRef.current = null;
     localStreamRef.current?.getTracks().forEach((t) => t.stop());
+    rawMicStreamRef.current?.getTracks().forEach((t) => t.stop());
     screenStreamRef.current?.getTracks().forEach((t) => t.stop());
     localStreamRef.current = null;
+    rawMicStreamRef.current = null;
+    rawMicTrackRef.current = null;
     screenStreamRef.current = null;
     micTrackRef.current = null;
     if (audioCtxRef.current) {
       void audioCtxRef.current.close().catch(() => undefined);
       audioCtxRef.current = null;
     }
+    destroyRnnoiseNode(rnnoiseNodeRef.current);
+    rnnoiseNodeRef.current = null;
     gainRef.current = null;
     analyserRef.current = null;
   }
@@ -284,7 +314,7 @@ export function useVoiceRoom({ socket, currentUser }: UseVoiceRoomArgs) {
     if (channelId) {
       const cached = channelParticipantsRef.current.get(channelId);
       if (cached) {
-        const next = cached.filter((p) => p.userId !== currentUser.id);
+      const next = cached.filter((p) => p.userId !== currentUser.id);
         if (next.length > 0) channelParticipantsRef.current.set(channelId, next);
         else channelParticipantsRef.current.delete(channelId);
         setChannelParticipants(new Map(channelParticipantsRef.current));
@@ -298,7 +328,7 @@ export function useVoiceRoom({ socket, currentUser }: UseVoiceRoomArgs) {
     setRemoteStreams(new Map());
     setRemoteVideo(new Map());
     setChat([]);
-    setMuted(false);
+    syncVoiceStateFromStore();
     setSharingScreen(false);
     setLocalScreenStream(null);
     setTalkingIds(new Set());
@@ -313,6 +343,7 @@ export function useVoiceRoom({ socket, currentUser }: UseVoiceRoomArgs) {
     setJoining(true);
     setError('');
     settingsRef.current = loadCallSettings();
+    syncVoiceStateFromStore();
     try {
       await buildLocalAudio();
       channelRef.current = channelId;
@@ -334,7 +365,7 @@ export function useVoiceRoom({ socket, currentUser }: UseVoiceRoomArgs) {
         ? existing
         : [...existing, selfParticipant];
       setParticipantsForChannel(channelId, merged);
-      socketRef.current.emit('voice:join', { channelId });
+      socketRef.current.emit('voice:join', { channelId, muted: mutedRef.current });
     } catch {
       setError('micFailed');
       cleanupLocal();
@@ -345,14 +376,34 @@ export function useVoiceRoom({ socket, currentUser }: UseVoiceRoomArgs) {
     }
   }, [buildLocalAudio, leave, currentUser]);
 
-  const toggleMute = useCallback(() => {
-    setMuted((prev) => {
-      const next = !prev;
-      setMicEnabled(!next);
-      socketRef.current?.emit('voice:state', { channelId: channelRef.current, muted: next });
-      return next;
-    });
+  const applyVoiceState = useCallback((nextMuted: boolean, nextDeafened: boolean, fromStore = false) => {
+    const effectiveMuted = nextMuted || nextDeafened;
+    setMuted(effectiveMuted);
+    setDeafened(nextDeafened);
+    mutedRef.current = effectiveMuted;
+    deafenedRef.current = nextDeafened;
+
+    if (settingsRef.current.pushToTalk) {
+      setMicEnabled(pttActiveRef.current && !effectiveMuted);
+    } else {
+      setMicEnabled(!effectiveMuted);
+    }
+
+    if (channelRef.current) socketRef.current?.emit('voice:state', { channelId: channelRef.current, muted: effectiveMuted });
+    if (!fromStore) patchVoiceState({ muted: effectiveMuted, deafened: nextDeafened });
   }, []);
+
+  const toggleMute = useCallback(() => {
+    const nextMuted = !muted;
+    const nextDeafened = nextMuted ? deafened : false;
+    applyVoiceState(nextMuted, nextDeafened);
+  }, [applyVoiceState, deafened, muted]);
+
+  const toggleDeafen = useCallback(() => {
+    const nextDeafened = !deafened;
+    const nextMuted = nextDeafened ? true : false;
+    applyVoiceState(nextMuted, nextDeafened);
+  }, [applyVoiceState, deafened]);
 
   const stopScreenShare = useCallback(async () => {
     screenStreamRef.current?.getTracks().forEach((t) => t.stop());
@@ -674,6 +725,17 @@ export function useVoiceRoom({ socket, currentUser }: UseVoiceRoomArgs) {
     return () => window.removeEventListener('notoc:callSettingsChanged', handler);
   }, [refreshSettings]);
 
+  useEffect(() => {
+    const onStatusChange = (event: Event) => {
+      const detail = (event as CustomEvent<UserStatusState>).detail;
+      if (!detail) return;
+      if (detail.voice.muted === mutedRef.current && detail.voice.deafened === deafenedRef.current) return;
+      applyVoiceState(detail.voice.muted, detail.voice.deafened, true);
+    };
+    window.addEventListener(STATUS_CHANGED_EVENT, onStatusChange as EventListener);
+    return () => window.removeEventListener(STATUS_CHANGED_EVENT, onStatusChange as EventListener);
+  }, [applyVoiceState]);
+
   useEffect(() => () => leave(), [leave]);
 
   return {
@@ -684,6 +746,7 @@ export function useVoiceRoom({ socket, currentUser }: UseVoiceRoomArgs) {
     remoteVideo,
     chat,
     muted,
+    deafened,
     sharingScreen,
     localScreenStream,
     joining,
@@ -693,6 +756,7 @@ export function useVoiceRoom({ socket, currentUser }: UseVoiceRoomArgs) {
     join,
     leave,
     toggleMute,
+    toggleDeafen,
     startScreenShare,
     stopScreenShare,
     requestScreenShare,

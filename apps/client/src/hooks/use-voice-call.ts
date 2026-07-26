@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Socket } from 'socket.io-client';
 import type { PublicUser } from '../api/types';
-import { loadCallSettings, type CallSettings } from '../utils/call-settings';
+import { applyCallAudioConstraints, audioConstraintsFromCallSettings, loadCallSettings, type CallSettings } from '../utils/call-settings';
+import { createRnnoiseNode, destroyRnnoiseNode, setRnnoiseEnabled } from '../utils/rnnoise';
+import { loadUserStatus, patchVoiceState, STATUS_CHANGED_EVENT, type UserStatusState } from '../utils/user-status';
 
 export type CallPhase = 'idle' | 'outgoing' | 'incoming' | 'connecting' | 'active';
 
@@ -45,7 +47,8 @@ export function useVoiceCall({ socket, currentUser, resolveUser, onCallEnded }: 
   const [phase, setPhase] = useState<CallPhase>('idle');
   const [peer, setPeer] = useState<PublicUser | null>(null);
   const [incoming, setIncoming] = useState<IncomingCall | null>(null);
-  const [muted, setMuted] = useState(false);
+  const [muted, setMuted] = useState(() => loadUserStatus().voice.muted);
+  const [deafened, setDeafened] = useState(() => loadUserStatus().voice.deafened);
   const [sharingScreen, setSharingScreen] = useState(false);
   const [remoteMuted, setRemoteMuted] = useState(false);
   const [remoteSharingScreen, setRemoteSharingScreen] = useState(false);
@@ -63,6 +66,8 @@ export function useVoiceCall({ socket, currentUser, resolveUser, onCallEnded }: 
   const callIdRef = useRef<string | null>(null);
   const isCallerRef = useRef(false);
   const localStreamRef = useRef<MediaStream | null>(null);
+  const rawMicStreamRef = useRef<MediaStream | null>(null);
+  const rawMicTrackRef = useRef<MediaStreamTrack | null>(null);
   const screenStreamRef = useRef<MediaStream | null>(null);
   const micTrackRef = useRef<MediaStreamTrack | null>(null);
   const screenSenderRef = useRef<RTCRtpSender | null>(null);
@@ -72,6 +77,7 @@ export function useVoiceCall({ socket, currentUser, resolveUser, onCallEnded }: 
   const audioCtxRef = useRef<AudioContext | null>(null);
   const gainRef = useRef<GainNode | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
+  const rnnoiseNodeRef = useRef<AudioWorkletNode | null>(null);
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
   const settingsRef = useRef<CallSettings>(loadCallSettings());
   const pttActiveRef = useRef(false);
@@ -80,6 +86,10 @@ export function useVoiceCall({ socket, currentUser, resolveUser, onCallEnded }: 
   const elapsedTimerRef = useRef<number | null>(null);
   const peerRef = useRef<PublicUser | null>(null);
   const outgoingRef = useRef(false);
+  const mutedRef = useRef(false);
+  const deafenedRef = useRef(false);
+  mutedRef.current = muted;
+  deafenedRef.current = deafened;
   // Calls that already ended; guards against showing the incoming modal after the
   // async caller lookup resolves for a call that was cancelled in the meantime.
   const endedCallsRef = useRef<Set<string>>(new Set());
@@ -93,16 +103,30 @@ export function useVoiceCall({ socket, currentUser, resolveUser, onCallEnded }: 
 
   const refreshSettings = useCallback(() => {
     settingsRef.current = loadCallSettings();
+    void applyCallAudioConstraints(rawMicTrackRef.current, settingsRef.current);
+    setRnnoiseEnabled(rnnoiseNodeRef.current, settingsRef.current.noiseSuppression);
     applyMicVolume();
     applyOutputVolume();
     if (settingsRef.current.pushToTalk) {
       // In PTT mode the mic stays muted unless the key is held.
-      setMicEnabled(pttActiveRef.current && !muted);
+      setMicEnabled(pttActiveRef.current && !mutedRef.current);
     } else {
-      setMicEnabled(!muted);
+      setMicEnabled(!mutedRef.current);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [muted]);
+  }, []);
+
+  function syncVoiceStateFromStore() {
+    const persisted = loadUserStatus().voice;
+    const effectiveMuted = persisted.muted || persisted.deafened;
+    setMuted(effectiveMuted);
+    setDeafened(persisted.deafened);
+    mutedRef.current = effectiveMuted;
+    deafenedRef.current = persisted.deafened;
+    const audio = remoteAudioRef.current;
+    if (audio) audio.muted = persisted.deafened;
+    return { muted: effectiveMuted, deafened: persisted.deafened };
+  }
 
   function applyMicVolume() {
     const gain = gainRef.current;
@@ -111,7 +135,11 @@ export function useVoiceCall({ socket, currentUser, resolveUser, onCallEnded }: 
 
   function applyOutputVolume() {
     const audio = remoteAudioRef.current;
-    if (audio) audio.volume = Math.min(1, Math.max(0, settingsRef.current.outputVolume / 100));
+    if (audio) {
+      audio.volume = Math.min(1, Math.max(0, settingsRef.current.outputVolume / 100));
+      // Deafen mutes the output element entirely while keeping the volume setting.
+      audio.muted = deafenedRef.current;
+    }
   }
 
   function setMicEnabled(enabled: boolean) {
@@ -134,8 +162,11 @@ export function useVoiceCall({ socket, currentUser, resolveUser, onCallEnded }: 
     if (talkingRafRef.current) cancelAnimationFrame(talkingRafRef.current);
     talkingRafRef.current = null;
     localStreamRef.current?.getTracks().forEach((t) => t.stop());
+    rawMicStreamRef.current?.getTracks().forEach((t) => t.stop());
     screenStreamRef.current?.getTracks().forEach((t) => t.stop());
     localStreamRef.current = null;
+    rawMicStreamRef.current = null;
+    rawMicTrackRef.current = null;
     screenStreamRef.current = null;
     micTrackRef.current = null;
     screenSenderRef.current = null;
@@ -145,6 +176,8 @@ export function useVoiceCall({ socket, currentUser, resolveUser, onCallEnded }: 
       void audioCtxRef.current.close().catch(() => undefined);
       audioCtxRef.current = null;
     }
+    destroyRnnoiseNode(rnnoiseNodeRef.current);
+    rnnoiseNodeRef.current = null;
     gainRef.current = null;
     analyserRef.current = null;
   }
@@ -162,7 +195,8 @@ export function useVoiceCall({ socket, currentUser, resolveUser, onCallEnded }: 
     setPhase('idle');
     setPeer(null);
     setIncoming(null);
-    setMuted(false);
+    // Preserve the user's mic/deafen preference across calls.
+    syncVoiceStateFromStore();
     setSharingScreen(false);
     setRemoteMuted(false);
     setRemoteSharingScreen(false);
@@ -176,19 +210,16 @@ export function useVoiceCall({ socket, currentUser, resolveUser, onCallEnded }: 
   async function buildLocalAudio(): Promise<MediaStream> {
     const s = settingsRef.current;
     const constraints: MediaStreamConstraints = {
-      audio: {
-        deviceId: s.inputDeviceId && s.inputDeviceId !== 'default' ? { exact: s.inputDeviceId } : undefined,
-        noiseSuppression: s.noiseSuppression,
-        echoCancellation: s.echoCancellation,
-        autoGainControl: s.autoGainControl
-      },
+      audio: audioConstraintsFromCallSettings(s),
       video: false
     };
     const raw = await navigator.mediaDevices.getUserMedia(constraints);
+    rawMicStreamRef.current = raw;
+    rawMicTrackRef.current = raw.getAudioTracks()[0] ?? null;
 
     // Route mic through a gain node so we can control input volume, then capture
     // the processed track for the peer connection.
-    const ctx = new AudioContext();
+    const ctx = new AudioContext({ sampleRate: 48000 });
     audioCtxRef.current = ctx;
     const source = ctx.createMediaStreamSource(raw);
     const gain = ctx.createGain();
@@ -198,9 +229,16 @@ export function useVoiceCall({ socket, currentUser, resolveUser, onCallEnded }: 
     analyser.fftSize = 512;
     analyserRef.current = analyser;
     const dest = ctx.createMediaStreamDestination();
+    const rnnoiseNode = await createRnnoiseNode(ctx, s.noiseSuppression);
+    rnnoiseNodeRef.current = rnnoiseNode;
     source.connect(gain);
-    gain.connect(analyser);
-    gain.connect(dest);
+    if (rnnoiseNode) {
+      gain.connect(rnnoiseNode);
+      rnnoiseNode.connect(analyser);
+    } else {
+      gain.connect(analyser);
+    }
+    analyser.connect(dest);
 
     const processed = dest.stream;
     micTrackRef.current = processed.getAudioTracks()[0] ?? null;
@@ -209,7 +247,7 @@ export function useVoiceCall({ socket, currentUser, resolveUser, onCallEnded }: 
     startTalkingDetection(analyser);
     // Apply initial mic state for PTT/mute.
     if (settingsRef.current.pushToTalk) setMicEnabled(false);
-    else setMicEnabled(!muted);
+    else setMicEnabled(!mutedRef.current);
     return processed;
   }
 
@@ -292,6 +330,7 @@ export function useVoiceCall({ socket, currentUser, resolveUser, onCallEnded }: 
       if (!socket || phase !== 'idle') return;
       setCallError('');
       settingsRef.current = loadCallSettings();
+      syncVoiceStateFromStore();
       outgoingRef.current = true;
       setPeer(target);
       setPhase('outgoing');
@@ -309,6 +348,7 @@ export function useVoiceCall({ socket, currentUser, resolveUser, onCallEnded }: 
       if (!socket || pcRef.current) return;
       setCallError('');
       settingsRef.current = loadCallSettings();
+      syncVoiceStateFromStore();
       callIdRef.current = callId;
       isCallerRef.current = false;
       outgoingRef.current = false;
@@ -320,6 +360,7 @@ export function useVoiceCall({ socket, currentUser, resolveUser, onCallEnded }: 
         const pc = createPeerConnection(callId);
         stream.getTracks().forEach((track) => pc.addTrack(track, stream));
         socket.emit('call:accept', { callId });
+        emitState({ muted: mutedRef.current });
       } catch {
         setCallError('micFailed');
         socket.emit('call:hangup', { callId });
@@ -355,15 +396,39 @@ export function useVoiceCall({ socket, currentUser, resolveUser, onCallEnded }: 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase, resetCall, socket]);
 
-  const toggleMute = useCallback(() => {
-    setMuted((prev) => {
-      const next = !prev;
-      if (!settingsRef.current.pushToTalk) setMicEnabled(!next);
-      else if (next) setMicEnabled(false);
-      emitState({ muted: next });
-      return next;
-    });
+  // Apply a mute/deafen pair to the live media + signaling and the global store.
+  // `fromStore` skips re-writing the store to avoid event loops.
+  const applyVoiceState = useCallback((nextMuted: boolean, nextDeafened: boolean, fromStore = false) => {
+    // Deafen forces mute on, mirroring Discord.
+    const effectiveMuted = nextMuted || nextDeafened;
+    setMuted(effectiveMuted);
+    setDeafened(nextDeafened);
+    mutedRef.current = effectiveMuted;
+    deafenedRef.current = nextDeafened;
+
+    if (!settingsRef.current.pushToTalk) setMicEnabled(!effectiveMuted);
+    else if (effectiveMuted) setMicEnabled(false);
+
+    const audio = remoteAudioRef.current;
+    if (audio) audio.muted = nextDeafened;
+
+    emitState({ muted: effectiveMuted });
+    if (!fromStore) patchVoiceState({ muted: effectiveMuted, deafened: nextDeafened });
   }, []);
+
+  const toggleMute = useCallback(() => {
+    // Unmuting while deafened also lifts the deafen (Discord behaviour).
+    const nextMuted = !muted;
+    const nextDeafened = nextMuted ? deafened : false;
+    applyVoiceState(nextMuted, nextDeafened);
+  }, [applyVoiceState, deafened, muted]);
+
+  const toggleDeafen = useCallback(() => {
+    const nextDeafened = !deafened;
+    // The headset toggle controls both output and mic, matching the taskbar panel.
+    const nextMuted = nextDeafened ? true : false;
+    applyVoiceState(nextMuted, nextDeafened);
+  }, [applyVoiceState, deafened]);
 
   const stopScreenShare = useCallback(async () => {
     const pc = pcRef.current;
@@ -509,11 +574,13 @@ export function useVoiceCall({ socket, currentUser, resolveUser, onCallEnded }: 
       // Caller side: build media and send the offer once the callee accepts.
       if (!isCallerRef.current || !callIdRef.current) return;
       setPhase('connecting');
+      syncVoiceStateFromStore();
       try {
         const stream = await buildLocalAudio();
         const pc = createPeerConnection(callIdRef.current);
         stream.getTracks().forEach((track) => pc.addTrack(track, stream));
         await renegotiate();
+        emitState({ muted: mutedRef.current });
       } catch {
         setCallError('micFailed');
         hangup();
@@ -606,7 +673,7 @@ export function useVoiceCall({ socket, currentUser, resolveUser, onCallEnded }: 
       const tag = (event.target as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA') return;
       pttActiveRef.current = true;
-      if (!muted) setMicEnabled(true);
+      if (!mutedRef.current) setMicEnabled(true);
     };
     const up = (event: KeyboardEvent) => {
       if (event.code !== key) return;
@@ -627,7 +694,7 @@ export function useVoiceCall({ socket, currentUser, resolveUser, onCallEnded }: 
       unregisterDown = native.onPushToTalkDown?.(() => {
         if (pttActiveRef.current) return;
         pttActiveRef.current = true;
-        if (!muted) setMicEnabled(true);
+        if (!mutedRef.current) setMicEnabled(true);
       });
       unregisterUp = native.onPushToTalkUp?.(() => {
         pttActiveRef.current = false;
@@ -642,7 +709,27 @@ export function useVoiceCall({ socket, currentUser, resolveUser, onCallEnded }: 
       unregisterUp?.();
       void window.notoc?.unregisterPushToTalk?.();
     };
-  }, [phase, muted]);
+  }, [phase]);
+
+  // Apply saved settings live when the user edits them while connected.
+  useEffect(() => {
+    const handler = () => refreshSettings();
+    window.addEventListener('notoc:callSettingsChanged', handler);
+    return () => window.removeEventListener('notoc:callSettingsChanged', handler);
+  }, [refreshSettings]);
+
+  // React to mute/deafen toggles coming from outside the call (e.g. the taskbar
+  // status panel), keeping the live media in sync with the global store.
+  useEffect(() => {
+    const onStatusChange = (event: Event) => {
+      const detail = (event as CustomEvent<UserStatusState>).detail;
+      if (!detail) return;
+      if (detail.voice.muted === mutedRef.current && detail.voice.deafened === deafenedRef.current) return;
+      applyVoiceState(detail.voice.muted, detail.voice.deafened, true);
+    };
+    window.addEventListener(STATUS_CHANGED_EVENT, onStatusChange as EventListener);
+    return () => window.removeEventListener(STATUS_CHANGED_EVENT, onStatusChange as EventListener);
+  }, [applyVoiceState]);
 
   useEffect(() => () => resetCall(), [resetCall]);
 
@@ -651,6 +738,7 @@ export function useVoiceCall({ socket, currentUser, resolveUser, onCallEnded }: 
     peer,
     incoming,
     muted,
+    deafened,
     sharingScreen,
     remoteMuted,
     remoteSharingScreen,
@@ -668,6 +756,7 @@ export function useVoiceCall({ socket, currentUser, resolveUser, onCallEnded }: 
     declineCall,
     hangup,
     toggleMute,
+    toggleDeafen,
     requestScreenShare,
     startScreenShare,
     stopScreenShare,

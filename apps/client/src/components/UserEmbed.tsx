@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import { api } from '../api/client';
 import type { Language, PublicUser } from '../api/types';
 import { t } from '../i18n';
-import { Twemoji } from './Twemoji';
+import { Twemoji, MessagePreviewText } from './Twemoji';
 import { UserName } from './UserName';
 import { UserBadges } from './UserBadges';
 
@@ -13,7 +13,7 @@ type UserEmbedProps = {
   userId: string;
   currentUserId: string;
   onOpenChat?: (user: PublicUser) => void;
-  onOpenProfile?: (user: PublicUser) => void;
+  onOpenProfile?: (user: PublicUser, anchorRect?: { left: number; top: number; right: number; bottom: number } | null) => void;
   onOpenDesktop?: (user: PublicUser) => void;
   onEditProfile?: () => void;
 };
@@ -131,6 +131,9 @@ export function UserEmbed({ token, language, userId, currentUserId, onOpenChat, 
         style={{ backgroundImage: wallpaperBackground(user.wallpaper, user.theme) }}
       />
       <div className="user-embed-head">
+        <div className="user-embed-badges">
+          <UserBadges user={user} language={language} />
+        </div>
         <div
           className="user-embed-avatar-wrap"
           onContextMenu={(event) => {
@@ -138,15 +141,14 @@ export function UserEmbed({ token, language, userId, currentUserId, onOpenChat, 
             event.stopPropagation();
             setMenu({ x: event.clientX, y: event.clientY });
           }}
-          onClick={() => onOpenProfile?.(user)}
+          onClick={(event) => { const r = event.currentTarget.getBoundingClientRect(); onOpenProfile?.(user, { left: r.left, top: r.top, right: r.right, bottom: r.bottom }); }}
         >
           <img className="user-embed-avatar" src={user.avatarData} alt="" />
         </div>
-        <div className="user-embed-info">
-          <UserName user={user} as="strong" className="user-embed-name" />
-          <UserBadges user={user} language={language} />
-          {user.status ? <span className="user-embed-meta">{user.status}</span> : null}
-        </div>
+        {user.status ? <span className="user-embed-meta"><MessagePreviewText text={user.status} size={15} /></span> : null}
+      </div>
+      <div className="user-embed-info">
+        <UserName user={user} as="strong" className="user-embed-name" />
       </div>
       {!isSelf ? (
         <div className="user-embed-actions">
@@ -198,7 +200,7 @@ export function UserEmbed({ token, language, userId, currentUserId, onOpenChat, 
           style={{ left: menu.x, top: menu.y }}
           onMouseDown={(event) => event.stopPropagation()}
         >
-          <button type="button" onClick={() => { onOpenProfile?.(user); setMenu(null); }}>
+          <button type="button" onClick={() => { onOpenProfile?.(user, menu ? { left: menu.x, top: menu.y, right: menu.x, bottom: menu.y } : null); setMenu(null); }}>
             {t(language, 'viewProfile')}
           </button>
           {onOpenDesktop ? (

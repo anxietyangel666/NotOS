@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from './api/client';
-import { cacheUser } from './api/user-cache';
+import { cacheCurrentUser, clearCachedCurrentUser, loadCachedCurrentUser } from './api/user-cache';
 import type { AuthenticatedResponse, Language, PublicUser, Theme } from './api/types';
 import type { AuthNotice } from './app-types';
 import { clearToken, getStoredToken, storeToken } from './auth/session';
@@ -12,10 +12,13 @@ import { SocketProvider } from './components/SocketProvider';
 import { TitleBar } from './components/TitleBar';
 import { WelcomeOverlay } from './components/WelcomeOverlay';
 import { getStoredLanguage, getStoredTheme, storeLanguage, storeTheme, t } from './i18n';
+import { assetUrl } from './utils/assets';
+import { checkClientUpdate, checkServerConnection } from './utils/client-update';
 import { hasPin } from './utils/pin-lock';
 
 export function App() {
   const [booting, setBooting] = useState(true);
+  const [bootStatus, setBootStatus] = useState<'starting' | 'connection' | 'updates' | 'account' | 'ready'>('starting');
   const [onboarding, setOnboarding] = useState(false);
   const [token, setToken] = useState<string | null>(null);
   const [user, setUser] = useState<PublicUser | null>(null);
@@ -41,40 +44,75 @@ export function App() {
   }, [language]);
 
   useEffect(() => {
-    const hasOnboarded = localStorage.getItem('notoc.onboarded');
-    if (!hasOnboarded) {
-      setOnboarding(true);
-      setBooting(false);
-      return;
-    }
-
-    const storedToken = getStoredToken();
-    if (!storedToken) {
-      setBooting(false);
-      return;
-    }
-
     let alive = true;
+    const timers: number[] = [];
 
-    api
-      .me(storedToken)
-      .then((result) => {
+    function applyAuthenticatedUser(storedToken: string, nextUser: PublicUser) {
+      setToken(storedToken);
+      setUser(nextUser);
+      setLanguage(nextUser.language);
+      setTheme(nextUser.theme);
+      setPinLocked(hasPin(nextUser.id));
+    }
+
+    async function refreshStoredAccount(storedToken: string) {
+      try {
+        const result = await api.me(storedToken);
         if (!alive) return;
-        setToken(storedToken);
-        setUser(result.user);
-        setLanguage(result.user.language);
-        setTheme(result.user.theme);
-        setPinLocked(hasPin(result.user.id));
-      })
-      .catch(() => {
+        applyAuthenticatedUser(storedToken, result.user);
+        cacheCurrentUser(result.user);
+      } catch {
+        if (!alive) return;
         clearToken();
-      })
-      .finally(() => {
-        if (alive) setBooting(false);
-      });
+        clearCachedCurrentUser();
+        setToken(null);
+        setUser(null);
+      }
+    }
+
+    async function boot() {
+      const hasOnboarded = localStorage.getItem('notoc.onboarded');
+      if (!hasOnboarded) {
+        setOnboarding(true);
+        setBootStatus('ready');
+        setBooting(false);
+        return;
+      }
+
+      const storedToken = getStoredToken();
+      if (!storedToken) {
+        setBootStatus('ready');
+        setBooting(false);
+        return;
+      }
+
+      void checkClientUpdate();
+
+      setBootStatus('account');
+      const cachedUser = loadCachedCurrentUser();
+      if (cachedUser) {
+        applyAuthenticatedUser(storedToken, cachedUser);
+        setBootStatus('ready');
+        setBooting(false);
+        void checkServerConnection().catch(() => undefined);
+        const refreshTimer = window.setTimeout(() => {
+          void refreshStoredAccount(storedToken);
+        }, 2500);
+        timers.push(refreshTimer);
+        return;
+      }
+
+      await refreshStoredAccount(storedToken);
+      if (!alive) return;
+      setBootStatus('ready');
+      setBooting(false);
+    }
+
+    void boot();
 
     return () => {
       alive = false;
+      timers.forEach((timer) => window.clearTimeout(timer));
     };
   }, []);
 
@@ -83,7 +121,7 @@ export function App() {
     storeToken(result.token, remember);
     setToken(result.token);
     setUser(result.user);
-    cacheUser(result.user);
+    cacheCurrentUser(result.user);
     setLanguage(result.user.language);
     setTheme(result.user.theme);
     setNotice(nextNotice ?? null);
@@ -96,12 +134,14 @@ export function App() {
 
   const handleUserChange = useCallback((nextUser: PublicUser) => {
     setUser(nextUser);
+    cacheCurrentUser(nextUser);
     setLanguage(nextUser.language);
     setTheme(nextUser.theme);
   }, []);
 
   const handleLogout = useCallback(() => {
     clearToken();
+    clearCachedCurrentUser();
     setToken(null);
     setUser(null);
     setNotice(null);
@@ -122,12 +162,41 @@ export function App() {
   }, []);
 
   if (booting) {
+    const bootLabel = language === 'ru'
+      ? bootStatus === 'connection'
+        ? 'Проверка соединения с сервером...'
+        : bootStatus === 'updates'
+          ? 'Проверка обновлений...'
+          : bootStatus === 'account'
+            ? 'Вход в аккаунт...'
+            : 'Запуск NotOS...'
+      : language === 'uk'
+        ? bootStatus === 'connection'
+          ? 'Перевірка зʼєднання із сервером...'
+          : bootStatus === 'updates'
+            ? 'Перевірка оновлень...'
+            : bootStatus === 'account'
+              ? 'Вхід в акаунт...'
+              : 'Запуск NotOS...'
+        : bootStatus === 'connection'
+          ? 'Checking server connection...'
+          : bootStatus === 'updates'
+            ? 'Checking for updates...'
+            : bootStatus === 'account'
+              ? 'Signing in...'
+              : 'Starting NotOS...';
     return (
       <>
         <TitleBar language={language} />
         <main className="boot-screen">
-          <div className="boot-core" />
-          <p>{t(language, 'loading')}</p>
+          <section className="boot-card" aria-live="polite">
+            <img className="boot-app-icon" src={assetUrl('Emoji/app-icon.png')} alt="" />
+            <strong>{t(language, 'appName')}</strong>
+            <div className="boot-progress" aria-hidden="true">
+              <span />
+            </div>
+            <p>{bootLabel}</p>
+          </section>
         </main>
       </>
     );

@@ -15,6 +15,7 @@
 import type { PublicUser } from './types';
 
 const TTL_MS = 2 * 60 * 1000; // 2 minutes
+const CURRENT_USER_STORAGE_KEY = 'notoc.currentUser';
 
 type CacheEntry = {
   user: PublicUser;
@@ -27,6 +28,36 @@ const inflight = new Map<string, Promise<PublicUser>>();
 /** Store or refresh a user that was already fetched / received via socket. */
 export function cacheUser(user: PublicUser): void {
   cache.set(user.id, { user, expiresAt: Date.now() + TTL_MS });
+}
+
+export function cacheCurrentUser(user: PublicUser): void {
+  cacheUser(user);
+  try {
+    localStorage.setItem(CURRENT_USER_STORAGE_KEY, JSON.stringify(user));
+  } catch {
+    // Persistent cache is only a startup optimization.
+  }
+}
+
+export function loadCachedCurrentUser(): PublicUser | null {
+  try {
+    const raw = localStorage.getItem(CURRENT_USER_STORAGE_KEY);
+    if (!raw) return null;
+    const user = JSON.parse(raw) as PublicUser;
+    if (!user || typeof user.id !== 'string') return null;
+    cacheUser(user);
+    return user;
+  } catch {
+    return null;
+  }
+}
+
+export function clearCachedCurrentUser(): void {
+  try {
+    localStorage.removeItem(CURRENT_USER_STORAGE_KEY);
+  } catch {
+    // ignore storage errors
+  }
 }
 
 /** Remove a user from the cache (e.g. after `desktop:userChanged`). */

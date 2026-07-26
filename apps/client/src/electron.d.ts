@@ -40,6 +40,11 @@ declare global {
       minimizeWindow(): Promise<void>;
       toggleMaximizeWindow(): Promise<void>;
       closeWindow(): Promise<void>;
+      getAppVersion?(): Promise<string>;
+      restartApp?(): Promise<void>;
+      setUnreadBadge?(count: number): Promise<{ ok: boolean }>;
+      copyImageToClipboard?(dataUrl: string): Promise<{ ok: boolean }>;
+      openExternal?(url: string): Promise<void>;
       getScreenSources?(): Promise<ScreenSource[]>;
       selectScreenSource?(sourceId: string): Promise<void>;
       registerPushToTalk?(code: string): Promise<{ ok: boolean; reason?: string; accelerator?: string }>;

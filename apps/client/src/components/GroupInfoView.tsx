@@ -3,6 +3,7 @@ import { api } from '../api/client';
 import type { Group, GroupChannel, GroupMember, GroupRole, Language, PublicUser } from '../api/types';
 import { t } from '../i18n';
 import { UserName } from './UserName';
+import { buildGroupInviteLink } from '../utils/group-invite-link';
 
 type GroupInfoViewProps = {
   token: string;
@@ -20,14 +21,10 @@ export function GroupInfoView({ token, language, currentUser, group, onClose, on
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
-    void Promise.all([
-      api.getGroupChannels(token, group.id),
-      api.getGroupRoles(token, group.id),
-      api.getGroupMembers(token, group.id)
-    ]).then(([chanPayload, rolePayload, memPayload]) => {
-      setChannels(chanPayload.channels);
-      setRoles(rolePayload.roles);
-      setMembers(memPayload.members);
+    void api.getGroupBootstrap(token, group.id).then((payload) => {
+      setChannels(payload.channels);
+      setRoles(payload.roles);
+      setMembers(payload.members);
     });
   }, [token, group.id]);
 
@@ -46,7 +43,7 @@ export function GroupInfoView({ token, language, currentUser, group, onClose, on
 
   async function handleCopyInvite() {
     try {
-      await navigator.clipboard.writeText(group.inviteCode);
+      await navigator.clipboard.writeText(buildGroupInviteLink(group.inviteCode));
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch { /* ignore */ }
@@ -128,7 +125,7 @@ export function GroupInfoView({ token, language, currentUser, group, onClose, on
             <strong>{t(language, 'inviteLink')}</strong>
           </div>
           <div className="group-info-invite">
-            <code>{group.inviteCode}</code>
+            <code>{buildGroupInviteLink(group.inviteCode)}</code>
             <button type="button" onClick={() => void handleCopyInvite()}>{copied ? 'OK' : t(language, 'copyInviteLink')}</button>
           </div>
         </div>

@@ -1,8 +1,56 @@
-const { app, BrowserWindow, dialog, ipcMain, desktopCapturer, session, globalShortcut } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, desktopCapturer, session, globalShortcut, shell, screen, nativeImage, clipboard } = require('electron');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 
 const isDev = !app.isPackaged;
+const appIconFile = process.platform === 'win32' ? 'app-icon.ico' : 'app-icon.png';
+const appIconPath = isDev
+  ? path.join(__dirname, '..', 'public', 'Emoji', appIconFile)
+  : path.join(__dirname, '..', 'dist', 'Emoji', appIconFile);
+const APP_USER_MODEL_ID = 'local.notoc.client';
+const DEFAULT_ZOOM_FACTOR = 0.67;
+const YOUTUBE_EMBED_REFERRER = 'https://www.youtube.com/';
+const taskbarBadgeCache = new Map();
+const taskbarBadgeDir = path.join(__dirname, 'badges');
+const YOUTUBE_REQUEST_FILTER = {
+  urls: [
+    '*://*.youtube.com/*',
+    '*://*.youtube-nocookie.com/*',
+    '*://*.googlevideo.com/*',
+    '*://*.ytimg.com/*',
+    '*://*.ggpht.com/*',
+    '*://*.google.com/*'
+  ]
+};
+
+function taskbarBadgeLabel(count) {
+  const value = Number.isFinite(count) ? Math.max(0, Math.floor(count)) : 0;
+  if (value <= 0) return '';
+  return value > 9 ? '9+' : String(value);
+}
+
+function createTaskbarBadge(label) {
+  const cached = taskbarBadgeCache.get(label);
+  if (cached) return cached;
+
+  const file = label === '9+' ? 'badge-9-plus.png' : `badge-${label}.png`;
+  const image = nativeImage.createFromPath(path.join(taskbarBadgeDir, file));
+  taskbarBadgeCache.set(label, image);
+  return image;
+}
+
+function setTaskbarUnreadBadge(window, count) {
+  const label = taskbarBadgeLabel(count);
+  if (process.platform === 'win32') {
+    window.setOverlayIcon(label ? createTaskbarBadge(label) : null, label ? `${label} unread notifications` : '');
+    return;
+  }
+  app.setBadgeCount(label ? Math.max(1, Math.floor(count)) : 0);
+}
+
+if (process.platform === 'win32') {
+  app.setAppUserModelId(APP_USER_MODEL_ID);
+}
 
 // Currently registered global push-to-talk accelerator, so we can unregister
 // it before registering a new one (or on app quit).
@@ -88,13 +136,17 @@ function imageMimeByExt(filePath) {
 }
 
 function createWindow() {
+  const workArea = screen.getPrimaryDisplay().workArea;
   const window = new BrowserWindow({
-    width: 1180,
-    height: 760,
+    x: workArea.x,
+    y: workArea.y,
+    width: workArea.width,
+    height: workArea.height,
     minWidth: 920,
     minHeight: 620,
     show: false,
     frame: false,
+    icon: appIconPath,
     titleBarStyle: 'hidden',
     backgroundColor: '#f4f7fb',
     webPreferences: {
@@ -110,7 +162,44 @@ function createWindow() {
     }
   });
 
-  window.once('ready-to-show', () => window.show());
+  window.webContents.setZoomFactor(DEFAULT_ZOOM_FACTOR);
+  let windowShown = false;
+  const showWindow = () => {
+    if (windowShown || window.isDestroyed()) return;
+    windowShown = true;
+    window.show();
+    window.focus();
+  };
+
+  window.webContents.on('did-finish-load', () => {
+    window.webContents.setZoomFactor(DEFAULT_ZOOM_FACTOR);
+    showWindow();
+  });
+
+  window.webContents.session.webRequest.onBeforeSendHeaders(YOUTUBE_REQUEST_FILTER, (details, callback) => {
+    const requestHeaders = { ...details.requestHeaders };
+    requestHeaders.Referer = requestHeaders.Referer || YOUTUBE_EMBED_REFERRER;
+    requestHeaders.Origin = requestHeaders.Origin || 'https://www.youtube.com';
+    callback({ requestHeaders });
+  });
+
+  window.once('ready-to-show', showWindow);
+
+  // A renderer can be fully running (including audio) without Electron emitting
+  // ready-to-show on some Windows/GPU combinations. Never leave the main window
+  // permanently hidden in that case.
+  const showFallback = setTimeout(showWindow, 3000);
+  window.once('closed', () => clearTimeout(showFallback));
+
+  window.webContents.setWindowOpenHandler(({ url }) => {
+    try {
+      const parsed = new URL(String(url));
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+        void shell.openExternal(parsed.toString());
+      }
+    } catch {}
+    return { action: 'deny' };
+  });
 
   // Allow the renderer to capture the screen via navigator.mediaDevices.getDisplayMedia().
   // Electron requires an explicit display media request handler; without it getDisplayMedia rejects.
@@ -157,9 +246,9 @@ ipcMain.handle('auth-file:save', async (_event, authFile) => {
   const filename = sanitizeFilename(authFile?.filename);
   const defaultPath = path.join(app.getPath('downloads'), filename);
   const result = await dialog.showSaveDialog({
-    title: 'Сохранить NotOC auth-файл',
+    title: 'Сохранить NotOS auth-файл',
     defaultPath,
-    filters: [{ name: 'NotOC auth file', extensions: ['json'] }]
+    filters: [{ name: 'NotOS auth file', extensions: ['json'] }]
   });
 
   if (result.canceled || !result.filePath) {
@@ -172,10 +261,10 @@ ipcMain.handle('auth-file:save', async (_event, authFile) => {
 
 ipcMain.handle('auth-file:open', async () => {
   const result = await dialog.showOpenDialog({
-    title: 'Выбрать NotOC auth-файл',
+    title: 'Выбрать NotOS auth-файл',
     properties: ['openFile'],
     filters: [
-      { name: 'NotOC auth file', extensions: ['json', 'auth'] },
+      { name: 'NotOS auth file', extensions: ['json', 'auth'] },
       { name: 'All files', extensions: ['*'] }
     ]
   });
@@ -227,6 +316,47 @@ ipcMain.handle('window:maximize-toggle', (event) => {
 
 ipcMain.handle('window:close', (event) => {
   BrowserWindow.fromWebContents(event.sender)?.close();
+});
+
+ipcMain.handle('app:get-version', () => app.getVersion());
+
+ipcMain.handle('app:restart', () => {
+  app.relaunch();
+  app.exit(0);
+});
+
+ipcMain.handle('app:set-unread-badge', (event, count) => {
+  const window = BrowserWindow.fromWebContents(event.sender);
+  if (!window) return { ok: false };
+  try {
+    setTaskbarUnreadBadge(window, typeof count === 'number' ? count : 0);
+    return { ok: true };
+  } catch {
+    return { ok: false };
+  }
+});
+
+ipcMain.handle('clipboard:write-image', (_event, dataUrl) => {
+  try {
+    if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image/')) return { ok: false };
+    const image = nativeImage.createFromDataURL(dataUrl);
+    if (image.isEmpty()) return { ok: false };
+    clipboard.writeImage(image);
+    return { ok: true };
+  } catch {
+    return { ok: false };
+  }
+});
+
+ipcMain.handle('shell:open-external', async (_event, url) => {
+  try {
+    const parsed = new URL(String(url));
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return { ok: false };
+    await shell.openExternal(parsed.toString());
+    return { ok: true };
+  } catch {
+    return { ok: false };
+  }
 });
 
 ipcMain.handle('screen:select-source', (_event, sourceId) => {

@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react';
-import { api } from '../api/client';
+import { api, getApiBaseUrl, setApiBaseUrl } from '../api/client';
 import type { AuthenticatedResponse, Language, Theme } from '../api/types';
 import type { AuthNotice } from '../app-types';
 import {
@@ -12,8 +12,10 @@ import {
 } from '../auth/auth-file';
 import { AvatarCropper } from './AvatarCropper';
 import { LANGUAGES, t, getStoredTheme } from '../i18n';
+import { assetUrl } from '../utils/assets';
 
 type AuthMode = 'login' | 'register' | 'recover';
+type AuthMethod = 'secure' | 'password';
 
 type AuthGateProps = {
   language: Language;
@@ -24,13 +26,114 @@ type AuthGateProps = {
 
 const REMEMBER_PREF_KEY = 'notoc.auth.remember-pref';
 
+function authCopy(language: Language) {
+  if (language === 'ru') {
+    return {
+      heroTitle: 'Добро пожаловать в NotOS',
+      heroText: 'Выберите защищенный вход через auth-файл или обычный вход по логину и паролю.',
+      secureMethod: 'Защищенный',
+      passwordMethod: 'Логин / пароль',
+      secureCaption: 'Auth-файл хранит ключ доступа локально и подходит для основного аккаунта.',
+      passwordCaption: 'Обычный способ: никнейм и пароль без выбора файла.',
+      loginLabel: 'Логин',
+      loginPlaceholder: 'например, neon_admin',
+      password: 'Пароль',
+      passwordPlaceholder: 'Введите пароль',
+      repeatPassword: 'Повтор пароля',
+      repeatPasswordPlaceholder: 'Повторите пароль',
+      email: 'Email',
+      emailPlaceholder: 'name@example.com',
+      createPassword: 'Придумайте пароль',
+      passwordLoginTitle: 'Вход по паролю',
+      passwordLoginHint: 'Введите логин и пароль, которые были указаны при обычной регистрации.',
+      secureRegisterTitle: 'Защищенная регистрация',
+      passwordRegisterTitle: 'Обычная регистрация',
+      secureRegisterHint: 'После создания аккаунта NotOS сохранит auth-файл и покажет recovery-ключ.',
+      passwordRegisterHint: 'Аккаунт будет открываться по никнейму и паролю. Auth-файл не потребуется.',
+      passwordAccountCreated: 'Аккаунт создан. Recovery-ключ показывается один раз; он нужен для восстановления доступа.',
+      passwordMismatch: 'Пароли не совпадают.',
+      signIn: 'Войти',
+      signingIn: 'Вход...',
+      createAccount: 'Создать аккаунт'
+    };
+  }
+
+  if (language === 'uk') {
+    return {
+      heroTitle: 'Ласкаво просимо до NotOS',
+      heroText: 'Оберіть захищений вхід через auth-файл або звичайний вхід за логіном і паролем.',
+      secureMethod: 'Захищений',
+      passwordMethod: 'Логін / пароль',
+      secureCaption: 'Auth-файл зберігає ключ доступу локально і підходить для основного акаунта.',
+      passwordCaption: 'Звичайний спосіб: нікнейм і пароль без вибору файла.',
+      loginLabel: 'Логін',
+      loginPlaceholder: 'наприклад, neon_admin',
+      password: 'Пароль',
+      passwordPlaceholder: 'Введіть пароль',
+      repeatPassword: 'Повтор пароля',
+      repeatPasswordPlaceholder: 'Повторіть пароль',
+      email: 'Email',
+      emailPlaceholder: 'name@example.com',
+      createPassword: 'Створіть пароль',
+      passwordLoginTitle: 'Вхід за паролем',
+      passwordLoginHint: 'Введіть логін і пароль, указані під час звичайної реєстрації.',
+      secureRegisterTitle: 'Захищена реєстрація',
+      passwordRegisterTitle: 'Звичайна реєстрація',
+      secureRegisterHint: 'Після створення акаунта NotOS збереже auth-файл і покаже recovery-ключ.',
+      passwordRegisterHint: 'Акаунт відкриватиметься за нікнеймом і паролем. Auth-файл не потрібен.',
+      passwordAccountCreated: 'Акаунт створено. Recovery-ключ показується один раз; він потрібен для відновлення доступу.',
+      passwordMismatch: 'Паролі не збігаються.',
+      signIn: 'Увійти',
+      signingIn: 'Вхід...',
+      createAccount: 'Створити акаунт'
+    };
+  }
+
+  return {
+    heroTitle: 'Welcome to NotOS',
+    heroText: 'Choose protected auth-file access or classic nickname and password sign-in.',
+    secureMethod: 'Protected',
+    passwordMethod: 'Login / password',
+    secureCaption: 'The auth file keeps your access key locally and is best for a primary account.',
+    passwordCaption: 'Classic access: nickname and password without choosing a file.',
+    loginLabel: 'Login',
+    loginPlaceholder: 'for example, neon_admin',
+    password: 'Password',
+    passwordPlaceholder: 'Enter password',
+    repeatPassword: 'Repeat password',
+    repeatPasswordPlaceholder: 'Repeat password',
+    email: 'Email',
+    emailPlaceholder: 'name@example.com',
+    createPassword: 'Create password',
+    passwordLoginTitle: 'Password sign-in',
+    passwordLoginHint: 'Enter the login and password used during classic registration.',
+    secureRegisterTitle: 'Protected registration',
+    passwordRegisterTitle: 'Classic registration',
+    secureRegisterHint: 'After creating the account, NotOS will save an auth file and show a recovery key.',
+    passwordRegisterHint: 'The account will open with nickname and password. No auth file is required.',
+    passwordAccountCreated: 'Account created. The recovery key is shown once and is needed to restore access.',
+    passwordMismatch: 'Passwords do not match.',
+    signIn: 'Sign in',
+    signingIn: 'Signing in...',
+    createAccount: 'Create account'
+  };
+}
+
 function getErrorMessage(error: unknown, language: Language) {
   return error instanceof Error ? error.message : t(language, 'unknownError');
 }
 
 export function AuthGate({ language, theme, onLanguageChange, onAuthenticated }: AuthGateProps) {
   const [mode, setMode] = useState<AuthMode>('login');
+  const [loginMethod, setLoginMethod] = useState<AuthMethod>('secure');
+  const [registerMethod, setRegisterMethod] = useState<AuthMethod>('secure');
   const [nickname, setNickname] = useState('');
+  const [loginName, setLoginName] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [registerLogin, setRegisterLogin] = useState('');
+  const [registerPassword, setRegisterPassword] = useState('');
+  const [registerPasswordRepeat, setRegisterPasswordRepeat] = useState('');
+  const [registerEmail, setRegisterEmail] = useState('');
   const [recoverNickname, setRecoverNickname] = useState('');
   const [recoveryKey, setRecoveryKey] = useState('');
   const [avatarData, setAvatarData] = useState(() => createGeneratedAvatar('NotOS'));
@@ -39,6 +142,8 @@ export function AuthGate({ language, theme, onLanguageChange, onAuthenticated }:
   const [busy, setBusy] = useState<AuthMode | null>(null);
   const [error, setError] = useState('');
   const [dragging, setDragging] = useState(false);
+  const [serverUrlDraft, setServerUrlDraft] = useState(() => getApiBaseUrl());
+  const [serverStatus, setServerStatus] = useState<'idle' | 'checking' | 'ok' | 'error'>('idle');
   const [remember, setRemember] = useState<boolean>(() => {
     try {
       const stored = localStorage.getItem(REMEMBER_PREF_KEY);
@@ -53,14 +158,39 @@ export function AuthGate({ language, theme, onLanguageChange, onAuthenticated }:
     try { localStorage.setItem(REMEMBER_PREF_KEY, next ? '1' : '0'); } catch { /* ignore */ }
   }
 
+  async function handleServerCheck() {
+    const normalized = setApiBaseUrl(serverUrlDraft);
+    setServerUrlDraft(normalized);
+    setServerStatus('checking');
+    setError('');
+    try {
+      await api.health();
+      setServerStatus('ok');
+    } catch (serverError) {
+      setServerStatus('error');
+      setError(getErrorMessage(serverError, language));
+    }
+  }
+
   useEffect(() => {
     if (!customAvatar) {
-      setAvatarData(createGeneratedAvatar(nickname || 'NotOS'));
+      const avatarSeed = registerMethod === 'password' ? registerLogin : nickname;
+      setAvatarData(createGeneratedAvatar(avatarSeed || 'NotOS'));
     }
-  }, [customAvatar, nickname]);
+  }, [customAvatar, nickname, registerLogin, registerMethod]);
 
   function switchMode(nextMode: AuthMode) {
     setMode(nextMode);
+    setError('');
+  }
+
+  function switchLoginMethod(nextMethod: AuthMethod) {
+    setLoginMethod(nextMethod);
+    setError('');
+  }
+
+  function switchRegisterMethod(nextMethod: AuthMethod) {
+    setRegisterMethod(nextMethod);
     setError('');
   }
 
@@ -106,16 +236,29 @@ export function AuthGate({ language, theme, onLanguageChange, onAuthenticated }:
     setError('');
 
     try {
-      const result = await api.register({ nickname, avatarData, language, theme });
-      const saveResult = await downloadAuthFile(result.authFile);
-      onAuthenticated(result, {
-        title: t(language, 'accountCreated'),
-        message: saveResult.canceled
-          ? t(language, 'accountCreatedCanceled')
-          : t(language, 'accountCreatedSaved', { path: saveResult.filePath }),
-        recoveryKey: result.recoveryKey,
-        authFile: result.authFile
-      }, { remember });
+      if (registerMethod === 'password') {
+        if (registerPassword !== registerPasswordRepeat) {
+          setError(copy.passwordMismatch);
+          return;
+        }
+        const result = await api.registerPassword({ login: registerLogin, email: registerEmail, password: registerPassword, avatarData, language, theme });
+        onAuthenticated(result, {
+          title: t(language, 'accountCreated'),
+          message: copy.passwordAccountCreated,
+          recoveryKey: result.recoveryKey
+        }, { remember });
+      } else {
+        const result = await api.register({ nickname, avatarData, language, theme });
+        const saveResult = await downloadAuthFile(result.authFile);
+        onAuthenticated(result, {
+          title: t(language, 'accountCreated'),
+          message: saveResult.canceled
+            ? t(language, 'accountCreatedCanceled')
+            : t(language, 'accountCreatedSaved', { path: saveResult.filePath }),
+          recoveryKey: result.recoveryKey,
+          authFile: result.authFile
+        }, { remember });
+      }
     } catch (registerError) {
       setError(getErrorMessage(registerError, language));
     } finally {
@@ -168,6 +311,21 @@ export function AuthGate({ language, theme, onLanguageChange, onAuthenticated }:
     }
   }
 
+  async function handlePasswordLogin(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setBusy('login');
+    setError('');
+
+    try {
+      const result = await api.loginPassword({ login: loginName, password: loginPassword });
+      onAuthenticated(result, undefined, { remember });
+    } catch (loginError) {
+      setError(getErrorMessage(loginError, language));
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function handleRecover(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setBusy('recover');
@@ -190,16 +348,18 @@ export function AuthGate({ language, theme, onLanguageChange, onAuthenticated }:
     }
   }
 
+  const copy = authCopy(language);
+
   return (
     <main className="auth-shell">
       <div className="auth-bg">
-        <div className="auth-bg-layer" style={{ backgroundImage: 'url("/1_OS.png")' }} />
-        <div className="auth-bg-layer" style={{ backgroundImage: 'url("/2_OS.png")' }} />
+        <div className="auth-bg-layer" style={{ backgroundImage: `url("${assetUrl('1_OS.png')}")` }} />
+        <div className="auth-bg-layer" style={{ backgroundImage: `url("${assetUrl('2_OS.png')}")` }} />
       </div>
       <section className="auth-panel">
         <div className="auth-header">
           <div className="brand-topline">
-            <div className="app-mark">N</div>
+            <img className="app-mark" src={assetUrl('Emoji/app-icon.png')} alt="" />
             <span>{t(language, 'appName')}</span>
           </div>
           <select className="compact-select" value={language} onChange={(event) => onLanguageChange(event.target.value as Language)}>
@@ -209,6 +369,44 @@ export function AuthGate({ language, theme, onLanguageChange, onAuthenticated }:
               </option>
             ))}
           </select>
+        </div>
+
+        <div className="auth-hero">
+          <h1>{copy.heroTitle}</h1>
+          <p>{copy.heroText}</p>
+        </div>
+
+        <div className="server-url-card">
+          <label className="field-label" htmlFor="server-url">
+            Server URL
+          </label>
+          <div className="server-url-row">
+            <input
+              id="server-url"
+              className="text-field"
+              value={serverUrlDraft}
+              placeholder="https://your-app.up.railway.app"
+              spellCheck={false}
+              onChange={(event) => {
+                setServerUrlDraft(event.target.value);
+                setServerStatus('idle');
+              }}
+              onBlur={() => {
+                const normalized = setApiBaseUrl(serverUrlDraft);
+                setServerUrlDraft(normalized);
+              }}
+            />
+            <button className="secondary-action" type="button" onClick={() => void handleServerCheck()}>
+              {serverStatus === 'checking' ? 'Checking...' : 'Test'}
+            </button>
+          </div>
+          <p className={serverStatus === 'ok' ? 'server-url-status ok' : serverStatus === 'error' ? 'server-url-status error' : 'server-url-status'}>
+            {serverStatus === 'ok'
+              ? 'Connected'
+              : serverStatus === 'error'
+                ? 'Cannot reach this server'
+                : 'Paste your Railway server URL here after deploy.'}
+          </p>
         </div>
 
         <div className="mode-switch" role="tablist" aria-label={t(language, 'settings')}>
@@ -227,52 +425,172 @@ export function AuthGate({ language, theme, onLanguageChange, onAuthenticated }:
 
         {mode === 'login' ? (
           <div className="login-stack">
-            <div
-              className={dragging ? 'drop-zone dragging' : 'drop-zone'}
-              onDragEnter={(event) => {
-                event.preventDefault();
-                setDragging(true);
-              }}
-              onDragOver={(event) => event.preventDefault()}
-              onDragLeave={(event) => {
-                event.preventDefault();
-                setDragging(false);
-              }}
-              onDrop={(event) => {
-                event.preventDefault();
-                void loginWithFile(event.dataTransfer.files[0]);
-              }}
-            >
-              <div className="file-glyph">AUTH</div>
-              <h2>{t(language, 'authTitle')}</h2>
-              <p>{t(language, 'authHint')}</p>
-              <input
-                id="auth-file"
-                className="hidden-file"
-                type="file"
-                accept=".json,.auth,application/json,application/vnd.notoc.auth+json"
-                onChange={(event) => void loginWithFile(event.currentTarget.files?.[0])}
-              />
-              <button className="primary-action" type="button" onClick={() => void handleChooseAuthFile()}>
-                {busy === 'login' ? t(language, 'checking') : t(language, 'chooseAuthFile')}
+            <div className="auth-method-switch" role="tablist" aria-label="Authentication method">
+              <button className={loginMethod === 'secure' ? 'auth-method active' : 'auth-method'} onClick={() => switchLoginMethod('secure')} type="button">
+                <strong>{copy.secureMethod}</strong>
+                <span>{copy.secureCaption}</span>
+              </button>
+              <button className={loginMethod === 'password' ? 'auth-method active' : 'auth-method'} onClick={() => switchLoginMethod('password')} type="button">
+                <strong>{copy.passwordMethod}</strong>
+                <span>{copy.passwordCaption}</span>
               </button>
             </div>
+
+            {loginMethod === 'secure' ? (
+              <div
+                className={dragging ? 'drop-zone dragging' : 'drop-zone'}
+                onDragEnter={(event) => {
+                  event.preventDefault();
+                  setDragging(true);
+                }}
+                onDragOver={(event) => event.preventDefault()}
+                onDragLeave={(event) => {
+                  event.preventDefault();
+                  setDragging(false);
+                }}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  void loginWithFile(event.dataTransfer.files[0]);
+                }}
+              >
+                <div className="file-glyph">AUTH</div>
+                <h2>{t(language, 'authTitle')}</h2>
+                <p>{t(language, 'authHint')}</p>
+                <input
+                  id="auth-file"
+                  className="hidden-file"
+                  type="file"
+                  accept=".json,.auth,application/json,application/vnd.notoc.auth+json"
+                  onChange={(event) => void loginWithFile(event.currentTarget.files?.[0])}
+                />
+                <button className="primary-action" type="button" onClick={() => void handleChooseAuthFile()}>
+                  {busy === 'login' ? t(language, 'checking') : t(language, 'chooseAuthFile')}
+                </button>
+              </div>
+            ) : (
+              <form className="form-stack auth-card" onSubmit={(event) => void handlePasswordLogin(event)}>
+                <div className="auth-card-heading">
+                  <h2>{copy.passwordLoginTitle}</h2>
+                  <p>{copy.passwordLoginHint}</p>
+                </div>
+                <label className="field-label" htmlFor="login-nickname">
+                  {copy.loginLabel}
+                </label>
+                <input
+                  id="login-nickname"
+                  className="text-field"
+                  value={loginName}
+                  maxLength={32}
+                  placeholder={copy.loginPlaceholder}
+                  onChange={(event) => setLoginName(event.target.value)}
+                />
+                <label className="field-label" htmlFor="login-password">
+                  {copy.password}
+                </label>
+                <input
+                  id="login-password"
+                  className="text-field"
+                  type="password"
+                  value={loginPassword}
+                  maxLength={128}
+                  placeholder={copy.passwordPlaceholder}
+                  onChange={(event) => setLoginPassword(event.target.value)}
+                />
+                <button className="primary-action wide" disabled={busy === 'login'} type="submit">
+                  {busy === 'login' ? copy.signingIn : copy.signIn}
+                </button>
+              </form>
+            )}
           </div>
         ) : null}
 
         {mode === 'register' ? (
           <form className="form-stack" onSubmit={(event) => void handleRegister(event)}>
-            <label className="field-label" htmlFor="nickname">
-              {t(language, 'nickname')}
-            </label>
-            <input
-              id="nickname"
-              className="text-field"
-              value={nickname}
-              maxLength={24}
-              placeholder={t(language, 'nicknamePlaceholder')}
-              onChange={(event) => setNickname(event.target.value)}
-            />
+            <div className="auth-method-switch" role="tablist" aria-label="Registration method">
+              <button className={registerMethod === 'secure' ? 'auth-method active' : 'auth-method'} onClick={() => switchRegisterMethod('secure')} type="button">
+                <strong>{copy.secureMethod}</strong>
+                <span>{copy.secureRegisterHint}</span>
+              </button>
+              <button className={registerMethod === 'password' ? 'auth-method active' : 'auth-method'} onClick={() => switchRegisterMethod('password')} type="button">
+                <strong>{copy.passwordMethod}</strong>
+                <span>{copy.passwordRegisterHint}</span>
+              </button>
+            </div>
+
+            <div className="auth-card-heading">
+              <h2>{registerMethod === 'secure' ? copy.secureRegisterTitle : copy.passwordRegisterTitle}</h2>
+            </div>
+
+            {registerMethod === 'secure' ? (
+              <>
+                <label className="field-label" htmlFor="nickname">
+                  {t(language, 'nickname')}
+                </label>
+                <input
+                  id="nickname"
+                  className="text-field"
+                  value={nickname}
+                  maxLength={24}
+                  placeholder={t(language, 'nicknamePlaceholder')}
+                  onChange={(event) => setNickname(event.target.value)}
+                />
+              </>
+            ) : (
+              <>
+                <label className="field-label" htmlFor="register-login">
+                  {copy.loginLabel}
+                </label>
+                <input
+                  id="register-login"
+                  className="text-field"
+                  value={registerLogin}
+                  maxLength={32}
+                  placeholder={copy.loginPlaceholder}
+                  onChange={(event) => setRegisterLogin(event.target.value)}
+                />
+
+                <label className="field-label" htmlFor="register-password">
+                  {copy.createPassword}
+                </label>
+                <input
+                  id="register-password"
+                  className="text-field"
+                  type="password"
+                  value={registerPassword}
+                  minLength={6}
+                  maxLength={128}
+                  placeholder={copy.passwordPlaceholder}
+                  onChange={(event) => setRegisterPassword(event.target.value)}
+                />
+
+                <label className="field-label" htmlFor="register-password-repeat">
+                  {copy.repeatPassword}
+                </label>
+                <input
+                  id="register-password-repeat"
+                  className="text-field"
+                  type="password"
+                  value={registerPasswordRepeat}
+                  minLength={6}
+                  maxLength={128}
+                  placeholder={copy.repeatPasswordPlaceholder}
+                  onChange={(event) => setRegisterPasswordRepeat(event.target.value)}
+                />
+
+                <label className="field-label" htmlFor="register-email">
+                  {copy.email}
+                </label>
+                <input
+                  id="register-email"
+                  className="text-field"
+                  type="email"
+                  value={registerEmail}
+                  maxLength={254}
+                  placeholder={copy.emailPlaceholder}
+                  onChange={(event) => setRegisterEmail(event.target.value)}
+                />
+              </>
+            )}
 
             <div className="avatar-row">
               <img className="avatar-preview" src={avatarData} alt={t(language, 'userAvatar')} />
@@ -295,7 +613,7 @@ export function AuthGate({ language, theme, onLanguageChange, onAuthenticated }:
             </div>
 
             <button className="primary-action wide" disabled={busy === 'register'} type="submit">
-              {busy === 'register' ? t(language, 'creating') : t(language, 'continue')}
+              {busy === 'register' ? t(language, 'creating') : copy.createAccount}
             </button>
           </form>
         ) : null}

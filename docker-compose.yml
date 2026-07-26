@@ -28,6 +28,11 @@ services:
       JWT_SECRET: change-me-development-jwt-secret
       AUTH_FILE_SECRET: change-me-development-auth-file-secret
       BCRYPT_ROUNDS: 10
+      GROQ_TRANSLATE_MODEL: llama-3.1-8b-instant
+      SPOTIFY_CLIENT_ID: ${SPOTIFY_CLIENT_ID:-}
+      SPOTIFY_CLIENT_SECRET: ${SPOTIFY_CLIENT_SECRET:-}
+      SPOTIFY_REDIRECT_URI: ${SPOTIFY_REDIRECT_URI:-http://localhost:4000/api/connections/spotify/callback}
+      RIOT_API_KEY: ${RIOT_API_KEY:-}
     ports:
       - "4000:4000"
     depends_on:

@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api/client';
-import type { AiChat, AiChatSummary, AiQuota, AiSettings, Language } from '../api/types';
+import type { AiChat, AiChatMessage, AiChatSummary, AiQuota, AiSettings, Language } from '../api/types';
 import { LOCALES, t, getSavedTimeFormat } from '../i18n';
 import { getMusicTracks } from '../music-library';
 import { formatMessageDate, shouldShowDateDivider } from '../utils/message-date';
@@ -12,8 +12,30 @@ import { WindowFrame } from './WindowFrame';
 
 type AiTab = 'chat' | 'persona';
 
+// Locally-persisted favorite AI chats (by chat id). Favoriting pins a chat to
+// the top of the list, mirroring the favorites available elsewhere in the app.
+const AI_FAVORITES_KEY = 'notoc.ai.favorites';
+
+function loadAiFavorites(): Set<string> {
+  try {
+    const raw = localStorage.getItem(AI_FAVORITES_KEY);
+    return raw ? new Set(JSON.parse(raw) as string[]) : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+function saveAiFavorites(favorites: Set<string>) {
+  try {
+    localStorage.setItem(AI_FAVORITES_KEY, JSON.stringify([...favorites]));
+  } catch {
+    /* ignore quota errors */
+  }
+}
+
 const DEFAULT_SETTINGS: AiSettings = {
   assistantName: 'NotAI',
+  assistantAvatarData: '',
   gender: 'neutral',
   persona: 'friendly',
   tone: 'balanced',
@@ -24,22 +46,52 @@ const DEFAULT_SETTINGS: AiSettings = {
   onboarded: false
 };
 
+function normalizeAiMessage(message: Partial<AiChatMessage> | null | undefined, index: number): AiChatMessage {
+  const role = message?.role === 'assistant' || message?.role === 'user' ? message.role : 'assistant';
+  const createdAt = typeof message?.createdAt === 'string' && !Number.isNaN(new Date(message.createdAt).getTime())
+    ? message.createdAt
+    : new Date().toISOString();
+  return {
+    id: typeof message?.id === 'string' && message.id ? message.id : `recovered-${index}`,
+    role,
+    content: typeof message?.content === 'string' ? message.content : '',
+    createdAt
+  };
+}
+
+function normalizeAiChat(chat: AiChat | null | undefined): AiChat {
+  return {
+    id: chat?.id ?? '',
+    title: chat?.title ?? 'New chat',
+    updatedAt: chat?.updatedAt ?? new Date().toISOString(),
+    messages: Array.isArray(chat?.messages) ? chat.messages.map(normalizeAiMessage) : []
+  };
+}
+
+function normalizeAiChatList(chats: AiChatSummary[] | undefined | null) {
+  return Array.isArray(chats) ? chats : [];
+}
+
 // Localized reset time (e.g. "today 14:00" style) for the quota panel.
 function formatResetTime(value: string, language: Language) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
   return new Intl.DateTimeFormat(LOCALES[language], {
     dateStyle: 'short',
     timeStyle: 'short',
     hour12: getSavedTimeFormat() === '12h'
-  }).format(new Date(value));
+  }).format(date);
 }
 
 // Localized HH:MM, honoring the user's 12h/24h (AM/PM) clock preference.
 function formatTime(value: string, language: Language) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
   return new Intl.DateTimeFormat(LOCALES[language], {
     hour: '2-digit',
     minute: '2-digit',
     hour12: getSavedTimeFormat() === '12h'
-  }).format(new Date(value));
+  }).format(date);
 }
 
 type AiChatWindowProps = {
@@ -91,6 +143,26 @@ export function AiChatWindow({
   // First-run onboarding: shown the very first time before a persona is set.
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [onboardingDraft, setOnboardingDraft] = useState<AiSettings>(DEFAULT_SETTINGS);
+  const [favorites, setFavorites] = useState<Set<string>>(loadAiFavorites);
+
+  function toggleFavorite(chatId: string) {
+    setFavorites((prev) => {
+      const next = new Set(prev);
+      if (next.has(chatId)) next.delete(chatId);
+      else next.add(chatId);
+      saveAiFavorites(next);
+      return next;
+    });
+  }
+
+  // Favorites float to the top; the rest keep their existing order.
+  const sortedChats = useMemo(() => {
+    return [...chats].sort((a, b) => {
+      const aFav = favorites.has(a.id) ? 1 : 0;
+      const bFav = favorites.has(b.id) ? 1 : 0;
+      return bFav - aFav;
+    });
+  }, [chats, favorites]);
 
   // Load persona settings + quota on mount; trigger onboarding if not done yet.
   useEffect(() => {
@@ -160,9 +232,10 @@ export function AiChatWindow({
     api.getAiChats(token)
       .then((result) => {
         if (!alive) return;
-        setChats(result.chats);
+        const nextChats = normalizeAiChatList(result.chats);
+        setChats(nextChats);
         setConfigured(result.configured);
-        if (result.chats.length > 0) void openChat(result.chats[0].id);
+        if (nextChats.length > 0) void openChat(nextChats[0].id);
       })
       .catch(() => { if (alive) setError(t(language, 'aiError')); });
     return () => { alive = false; };
@@ -177,7 +250,7 @@ export function AiChatWindow({
   async function refreshList() {
     try {
       const result = await api.getAiChats(token);
-      setChats(result.chats);
+      setChats(normalizeAiChatList(result.chats));
       setConfigured(result.configured);
     } catch {
       // ignore
@@ -188,7 +261,7 @@ export function AiChatWindow({
     setError('');
     try {
       const result = await api.getAiChat(token, chatId);
-      setActiveChat(result.chat);
+      setActiveChat(normalizeAiChat(result.chat));
     } catch {
       setError(t(language, 'aiError'));
     }
@@ -198,7 +271,7 @@ export function AiChatWindow({
     setError('');
     try {
       const result = await api.createAiChat(token);
-      setActiveChat(result.chat);
+      setActiveChat(normalizeAiChat(result.chat));
       await refreshList();
     } catch {
       setError(t(language, 'aiError'));
@@ -226,8 +299,8 @@ export function AiChatWindow({
     try {
       if (!chat) {
         const created = await api.createAiChat(token);
-        chat = created.chat;
-        setActiveChat(created.chat);
+        chat = normalizeAiChat(created.chat);
+        setActiveChat(chat);
       }
 
       // Optimistically show the user's message.
@@ -260,7 +333,7 @@ export function AiChatWindow({
         timeFormat,
         musicTracks
       });
-      setActiveChat(result.chat);
+      setActiveChat(normalizeAiChat(result.chat));
       if (result.quota) setQuota(result.quota);
       await refreshList();
     } catch (err) {
@@ -289,7 +362,8 @@ export function AiChatWindow({
       zIndex={zIndex}
       storageKey="ai-chat"
       defaultPosition={{ x: 160, y: 80 }}
-      minSize={{ width: 560, height: 420 }}
+      minSize={{ width: 760, height: 520 }}
+      defaultSize={{ width: 960, height: 680 }}
       onFocus={onFocus}
       onMinimize={onMinimize}
       onToggleMaximize={onToggleMaximize}
@@ -356,13 +430,32 @@ export function AiChatWindow({
             {chats.length === 0 ? (
               <div className="ai-chat-empty-list">{t(language, 'aiNoChats')}</div>
             ) : (
-              chats.map((chat) => (
+              sortedChats.map((chat) => {
+                const isFavorite = favorites.has(chat.id);
+                return (
                 <div
                   key={chat.id}
                   className={activeChat?.id === chat.id ? 'ai-chat-list-item active' : 'ai-chat-list-item'}
                   onClick={() => void openChat(chat.id)}
                 >
+                  {isFavorite ? <i className="pin-indicator ai-chat-fav-dot" /> : null}
                   <span className="ai-chat-list-title" title={chat.title}>{chat.title}</span>
+                  <button
+                    className={isFavorite ? 'ai-chat-fav active' : 'ai-chat-fav'}
+                    type="button"
+                    aria-pressed={isFavorite}
+                    aria-label={isFavorite ? t(language, 'aiFavoriteRemove') : t(language, 'aiFavoriteAdd')}
+                    title={isFavorite ? t(language, 'aiFavoriteRemove') : t(language, 'aiFavoriteAdd')}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      toggleFavorite(chat.id);
+                    }}
+                  >
+                    <svg viewBox="0 0 24 24" width={14} height={14} aria-hidden="true">
+                      <path d="M12 2.5l2.95 5.98 6.6.96-4.78 4.66 1.13 6.57L12 17.56l-5.9 3.11 1.13-6.57L2.45 9.44l6.6-.96L12 2.5z"
+                        fill={isFavorite ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
+                    </svg>
+                  </button>
                   <button
                     className="ai-chat-delete"
                     type="button"
@@ -373,10 +466,11 @@ export function AiChatWindow({
                       void deleteChat(chat.id);
                     }}
                   >
-                    ×
+                    x
                   </button>
                 </div>
-              ))
+                );
+              })
             )}
           </div>
         </aside>
@@ -482,7 +576,7 @@ export function AiChatWindow({
                 title={t(language, 'close')}
                 onClick={() => setShowQuota(false)}
               >
-                ×
+                x
               </button>
             </div>
             <QuotaPanel language={language} quota={quota} />

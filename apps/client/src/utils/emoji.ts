@@ -1,7 +1,18 @@
 const TWEMOJI_BASE = 'https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72';
 
+const emojiRe = /([\u{1F1E6}-\u{1F1FF}][\u{1F1E6}-\u{1F1FF}])|[\u{2600}-\u{27BF}]\uFE0F|(\p{Emoji_Presentation}|\p{Extended_Pictographic})(?:\uFE0F\u20E3?|\u200D(?:[\u{2600}-\u{27BF}]\uFE0F|\p{Emoji_Presentation}|\p{Extended_Pictographic}|\p{Emoji_Modifier_Base}\p{Emoji_Modifier})?)*/gu;
+
+function isSingleEmoji(value: string): boolean {
+  emojiRe.lastIndex = 0;
+  const match = emojiRe.exec(value);
+  const ok = Boolean(match && match.index === 0 && match[0].length === value.length);
+  emojiRe.lastIndex = 0;
+  return ok;
+}
+
 export function emojiToTwemojiUrl(emoji: string): string | null {
   if (!emoji) return null;
+  if (!isSingleEmoji(emoji)) return null;
   let codePoints = Array.from(emoji).map(c => c.codePointAt(0));
   if (codePoints.some(cp => cp === undefined)) return null;
   while (codePoints.length > 0 && codePoints[codePoints.length - 1] === 0xFE0F && codePoints.length > 1) {
@@ -10,8 +21,6 @@ export function emojiToTwemojiUrl(emoji: string): string | null {
   const hex = codePoints.map(cp => cp!.toString(16)).join('-');
   return `${TWEMOJI_BASE}/${hex}.png`;
 }
-
-const emojiRe = /([\u{1F1E6}-\u{1F1FF}][\u{1F1E6}-\u{1F1FF}])|[\u{2600}-\u{27BF}]\uFE0F|(\p{Emoji_Presentation}|\p{Extended_Pictographic})(?:\uFE0F\u20E3?|\u200D(?:[\u{2600}-\u{27BF}]\uFE0F|\p{Emoji_Presentation}|\p{Extended_Pictographic}|\p{Emoji_Modifier_Base}\p{Emoji_Modifier})?)*/gu;
 
 export function splitEmojiText(text: string): Array<{ type: 'emoji' | 'text'; value: string }> {
   const parts: Array<{ type: 'emoji' | 'text'; value: string }> = [];

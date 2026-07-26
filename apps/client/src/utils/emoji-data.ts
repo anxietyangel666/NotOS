@@ -254,3 +254,11 @@ export function getEmojiName(emoji: string): string {
 export function getEmojiId(emoji: string): string {
   return getEmojiName(emoji).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 }
+
+export function getAllEmojiItems(): EmojiItem[] {
+  return Object.entries(EMOJI_NAMES).map(([emoji, name]) => ({
+    emoji,
+    name,
+    id: name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+  }));
+}

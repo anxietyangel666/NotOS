@@ -3,6 +3,7 @@ import type { DragEvent, MouseEvent as ReactMouseEvent } from 'react';
 import { createPortal } from 'react-dom';
 import type { Language } from '../api/types';
 import { t } from '../i18n';
+import type { PresenceStatus } from '../utils/user-status';
 
 // A single entry shown in the rail (a friend or a group). The host maps its own
 // domain object (PublicUser / Group) into this shape.
@@ -10,8 +11,9 @@ export type RailItem = {
   id: string;
   name: string;
   avatar: string;
-  // Optional presence dot ('online' | 'offline' | null = no dot).
-  presence?: 'online' | 'offline' | null;
+  // Optional presence dot. Custom statuses are used for the current user.
+  presence?: 'online' | 'offline' | PresenceStatus | null;
+  typing?: boolean;
   unread?: number;
   active?: boolean;
   onOpen: () => void;
@@ -421,8 +423,14 @@ export function RailFolders({ scope, language, items, previewCount = 4 }: RailFo
           item.onContextMenu?.(e);
         }}
       >
-        <img src={item.avatar} alt="" draggable={false} />
-        {item.presence ? <i className={item.presence === 'online' ? 'presence-dot online' : 'presence-dot'} /> : null}
+        <span className="messenger-rail-avatar-media">
+          <img src={item.avatar} alt="" draggable={false} />
+          {item.presence ? (
+            <i className={`${item.presence === 'online' ? 'presence-dot online' : item.presence === 'offline' ? 'presence-dot' : `presence-dot status-${item.presence}`}${item.typing ? ' typing' : ''}`}>
+              {item.typing ? <span className="typing-presence-dots" aria-hidden="true"><b /><b /><b /></span> : null}
+            </i>
+          ) : null}
+        </span>
         {item.unread && item.unread > 0 ? <span className="unread-badge avatar-badge">{item.unread > 9 ? '9+' : item.unread}</span> : null}
       </button>
     );
@@ -431,7 +439,6 @@ export function RailFolders({ scope, language, items, previewCount = 4 }: RailFo
   function renderFolder(folder: RailFolder, open: boolean, nextEntryId: string | 'end') {
     const members = folder.itemIds.map((id) => itemMap.get(id)).filter(Boolean) as RailItem[];
     const preview = members.slice(0, previewCount);
-    const overflow = members.length - preview.length;
     const totalUnread = members.reduce((sum, m) => sum + (m.unread ?? 0), 0);
     const mergeHere = dropTarget?.type === 'merge' && dropTarget.targetId === folder.id;
     return (
@@ -480,7 +487,6 @@ export function RailFolders({ scope, language, items, previewCount = 4 }: RailFo
         ) : (
           <span className="messenger-rail-folder-grid">
             {preview.map((m) => <img key={m.id} src={m.avatar || FALLBACK_FOLDER_AVATAR} alt="" draggable={false} />)}
-            {overflow > 0 ? <span className="messenger-rail-folder-more">+{overflow}</span> : null}
           </span>
         )}
         {totalUnread > 0 && !open ? <span className="unread-badge avatar-badge">{totalUnread > 9 ? '9+' : totalUnread}</span> : null}

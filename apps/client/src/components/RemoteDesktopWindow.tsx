@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent } from 'react';
 import { api } from '../api/client';
-import { cacheUser } from '../api/user-cache';
+import { cacheUser, getOrFetchUser } from '../api/user-cache';
 import { useSocket } from '../hooks/use-socket';
+import { UserName } from './UserName';
 import type { Language, PublicAudioTrack, PublicUser, Theme } from '../api/types';
 import { LOCALES, t } from '../i18n';
 import { useClock } from '../hooks/use-clock';
@@ -151,6 +152,26 @@ export function RemoteDesktopWindow({ token, language, owner: initialOwner, curr
 
   useEffect(() => { setOwner(initialOwner); }, [initialOwner]);
 
+  // The `owner` prop is frequently a "lite" snapshot (taken from a message
+  // author / member list) where the heavy base64 blobs — `wallpaper` and
+  // `pinnedCards` — are blanked out to keep list payloads small. Without this
+  // the remote desktop shows only the fallback gradient and no pinned image /
+  // video cards. Fetch the full public profile on open and merge it in so the
+  // background and cards render for everyone viewing the desktop.
+  useEffect(() => {
+    let alive = true;
+    void getOrFetchUser(initialOwner.id, (id) => api.getPublicUser(token, id).then((r) => r.user))
+      .then((full) => {
+        if (!alive) return;
+        cacheUser(full);
+        setOwner((current) => (current.id === full.id ? { ...current, ...full } : current));
+      })
+      .catch(() => {
+        /* keep the lite snapshot if the full fetch fails */
+      });
+    return () => { alive = false; };
+  }, [initialOwner.id, token]);
+
   useEffect(() => {
     let alive = true;
     function loadTracks() {
@@ -200,10 +221,11 @@ export function RemoteDesktopWindow({ token, language, owner: initialOwner, curr
       if (payload.userId === initialOwner.id) void loadTracks();
     }
     function onUserChanged(payload: { user: PublicUser }) {
-      if (payload.user.id === initialOwner.id) {
-        cacheUser(payload.user);
-        setOwner((current) => ({ ...current, pinnedCards: Array.isArray(payload.user.pinnedCards) ? payload.user.pinnedCards : [] }));
-      }
+      if (payload.user.id !== initialOwner.id) return;
+      cacheUser(payload.user);
+      // Merge the whole updated user so live changes to the wallpaper, theme,
+      // accent colour and pinned cards are all reflected, not just the cards.
+      setOwner((current) => ({ ...current, ...payload.user }));
     }
 
     // Start watching immediately (in case 'system:ready' already fired).
@@ -310,7 +332,6 @@ export function RemoteDesktopWindow({ token, language, owner: initialOwner, curr
     <WindowFrame
       language={language}
       title={t(language, 'remoteDesktopOf', { name: owner.nickname })}
-      eyebrow={t(language, 'desktopSnapshot')}
       className="remote-desktop-window"
       style={remoteThemeStyle(owner)}
       maximized={maximized}
@@ -318,6 +339,7 @@ export function RemoteDesktopWindow({ token, language, owner: initialOwner, curr
       zIndex={zIndex}
       defaultPosition={{ x: Math.max(30, window.innerWidth / 2 - 430), y: 84 }}
       minSize={{ width: 720, height: 500 }}
+      defaultSize={{ width: 920, height: 610 }}
       storageKey="remote-desktop"
       onFocus={onFocus}
       onClose={onClose}
@@ -375,7 +397,21 @@ export function RemoteDesktopWindow({ token, language, owner: initialOwner, curr
         />
 
         <aside className="remote-desktop-profile-info">
-          <strong>{t(language, 'appDesktop', { name: owner.nickname })}</strong>
+          <strong>
+            {(() => {
+              // Render the owner name styled (Name Style) inside the translated
+              // "{name} Desktop" phrase by splitting around the {name} token.
+              const template = t(language, 'appDesktop', { name: '\u0000' });
+              const [before, after = ''] = template.split('\u0000');
+              return (
+                <>
+                  {before}
+                  <UserName user={owner} />
+                  {after}
+                </>
+              );
+            })()}
+          </strong>
           <span>{t(language, 'accountSince', { date: formatUserSince(owner.createdAt, language) })}</span>
           <div className="desktop-player remote-player">
             <audio
@@ -408,7 +444,7 @@ export function RemoteDesktopWindow({ token, language, owner: initialOwner, curr
         <footer className="taskbar remote-taskbar">
           <button className="profile-start remote-profile-start" type="button">
             <img src={owner.avatarData} alt="" />
-            <span>{owner.nickname}</span>
+            <UserName user={owner} />
           </button>
           <div className="taskbar-spacer" />
           <div className="taskbar-clock" aria-label="Time">
