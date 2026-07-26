@@ -2686,6 +2686,10 @@ export function MessengerWindow({
     messageDraftRef.current = value;
     setMessageDraft(value);
     setMessageDraftSyncKey((current) => current + 1);
+    // Keep the slash-hint panel in sync: programmatic draft changes (sending,
+    // picking a hint, switching chats) must close/update it just like typing.
+    const slashPrefix = value.startsWith('/') && !value.includes(' ') ? value : '';
+    setComposerSlashPrefix((current) => (current === slashPrefix ? current : slashPrefix));
   }
 
   function emitTyping(recipientId: string, typing: boolean) {
