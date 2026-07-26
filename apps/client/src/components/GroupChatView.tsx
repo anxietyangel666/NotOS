@@ -3784,11 +3784,9 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
                         </span>
                       </div>
                       {activeChannelObj?.type === 'feed' ? (
-                        <button type="button" className="feed-comment-bar" onClick={() => openThreadView(message)}>
+                        <button type="button" className="feed-comment-bar" onClick={() => commentOnFeedPost(message)}>
                           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-                          {(message.threadCount ?? 0) > 0
-                            ? `${t(language, 'feedComments')} (${message.threadCount})`
-                            : t(language, 'feedLeaveComment')}
+                          {t(language, 'feedLeaveComment')}
                         </button>
                       ) : null}
                     </>
@@ -4237,7 +4235,7 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
               <MenuReplyIcon />
             </button>
           ) : null}
-          {!messageMenu.message.deletedAt && !messageMenu.message.threadRootId && (activeChannelObj?.type === 'text' || activeChannelObj?.type === 'feed') ? (
+          {!messageMenu.message.deletedAt && !messageMenu.message.threadRootId && activeChannelObj?.type === 'text' ? (
             <button type="button" className="context-menu-action" onClick={() => { openThreadView(messageMenu.message); setMessageMenu(null); }}>
               <span className="context-menu-action-text">{t(language, 'replyInThread')}</span>
               <MenuReplyIcon />

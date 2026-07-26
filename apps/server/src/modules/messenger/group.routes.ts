@@ -940,9 +940,19 @@ export function createGroupRouter(io: Server) {
       const canManageChannels = perms?.isOwner || perms?.permissions?.includes('ManageChannels');
       if (!canManageChannels) throw new HttpError(403, 'Not allowed to manage channels', 'CHANNEL_CREATE_FORBIDDEN');
       const members = await listGroupMembers(groupId);
-      // Feeds are a single Telegram-style channel now. Comments live in
-      // threads, so the old companion chat channel (and the folder wrapping
-      // the pair) is no longer created; legacy feeds keep theirs.
+      // A feed comes with its companion discussion channel (Telegram-style):
+      // posts mirror into it and comments are replies to the mirror copy.
+      if (input.type === 'feed') {
+        const created = await createGroupFeed(groupId, input.name);
+        const folder = toPublicGroupFolder(created.folder);
+        const channels = [toPublicGroupChannel(created.feed), toPublicGroupChannel(created.chat)];
+        await Promise.all(members.flatMap((m) => [
+          io.to(m.user_id).emit('messenger:groupFolderCreated', { folder }),
+          ...channels.map((channel) => io.to(m.user_id).emit('messenger:groupChannelCreated', { channel }))
+        ]));
+        res.json({ channel: channels[0], channels, folder });
+        return;
+      }
       const channel = toPublicGroupChannel(await createGroupChannel(groupId, input.name, input.type ?? 'text'));
       await Promise.all(members.map((m) => io.to(m.user_id).emit('messenger:groupChannelCreated', { channel })));
       res.json({ channel });
@@ -1667,9 +1677,32 @@ export function createGroupRouter(io: Server) {
         await emitFeedLinkedMessages('messenger:groupMessageUpdated', groupId, message.id);
       })().catch(() => undefined);
 
-      // Feed posts are no longer mirrored into a companion chat channel —
-      // comments happen in the post's thread. Legacy mirror copies remain
-      // readable, they just stop growing.
+      let feedChatChannelId = channel.feed_chat_channel_id;
+      if (channel.type === 'feed' && !feedChatChannelId) {
+        const chatChannel = await pool.query<{ id: string }>(
+          'SELECT id FROM group_channels WHERE group_id = $1 AND feed_parent_channel_id = $2 ORDER BY position ASC, created_at ASC LIMIT 1',
+          [groupId, channel.id]
+        );
+        feedChatChannelId = chatChannel.rows[0]?.id ?? null;
+      }
+      if (channel.type === 'feed' && feedChatChannelId) {
+        const mirror = await createGroupMessage(
+          req.auth.userId,
+          groupId,
+          feedChatChannelId,
+          input.body,
+          input.image,
+          null,
+          senderGroup,
+          input.mediaItems,
+          { sourceId: message.id, mirror: true }
+        );
+        if (mirror) {
+          const publicMirror = toPublicGroupMessage(mirror);
+          const chatMemberIds = await visibleMemberIdsForChannel(groupId, feedChatChannelId);
+          for (const id of chatMemberIds) io.to(id).emit('messenger:groupMessage', { message: publicMirror });
+        }
+      }
       const mentionTokens = extractMentionTokens(input.body);
       if (mentionTokens.size === 0) {
         res.json({ message: publicMessage });

@@ -22581,7 +22581,6 @@ div.settings-music-row {
   grid-template-columns: minmax(0, 1fr);
   width: 100%;
   max-width: min(580px, 100%);
-  margin-inline: auto;
   padding: 8px 16px;
 }
 
@@ -22600,10 +22599,10 @@ div.settings-music-row {
   max-width: 100%;
   padding: 0;
   overflow: hidden;
-  border: 1px solid var(--border, rgba(0,0,0,0.1));
+  border: 1px solid var(--line-strong);
   border-radius: 14px;
-  background: var(--panel, #fff);
-  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+  background: var(--lighter);
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.1);
 }
 
 .feed-post-head {
