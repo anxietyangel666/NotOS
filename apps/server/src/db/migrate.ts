@@ -494,6 +494,17 @@ export async function migrate() {
     ALTER TABLE group_messages
       ADD COLUMN IF NOT EXISTS transcript TEXT;
 
+    -- Scheduled feed posts: invisible until the sweeper releases them.
+    ALTER TABLE group_messages
+      ADD COLUMN IF NOT EXISTS scheduled_at TIMESTAMPTZ;
+    CREATE INDEX IF NOT EXISTS group_messages_scheduled_idx
+      ON group_messages (scheduled_at)
+      WHERE scheduled_at IS NOT NULL AND deleted_at IS NULL;
+
+    -- Feed channels: "sign posts" shows which admin published each post.
+    ALTER TABLE group_channels
+      ADD COLUMN IF NOT EXISTS sign_posts BOOLEAN NOT NULL DEFAULT FALSE;
+
     -- Threads: replies posted "in thread" reference the root message and are
     -- hidden from the main channel flow.
     ALTER TABLE group_messages

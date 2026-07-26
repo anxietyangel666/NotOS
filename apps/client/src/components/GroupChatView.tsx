@@ -160,6 +160,9 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
   const [threadViewSending, setThreadViewSending] = useState(false);
   const threadViewRootRef = useRef<string | null>(null);
   const [pollModalOpen, setPollModalOpen] = useState(false);
+  // Feed extras: who-viewed popover and the pinned-post banner.
+  const [feedViewers, setFeedViewers] = useState<{ messageId: string; users: PublicUser[] | null } | null>(null);
+  const [feedPinnedFetched, setFeedPinnedFetched] = useState<GroupMessage | null>(null);
   const [groupMembersHidden, setGroupMembersHidden] = useState(false);
   const [messageMenu, setMessageMenu] = useState<{ x: number; y: number; message: GroupMessage; imageSrc?: string } | null>(null);
   const [channelMenu, setChannelMenu] = useState<{ x: number; y: number; kind: 'channel' | 'folder'; id: string; name: string } | null>(null);
@@ -316,7 +319,7 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
   const [defaultRoleId, setDefaultRoleId] = useState<string | null>(group.defaultRoleId ?? null);
   const [everyonePermissions, setEveryonePermissions] = useState<string[]>(group.everyonePermissions ?? []);
   const [defaultRoleMenuOpen, setDefaultRoleMenuOpen] = useState(false);
-  const [settingsTab, setSettingsTab] = useState<'overview' | 'invite' | 'roles' | 'members' | 'customization'>('overview');
+  const [settingsTab, setSettingsTab] = useState<'overview' | 'invite' | 'roles' | 'members' | 'customization' | 'posts'>('overview');
   // Server profile customization: admin-defined categories, the caller's
   // selected option ids, whether a required onboarding flow is pending, and
   // whether the member-facing "Настроить профиль" modal is open.
@@ -1781,7 +1784,7 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
     return uploaded;
   }
 
-  async function sendMessage(attachmentOverride?: { dataUrl: string; name: string; spoiler: boolean }) {
+  async function sendMessage(attachmentOverride?: { dataUrl: string; name: string; spoiler: boolean }, sendOptions?: { scheduledAt?: string }) {
     if (!activeChannel) return;
     if (!canSendInActiveChannel || activeNsfwBlocked || activeSlowmodeRemainingMs > 0) return;
     const voiceOverride = Boolean(attachmentOverride && isVoiceAttachment(attachmentOverride.dataUrl, attachmentOverride.name));
@@ -1853,7 +1856,13 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
       const mediaItems = !recordingOverride && uploadedBatchImages.length > 1
         ? uploadedBatchImages.map((item) => ({ dataUrl: item.dataUrl, name: item.name, spoiler: item.spoiler }))
         : undefined;
-      const payload = await api.sendGroupMessage(token, group.id, body, activeChannel, uploadedImage && !mediaItems ? { dataUrl: uploadedImage.dataUrl, name: uploadedImage.name, spoiler: uploadedImage.spoiler } : undefined, replyTo, activeSenderGroup?.id ?? null, mediaItems);
+      const payload = await api.sendGroupMessage(token, group.id, body, activeChannel, uploadedImage && !mediaItems ? { dataUrl: uploadedImage.dataUrl, name: uploadedImage.name, spoiler: uploadedImage.spoiler } : undefined, replyTo, activeSenderGroup?.id ?? null, mediaItems, { scheduledAt: sendOptions?.scheduledAt });
+      // Scheduled posts are parked server-side: drop the optimistic bubble;
+      // the admin manages them from the Posts tab in group settings.
+      if (sendOptions?.scheduledAt) {
+        setMessages((current) => current.filter((message) => message.clientKey !== clientKey));
+        return;
+      }
       setMessages((current) => {
         // If the socket broadcast already delivered the real message, drop our
         // placeholder. Otherwise replace it in place, preserving clientKey.
@@ -2297,8 +2306,17 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
   function forwardMessage(message: GroupMessage) {
     setMessageMenu(null);
     setReactionPicker(null);
-    const text = forwardBodyForMessage(message);
+    let text = forwardBodyForMessage(message);
     if (!text && !message.imageData) return;
+    // Forwarded feed posts carry a link back to the channel, so the recipient
+    // can open (or join) the source — Telegram-style repost growth.
+    const isFeedRelated = message.feedMirror || channels.find((c) => c.id === message.channelId)?.type === 'feed';
+    if (isFeedRelated && group.inviteCode) {
+      const feedChannelId = message.feedMirror
+        ? channels.find((c) => c.feedChatChannelId === message.channelId)?.id ?? message.channelId
+        : message.channelId;
+      text = `${text}${text ? '\n' : ''}${buildGroupInviteLink(group.inviteCode, feedChannelId)}`;
+    }
     const senderName = message.senderGroup?.name ?? knownSenders.get(message.senderId)?.nickname ?? message.senderId.slice(0, 8);
     onForwardMessage?.({
       body: text,
@@ -3134,8 +3152,36 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
   // Close the thread panel when the user switches channel or group.
   useEffect(() => {
     closeThreadView();
+    setFeedViewers(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeChannel, group.id]);
+
+  // Pinned-post banner for feed channels: fetch the latest pinned post; loaded
+  // messages are also scanned so a fresh pin appears without a refetch.
+  useEffect(() => {
+    setFeedPinnedFetched(null);
+    if (!activeChannel || activeChannelObj?.type !== 'feed') return;
+    let alive = true;
+    api.getGroupPinnedMessages(token, group.id, activeChannel, { limit: 1 })
+      .then((payload) => { if (alive) setFeedPinnedFetched(payload.messages[0] ?? null); })
+      .catch(() => undefined);
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeChannel, group.id, token, activeChannelObj?.type]);
+
+  const feedPinnedBanner = useMemo(() => {
+    if (activeChannelObj?.type !== 'feed') return null;
+    const loadedPinned = messages
+      .filter((message) => message.pinnedAt && !message.deletedAt)
+      .sort((a, b) => new Date(b.pinnedAt ?? 0).getTime() - new Date(a.pinnedAt ?? 0).getTime())[0] ?? null;
+    if (loadedPinned && feedPinnedFetched) {
+      return new Date(loadedPinned.pinnedAt ?? 0).getTime() >= new Date(feedPinnedFetched.pinnedAt ?? 0).getTime()
+        ? loadedPinned
+        : feedPinnedFetched;
+    }
+    const candidate = loadedPinned ?? feedPinnedFetched;
+    return candidate && !candidate.deletedAt && candidate.pinnedAt ? candidate : null;
+  }, [messages, feedPinnedFetched, activeChannelObj?.type]);
 
   const messengerSettingsTarget = typeof document !== 'undefined'
     ? document.querySelector<HTMLElement>('.messenger-window .messenger-shell') ?? document.body
@@ -3306,6 +3352,48 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
             </button>
           </div>
         </header>
+        {feedPinnedBanner ? (
+          <button
+            type="button"
+            className="feed-pinned-banner"
+            onClick={() => {
+              const el = document.getElementById('gmsg-' + feedPinnedBanner.id);
+              const tNode = threadRef.current;
+              if (el && tNode) {
+                const tRect = tNode.getBoundingClientRect();
+                const elRect = el.getBoundingClientRect();
+                tNode.scrollBy({ top: elRect.top - tRect.top - 80, behavior: 'smooth' });
+                el.classList.add('message-jump-highlight');
+                window.setTimeout(() => el.classList.remove('message-jump-highlight'), 1200);
+              }
+            }}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/></svg>
+            <span className="feed-pinned-label">{t(language, 'pinnedPost')}</span>
+            <span className="feed-pinned-body">{feedPinnedBanner.body || '📷'}</span>
+          </button>
+        ) : null}
+        {feedViewers ? (
+          <div className="messenger-inline-modal schedule-modal-layer" onClick={() => setFeedViewers(null)}>
+            <div className="schedule-modal feed-viewers-modal" onClick={(event) => event.stopPropagation()}>
+              <h3>{t(language, 'feedViewers')}</h3>
+              {feedViewers.users === null ? (
+                <p className="scheduled-view-empty">…</p>
+              ) : feedViewers.users.length === 0 ? (
+                <p className="scheduled-view-empty">—</p>
+              ) : (
+                <div className="feed-viewers-list">
+                  {feedViewers.users.map((viewer) => (
+                    <div key={viewer.id} className="feed-viewer-row">
+                      <img src={viewer.avatarData} alt="" />
+                      <UserName user={viewer} />
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        ) : null}
         {threadViewRootId ? (
           <div className="thread-panel">
             <div className="thread-panel-head">
@@ -3555,7 +3643,12 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
                   {isFeedPost ? (
                     <div className="feed-post-head">
                       <img src={group.avatarData} alt="" />
-                      <strong>{group.name}</strong>
+                      <span className="feed-post-head-names">
+                        <strong>{group.name}</strong>
+                        {channels.find((c) => c.id === message.channelId)?.signPosts ? (
+                          <span className="feed-post-author">{knownSenders.get(message.senderId)?.nickname ?? ''}</span>
+                        ) : null}
+                      </span>
                       <time>{formatShortDate(message.createdAt)}, {formatTime(message.createdAt)}</time>
                     </div>
                   ) : null}
@@ -3778,15 +3871,30 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
                   {!message.deletedAt && isFeedPost ? (
                     <>
                       <div className="feed-post-footer">
-                        <span className="feed-post-stats" title={`${message.viewCount ?? 0}`}>
+                        <button
+                          type="button"
+                          className="feed-post-stats"
+                          disabled={!canUseGroupIdentity}
+                          title={`${message.viewCount ?? 0}`}
+                          onClick={() => {
+                            if (!canUseGroupIdentity) return;
+                            const targetId = message.feedSourceId ?? message.id;
+                            setFeedViewers({ messageId: targetId, users: null });
+                            api.getGroupMessageViewers(token, group.id, targetId)
+                              .then((payload) => setFeedViewers((current) => (current?.messageId === targetId ? { messageId: targetId, users: payload.viewers } : current)))
+                              .catch(() => setFeedViewers(null));
+                          }}
+                        >
                           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg>
                           {message.viewCount ?? 0}
-                        </span>
+                        </button>
                       </div>
                       {activeChannelObj?.type === 'feed' ? (
                         <button type="button" className="feed-comment-bar" onClick={() => commentOnFeedPost(message)}>
                           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-                          {t(language, 'feedLeaveComment')}
+                          {(message.commentCount ?? 0) > 0
+                            ? `${t(language, 'feedComments')} (${message.commentCount})`
+                            : t(language, 'feedLeaveComment')}
                         </button>
                       ) : null}
                     </>
@@ -4054,7 +4162,7 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
                 <MenuTranslateIcon />
               </button>
             ) : null}
-            {activeChannel && activeChannelObj?.type === 'text' && canCreatePollsInActiveChannel ? (
+            {activeChannel && (activeChannelObj?.type === 'text' ? canCreatePollsInActiveChannel : activeChannelObj?.type === 'feed' && canUseGroupIdentity) ? (
               <>
                 <hr className="context-menu-divider" />
                 <button
@@ -4068,6 +4176,32 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
                   <span className="context-menu-action-text">{t(language, 'createPoll')}</span>
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true"><path d="M6 20V10M12 20V4M18 20v-7"/></svg>
                 </button>
+              </>
+            ) : null}
+            {activeChannelObj?.type === 'feed' && canUseGroupIdentity && draft.trim() ? (
+              <>
+                <hr className="context-menu-divider" />
+                {([
+                  [3600, t(language, 'sendInOneHour')],
+                  [10800, t(language, 'sendInThreeHours')],
+                  [86400, t(language, 'sendTomorrowMorning')]
+                ] as const).map(([seconds, label]) => (
+                  <button
+                    key={seconds}
+                    type="button"
+                    className="context-menu-action"
+                    onClick={() => {
+                      setComposerMenu(null);
+                      const when = seconds === 86400
+                        ? (() => { const d = new Date(); d.setDate(d.getDate() + 1); d.setHours(9, 0, 0, 0); return d; })()
+                        : new Date(Date.now() + seconds * 1000);
+                      void sendMessage(undefined, { scheduledAt: when.toISOString() });
+                    }}
+                  >
+                    <span className="context-menu-action-text">{t(language, 'publishLater')}: {label}</span>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+                  </button>
+                ))}
               </>
             ) : null}
           </div>,

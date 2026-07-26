@@ -2,8 +2,10 @@
 // customization tabs). Extracted verbatim from GroupChatView.tsx — all state
 // and handlers still live in the parent and arrive via props; this component
 // is purely presentational.
-import { type Dispatch, type ReactNode, type SetStateAction } from 'react';
+import { useEffect, useState, type Dispatch, type ReactNode, type SetStateAction } from 'react';
 import { createPortal } from 'react-dom';
+import { api } from '../../api/client';
+import type { GroupMessage } from '../../api/types';
 import type { CustomCategory, Group, GroupChannel, GroupInvite, GroupMember, GroupRole, Language, NamePlate, PublicUser } from '../../api/types';
 import { nameplateToCss } from '../../api/types';
 import { t } from '../../i18n';
@@ -16,7 +18,142 @@ import { UserName } from '../UserName';
 import { EVERYONE_ROLE_ID, MENTIONABLE_PERMISSION, MENTION_EVERYONE_PERMISSION } from './constants';
 import { rolePermissionLabel } from './permissions';
 
-export type GroupSettingsTab = 'overview' | 'invite' | 'roles' | 'members' | 'customization';
+export type GroupSettingsTab = 'overview' | 'invite' | 'roles' | 'members' | 'customization' | 'posts';
+
+// Admin toolbox for feed channels: per-channel stats, the sign-posts toggle
+// and the scheduled-posts queue. Self-contained (fetches its own data).
+function FeedPostsTools({
+  token,
+  language,
+  group,
+  channels,
+  formatShortDate
+}: {
+  token: string;
+  language: Language;
+  group: Group;
+  channels: GroupChannel[];
+  formatShortDate: (value: string) => string;
+}) {
+  const feedChannels = channels.filter((channel) => channel.type === 'feed');
+  const [channelId, setChannelId] = useState<string | null>(feedChannels[0]?.id ?? null);
+  const [stats, setStats] = useState<{ totals: { posts: number; views: number; reactions: number; comments: number }; top: Array<{ message: GroupMessage; views: number }> } | null>(null);
+  const [scheduled, setScheduled] = useState<GroupMessage[]>([]);
+  const selected = feedChannels.find((channel) => channel.id === channelId) ?? null;
+
+  useEffect(() => {
+    api.getGroupScheduledPosts(token, group.id)
+      .then((payload) => setScheduled(payload.messages))
+      .catch(() => undefined);
+  }, [token, group.id]);
+
+  useEffect(() => {
+    setStats(null);
+    if (!channelId) return;
+    let alive = true;
+    api.getFeedChannelStats(token, group.id, channelId)
+      .then((payload) => { if (alive) setStats(payload); })
+      .catch(() => undefined);
+    return () => { alive = false; };
+  }, [token, group.id, channelId]);
+
+  if (feedChannels.length === 0) {
+    return <div className="group-settings-section"><p className="scheduled-view-empty">{t(language, 'noFeedChannels')}</p></div>;
+  }
+
+  return (
+    <div className="group-settings-section feed-tools-section">
+      <div className="feed-tools-topbar">
+        <h3>{t(language, 'tabPosts')}</h3>
+        <select
+          className="messenger-input feed-tools-select"
+          value={channelId ?? ''}
+          onChange={(event) => setChannelId(event.target.value)}
+          aria-label={t(language, 'selectFeedChannel')}
+        >
+          {feedChannels.map((channel) => (
+            <option key={channel.id} value={channel.id}>{channel.name}</option>
+          ))}
+        </select>
+      </div>
+
+      {selected ? (
+        <label className="settings-toggle-row feed-tools-sign">
+          <input
+            type="checkbox"
+            checked={Boolean(selected.signPosts)}
+            onChange={(event) => {
+              void api.updateGroupChannel(token, group.id, selected.id, { signPosts: event.target.checked });
+            }}
+          />
+          <span>{t(language, 'signPostsLabel')}</span>
+        </label>
+      ) : null}
+
+      {stats ? (
+        <>
+          <div className="feed-tools-stats">
+            {([
+              [t(language, 'statsPosts'), stats.totals.posts],
+              [t(language, 'statsViews'), stats.totals.views],
+              [t(language, 'statsReactions'), stats.totals.reactions],
+              [t(language, 'statsComments'), stats.totals.comments]
+            ] as const).map(([label, value]) => (
+              <div key={label} className="feed-tools-stat">
+                <strong>{value}</strong>
+                <span>{label}</span>
+              </div>
+            ))}
+          </div>
+          {stats.top.length > 0 ? (
+            <>
+              <h4 className="feed-tools-subtitle">{t(language, 'statsTop')}</h4>
+              <div className="feed-tools-top">
+                {stats.top.map((entry) => (
+                  <div key={entry.message.id} className="feed-tools-top-row">
+                    <span className="feed-tools-top-views">
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg>
+                      {entry.views}
+                    </span>
+                    <span className="feed-tools-top-body">{entry.message.body || '📷'}</span>
+                    <time>{formatShortDate(entry.message.createdAt)}</time>
+                  </div>
+                ))}
+              </div>
+            </>
+          ) : null}
+        </>
+      ) : null}
+
+      <h4 className="feed-tools-subtitle">{t(language, 'scheduledPosts')}</h4>
+      {scheduled.length === 0 ? (
+        <p className="scheduled-view-empty">{t(language, 'noScheduledPosts')}</p>
+      ) : (
+        <div className="feed-tools-scheduled">
+          {scheduled.map((message) => (
+            <div key={message.id} className="feed-tools-top-row">
+              <span className="feed-tools-top-views">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+                {message.scheduledAt ? formatShortDate(message.scheduledAt) : ''}
+              </span>
+              <span className="feed-tools-top-body">{message.body || '📷'}</span>
+              <button
+                type="button"
+                className="scheduled-view-cancel"
+                aria-label={t(language, 'cancel')}
+                onClick={() => {
+                  api.cancelGroupScheduledPost(token, group.id, message.id)
+                    .then(() => setScheduled((current) => current.filter((m) => m.id !== message.id)))
+                    .catch(() => undefined);
+                }}
+              >✕</button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 type GroupSettingsModalProps = {
   token: string;
@@ -267,6 +404,11 @@ export function GroupSettingsModal({
             {canManageRoles ? (
               <button type="button" className={'group-settings-tab' + (settingsTab === 'customization' ? ' active' : '')} onClick={() => setSettingsTab('customization')}>
                 {t(language, 'customization')}
+              </button>
+            ) : null}
+            {canManageRoles ? (
+              <button type="button" className={'group-settings-tab' + (settingsTab === 'posts' ? ' active' : '')} onClick={() => setSettingsTab('posts')}>
+                {t(language, 'tabPosts')}
               </button>
             ) : null}
           </div>
@@ -1044,6 +1186,10 @@ export function GroupSettingsModal({
                 })}
               </div>
             </div>
+          ) : null}
+
+          {settingsTab === 'posts' && canManageRoles ? (
+            <FeedPostsTools token={token} language={language} group={group} channels={channels} formatShortDate={formatShortDate} />
           ) : null}
 
           {settingsTab === 'customization' && canManageRoles ? (

@@ -325,6 +325,8 @@ export type GroupMessage = {
   linkPreview?: LinkPreview | null;
   threadRootId?: string | null;
   threadCount?: number;
+  commentCount?: number;
+  scheduledAt?: string | null;
   createdAt: string;
   // Client-only: see MessengerMessage.clientKey/pending.
   clientKey?: string;
@@ -374,6 +376,7 @@ export type GroupChannel = {
   nsfw: boolean;
   bitrate: number;
   feedChatChannelId: string | null;
+  signPosts?: boolean;
   feedParentChannelId: string | null;
   requiredRoleIds: string[];
 };

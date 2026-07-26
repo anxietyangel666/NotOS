@@ -639,6 +639,27 @@ export const api = {
       { token, method: 'POST', body: {} }
     );
   },
+  getGroupScheduledPosts(token: string, groupId: string) {
+    return request<{ messages: GroupMessage[] }>(`/api/messenger/groups/${encodeURIComponent(groupId)}/scheduled`, { token });
+  },
+  cancelGroupScheduledPost(token: string, groupId: string, messageId: string) {
+    return request<{ message: GroupMessage }>(
+      `/api/messenger/groups/${encodeURIComponent(groupId)}/scheduled/${encodeURIComponent(messageId)}`,
+      { token, method: 'DELETE' }
+    );
+  },
+  getFeedChannelStats(token: string, groupId: string, channelId: string) {
+    return request<{ totals: { posts: number; views: number; reactions: number; comments: number }; top: Array<{ message: GroupMessage; views: number }> }>(
+      `/api/messenger/groups/${encodeURIComponent(groupId)}/channels/${encodeURIComponent(channelId)}/stats`,
+      { token }
+    );
+  },
+  getGroupMessageViewers(token: string, groupId: string, messageId: string) {
+    return request<{ viewers: PublicUser[] }>(
+      `/api/messenger/groups/${encodeURIComponent(groupId)}/messages/${encodeURIComponent(messageId)}/viewers`,
+      { token }
+    );
+  },
   getGroupThread(token: string, groupId: string, messageId: string) {
     return request<{ root: GroupMessage; messages: GroupMessage[] }>(
       `/api/messenger/groups/${encodeURIComponent(groupId)}/messages/${encodeURIComponent(messageId)}/thread`,
@@ -695,12 +716,12 @@ export const api = {
       customization: { categories: CustomCategory[]; selectedOptionIds: string[]; onboardingRequired: boolean };
     }>(`/api/messenger/groups/${encodeURIComponent(groupId)}/bootstrap`, { token });
   },
-  sendGroupMessage(token: string, groupId: string, body: string, channelId?: string, image?: { dataUrl: string; name?: string; spoiler?: boolean }, replyTo?: string, senderGroupId?: string | null, mediaItems?: Array<{ dataUrl: string; name?: string | null; spoiler?: boolean }>) {
+  sendGroupMessage(token: string, groupId: string, body: string, channelId?: string, image?: { dataUrl: string; name?: string; spoiler?: boolean }, replyTo?: string, senderGroupId?: string | null, mediaItems?: Array<{ dataUrl: string; name?: string | null; spoiler?: boolean }>, options?: { scheduledAt?: string }) {
     const mediaUpload = Boolean(image?.dataUrl.startsWith('data:audio/') || image?.dataUrl.startsWith('data:video/'));
     return request<{ message: GroupMessage }>(`/api/messenger/groups/${encodeURIComponent(groupId)}/messages`, {
       method: 'POST',
       token,
-      body: { body, channelId, image, mediaItems, replyTo, senderGroupId: senderGroupId || undefined },
+      body: { body, channelId, image, mediaItems, replyTo, senderGroupId: senderGroupId || undefined, scheduledAt: options?.scheduledAt },
       label: mediaUpload ? 'messenger.sendGroupMedia' : undefined,
       slowRequestMs: mediaUpload ? 3000 : undefined
     });
@@ -718,7 +739,7 @@ export const api = {
       method: 'DELETE', token
     });
   },
-  updateGroupChannel(token: string, groupId: string, channelId: string, data: { name?: string; position?: number; folderId?: string | null; userLimit?: number | null; topic?: string; slowmodeSeconds?: number; nsfw?: boolean; bitrate?: number }) {
+  updateGroupChannel(token: string, groupId: string, channelId: string, data: { name?: string; position?: number; folderId?: string | null; userLimit?: number | null; topic?: string; slowmodeSeconds?: number; nsfw?: boolean; bitrate?: number; signPosts?: boolean }) {
     return request<{ channel: GroupChannel }>(`/api/messenger/groups/${encodeURIComponent(groupId)}/channels/${encodeURIComponent(channelId)}`, {
       method: 'PATCH', token, body: data
     });

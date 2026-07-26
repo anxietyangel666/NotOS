@@ -30,6 +30,11 @@ import {
   listGroupConversationPreviews,
   listGroupMessages,
   listThreadMessages,
+  listScheduledGroupPosts,
+  cancelScheduledGroupPost,
+  sweepDueGroupPosts,
+  getFeedChannelStats,
+  listMessageViewers,
   listGroupPinnedMessages,
   listGroupMediaMessages,
   markGroupMessagesViewed,
@@ -393,7 +398,9 @@ const groupMessageSchema = z.object({
   image: z.preprocess((value) => (value === null ? undefined : value), chatImageSchema.optional()),
   mediaItems: z.preprocess((value) => (value === null ? undefined : value), chatMediaItemsSchema.optional()),
   replyTo: z.string().uuid().optional(),
-  senderGroupId: z.string().uuid().optional()
+  senderGroupId: z.string().uuid().optional(),
+  // Feed posts only: publish later instead of now.
+  scheduledAt: z.string().datetime().optional()
 }).refine((value) => value.body.length > 0 || Boolean(value.image) || Boolean(value.mediaItems?.length), {
   message: 'Message body or image is required'
 });
@@ -410,6 +417,28 @@ const editGroupMessageSchema = z.object({
 const reactionSchema = z.object({
   emoji: z.string().trim().min(1).max(4096)
 });
+
+// Publishes due scheduled feed posts once a minute. Mirror copies are not
+// created for released posts — comments reply to the canonical message id, so
+// the discussion flow keeps working without them.
+export function startGroupScheduledSweeper(io: Server) {
+  const timer = setInterval(async () => {
+    try {
+      const due = await sweepDueGroupPosts();
+      for (const record of due) {
+        if (!record.channel_id) continue;
+        const message = toPublicGroupMessage(record);
+        const memberIds = await listGroupMemberIds(record.group_id);
+        for (const id of memberIds) io.to(id).emit('messenger:groupMessage', { message });
+        io.to(record.sender_id).emit('messenger:groupScheduledSent', { message });
+      }
+    } catch (error) {
+      console.error('Scheduled group post sweep failed', error);
+    }
+  }, 60_000);
+  timer.unref();
+  return timer;
+}
 
 export function createGroupRouter(io: Server) {
   const router = Router();
@@ -989,7 +1018,8 @@ export function createGroupRouter(io: Server) {
         topic: z.string().trim().max(1024).optional(),
         slowmodeSeconds: z.number().int().min(0).max(21600).optional(),
         nsfw: z.boolean().optional(),
-        bitrate: z.number().int().min(8000).max(384000).optional()
+        bitrate: z.number().int().min(8000).max(384000).optional(),
+        signPosts: z.boolean().optional()
       }).parse(req.body);
       if (!(await isGroupMember(groupId, req.auth.userId))) throw new HttpError(403, 'Not a member', 'NOT_GROUP_MEMBER');
       await requireChannelPermission(groupId, channelId, req.auth.userId, 'ManageChannel', 'CHANNEL_UPDATE_FORBIDDEN');
@@ -1654,6 +1684,25 @@ export function createGroupRouter(io: Server) {
         if (gameBody) input.body = gameBody;
       }
 
+      // Scheduled feed posts: park invisibly, the sweeper publishes later.
+      if (input.scheduledAt) {
+        if (channel.type !== 'feed') throw new HttpError(400, 'Only feed posts can be scheduled', 'INVALID_SCHEDULE');
+        const when = new Date(input.scheduledAt);
+        const deltaMs = when.getTime() - Date.now();
+        if (!Number.isFinite(when.getTime()) || deltaMs < 30_000 || deltaMs > 30 * 24 * 3600 * 1000) {
+          throw new HttpError(400, 'Scheduled time must be between 30 seconds and 30 days from now', 'INVALID_SCHEDULE');
+        }
+        const parked = await createGroupMessage(
+          req.auth.userId, groupId, input.channelId, input.body, input.image, input.replyTo,
+          senderGroup, input.mediaItems, undefined, null, when
+        );
+        if (!parked) throw new HttpError(403, 'Cannot send message', 'GROUP_SEND_FORBIDDEN');
+        const parkedPublic = toPublicGroupMessage(parked);
+        io.to(req.auth.userId).emit('messenger:groupScheduledCreated', { message: parkedPublic });
+        res.json({ message: parkedPublic });
+        return;
+      }
+
       const message = await createGroupMessage(req.auth.userId, groupId, input.channelId, input.body, input.image, input.replyTo, senderGroup, input.mediaItems);
       if (!message) throw new HttpError(403, 'Cannot send message', 'GROUP_SEND_FORBIDDEN');
 
@@ -1908,6 +1957,66 @@ export function createGroupRouter(io: Server) {
     })
   );
 
+  async function requireFeedAdmin(groupId: string, userId: string) {
+    const perms = await getMemberPermissions(groupId, userId);
+    const allowed = Boolean(perms?.isOwner || perms?.permissions?.some((permission) => FEED_PUBLISH_PERMISSIONS.includes(permission)));
+    if (!allowed) throw new HttpError(403, 'Feed admin permission required', 'FEED_ADMIN_FORBIDDEN');
+  }
+
+  // ── Scheduled feed posts (admin) ───────────────────────────────────────────
+  router.get(
+    '/groups/:groupId/scheduled',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      await requireFeedAdmin(groupId, req.auth.userId);
+      const rows = await listScheduledGroupPosts(groupId);
+      res.json({ messages: rows.map((row) => toPublicGroupMessage(row)) });
+    })
+  );
+
+  router.delete(
+    '/groups/:groupId/scheduled/:messageId',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      const messageId = z.string().uuid().parse(req.params.messageId);
+      await requireFeedAdmin(groupId, req.auth.userId);
+      const cancelled = await cancelScheduledGroupPost(messageId, groupId);
+      if (!cancelled) throw new HttpError(404, 'Scheduled post not found', 'SCHEDULED_NOT_FOUND');
+      res.json({ message: toPublicGroupMessage(cancelled) });
+    })
+  );
+
+  // ── Feed channel analytics (admin) ─────────────────────────────────────────
+  router.get(
+    '/groups/:groupId/channels/:channelId/stats',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      const channelId = z.string().uuid().parse(req.params.channelId);
+      await requireFeedAdmin(groupId, req.auth.userId);
+      const stats = await getFeedChannelStats(groupId, channelId);
+      res.json({
+        totals: stats.totals,
+        top: stats.top.map((row) => ({ message: toPublicGroupMessage(row), views: Number(row.views ?? 0) }))
+      });
+    })
+  );
+
+  // ── Who viewed a post (admin) ──────────────────────────────────────────────
+  router.get(
+    '/groups/:groupId/messages/:messageId/viewers',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      const messageId = z.string().uuid().parse(req.params.messageId);
+      await requireFeedAdmin(groupId, req.auth.userId);
+      const viewers = await listMessageViewers(messageId);
+      res.json({ viewers: viewers.map(toPublicUserLite) });
+    })
+  );
+
   // Group poll: requires the CreatePolls channel permission, then posts a
   // [poll:<id>] marker message into the channel.
   router.post(
@@ -1922,9 +2031,16 @@ export function createGroupRouter(io: Server) {
         multi: z.boolean().optional()
       }).parse(req.body ?? {});
 
-      await requireChannelPermission(groupId, channelId, req.auth.userId, 'ViewChannel', 'CHANNEL_VIEW_FORBIDDEN');
-      await requireChannelPermission(groupId, channelId, req.auth.userId, 'SendMessages', 'GROUP_SEND_FORBIDDEN');
-      await requireChannelPermission(groupId, channelId, req.auth.userId, 'CreatePolls', 'CREATE_POLLS_FORBIDDEN');
+      const { channel: pollChannel } = await requireChannelPermission(groupId, channelId, req.auth.userId, 'ViewChannel', 'CHANNEL_VIEW_FORBIDDEN');
+      // Feed channels are admin-published: polls there follow the same gate
+      // instead of the per-channel CreatePolls permission members hold by
+      // default.
+      if (pollChannel.type === 'feed') {
+        await requireFeedAdmin(groupId, req.auth.userId);
+      } else {
+        await requireChannelPermission(groupId, channelId, req.auth.userId, 'SendMessages', 'GROUP_SEND_FORBIDDEN');
+        await requireChannelPermission(groupId, channelId, req.auth.userId, 'CreatePolls', 'CREATE_POLLS_FORBIDDEN');
+      }
 
       const poll = await createPoll(req.auth.userId, input.question, input.options, Boolean(input.multi), {
         type: 'group', groupId, channelId

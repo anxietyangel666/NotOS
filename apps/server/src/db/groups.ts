@@ -67,6 +67,7 @@ export type GroupChannelRecord = {
   bitrate: number;
   feed_chat_channel_id: string | null;
   feed_parent_channel_id: string | null;
+  sign_posts: boolean;
   created_at: Date;
 };
 
@@ -101,6 +102,8 @@ export type GroupMessageRecord = {
   view_count?: number;
   thread_root_id: string | null;
   thread_count?: number;
+  comment_count?: number;
+  scheduled_at: Date | null;
   link_preview: { url: string; title: string; description: string; imageUrl: string; siteName: string } | null;
   created_at: Date;
 };
@@ -152,6 +155,8 @@ export type PublicGroupChannel = {
   bitrate: number;
   feedChatChannelId: string | null;
   feedParentChannelId: string | null;
+  // Feed channels: show which admin published each post.
+  signPosts: boolean;
   // Role ids that gate visibility. Empty array = visible to everyone.
   requiredRoleIds: string[];
 };
@@ -220,6 +225,8 @@ export type PublicGroupMessage = {
   linkPreview: { url: string; title: string; description: string; imageUrl: string; siteName: string } | null;
   threadRootId: string | null;
   threadCount: number;
+  commentCount: number;
+  scheduledAt: string | null;
   createdAt: string;
 };
 
@@ -280,6 +287,8 @@ export function toPublicGroupMessage(message: GroupMessageRecord, reactions: Gro
     linkPreview: message.deleted_at ? null : message.link_preview ?? null,
     threadRootId: message.thread_root_id ?? null,
     threadCount: Number(message.thread_count ?? 0),
+    commentCount: Number(message.comment_count ?? 0),
+    scheduledAt: message.scheduled_at?.toISOString() ?? null,
     createdAt: message.created_at.toISOString()
   };
 }
@@ -1054,7 +1063,7 @@ export async function deleteGroupChannel(channelId: string, groupId: string) {
 export async function updateGroupChannel(
   channelId: string,
   groupId: string,
-  updates: { name?: string; position?: number; folderId?: string | null; userLimit?: number | null; topic?: string; slowmodeSeconds?: number; nsfw?: boolean; bitrate?: number }
+  updates: { name?: string; position?: number; folderId?: string | null; userLimit?: number | null; topic?: string; slowmodeSeconds?: number; nsfw?: boolean; bitrate?: number; signPosts?: boolean }
 ) {
   const setClauses: string[] = [];
   const values: unknown[] = [];
@@ -1068,6 +1077,7 @@ export async function updateGroupChannel(
   if (updates.slowmodeSeconds !== undefined) { setClauses.push(`slowmode_seconds = $${paramIdx++}`); values.push(updates.slowmodeSeconds); }
   if (updates.nsfw !== undefined) { setClauses.push(`nsfw = $${paramIdx++}`); values.push(updates.nsfw); }
   if (updates.bitrate !== undefined) { setClauses.push(`bitrate = $${paramIdx++}`); values.push(updates.bitrate); }
+  if (updates.signPosts !== undefined) { setClauses.push(`sign_posts = $${paramIdx++}`); values.push(updates.signPosts); }
 
   if (setClauses.length === 0) return null;
 
@@ -1313,12 +1323,19 @@ export async function listGroupMessages(
           SELECT COUNT(*)::int
           FROM group_messages tr
           WHERE tr.thread_root_id = gm.id AND tr.deleted_at IS NULL
-        ) AS thread_count
+        ) AS thread_count,
+        (
+          SELECT COUNT(*)::int
+          FROM group_messages c
+          JOIN group_messages mirror ON c.reply_to = mirror.id
+          WHERE mirror.feed_source_id = gm.id AND c.deleted_at IS NULL
+        ) AS comment_count
       FROM group_messages gm
       WHERE gm.group_id = $1
         AND gm.channel_id = $2
         AND gm.deleted_at IS NULL
         AND gm.thread_root_id IS NULL
+        AND gm.scheduled_at IS NULL
         ${cursorClause}
       ORDER BY gm.created_at DESC, gm.id DESC
       LIMIT ${limitParam}
@@ -1413,7 +1430,8 @@ export async function createGroupMessage(
   senderGroup?: { id: string; name: string; avatarData: string } | null,
   mediaItems?: Array<{ dataUrl: string; name?: string | null; spoiler?: boolean }>,
   feed?: { sourceId?: string | null; mirror?: boolean },
-  threadRootId?: string | null
+  threadRootId?: string | null,
+  scheduledAt?: Date | null
 ) {
   const member = await isGroupMember(groupId, senderId);
   if (!member) return null;
@@ -1426,9 +1444,9 @@ export async function createGroupMessage(
       INSERT INTO group_messages (
         id, group_id, channel_id, sender_id,
         sender_group_id, sender_group_name, sender_group_avatar_data,
-        body, image_data, image_name, image_spoiler, media_items, reply_to, feed_source_id, feed_mirror, thread_root_id
+        body, image_data, image_name, image_spoiler, media_items, reply_to, feed_source_id, feed_mirror, thread_root_id, scheduled_at
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14, $15, $16)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14, $15, $16, $17)
       RETURNING *
     `,
     [
@@ -1447,11 +1465,95 @@ export async function createGroupMessage(
       replyTo ?? null,
       feed?.sourceId ?? null,
       Boolean(feed?.mirror),
-      threadRootId ?? null
+      threadRootId ?? null,
+      scheduledAt ?? null
     ]
   );
 
   return result.rows[0];
+}
+
+// ---- Scheduled feed posts ----
+export async function listScheduledGroupPosts(groupId: string): Promise<GroupMessageRecord[]> {
+  const result = await pool.query<GroupMessageRecord>(
+    `
+      SELECT * FROM group_messages
+      WHERE group_id = $1 AND scheduled_at IS NOT NULL AND deleted_at IS NULL
+      ORDER BY scheduled_at ASC
+      LIMIT 100
+    `,
+    [groupId]
+  );
+  return result.rows;
+}
+
+export async function cancelScheduledGroupPost(messageId: string, groupId: string) {
+  const result = await pool.query<GroupMessageRecord>(
+    'DELETE FROM group_messages WHERE id = $1 AND group_id = $2 AND scheduled_at IS NOT NULL RETURNING *',
+    [messageId, groupId]
+  );
+  return result.rows[0] ?? null;
+}
+
+// Releases due scheduled posts so they become live messages.
+export async function sweepDueGroupPosts(): Promise<GroupMessageRecord[]> {
+  const result = await pool.query<GroupMessageRecord>(
+    `
+      UPDATE group_messages
+      SET scheduled_at = NULL, created_at = NOW()
+      WHERE scheduled_at IS NOT NULL AND scheduled_at <= NOW() AND deleted_at IS NULL
+      RETURNING *
+    `
+  );
+  return result.rows;
+}
+
+// ---- Feed analytics for admins ----
+export async function getFeedChannelStats(groupId: string, channelId: string) {
+  const totals = await pool.query<{ posts: number; views: number; reactions: number; comments: number }>(
+    `
+      SELECT
+        COUNT(*)::int AS posts,
+        COALESCE(SUM((SELECT COUNT(*) FROM group_message_views v WHERE v.message_id = gm.id)), 0)::int AS views,
+        COALESCE(SUM((SELECT COUNT(*) FROM group_message_reactions r WHERE r.message_id = gm.id)), 0)::int AS reactions,
+        COALESCE(SUM((
+          SELECT COUNT(*) FROM group_messages c
+          JOIN group_messages mirror ON c.reply_to = mirror.id
+          WHERE mirror.feed_source_id = gm.id AND c.deleted_at IS NULL
+        )), 0)::int AS comments
+      FROM group_messages gm
+      WHERE gm.group_id = $1 AND gm.channel_id = $2 AND gm.deleted_at IS NULL AND gm.scheduled_at IS NULL
+    `,
+    [groupId, channelId]
+  );
+  const top = await pool.query<GroupMessageRecord & { views: number }>(
+    `
+      SELECT gm.*,
+        (SELECT COUNT(*)::int FROM group_message_views v WHERE v.message_id = gm.id) AS views
+      FROM group_messages gm
+      WHERE gm.group_id = $1 AND gm.channel_id = $2 AND gm.deleted_at IS NULL AND gm.scheduled_at IS NULL
+      ORDER BY views DESC, gm.created_at DESC
+      LIMIT 5
+    `,
+    [groupId, channelId]
+  );
+  return { totals: totals.rows[0], top: top.rows };
+}
+
+// Who saw a specific post (admin-facing).
+export async function listMessageViewers(messageId: string): Promise<UserRecord[]> {
+  const result = await pool.query<UserRecord>(
+    `
+      SELECT ${liteUserColumns('users')}
+      FROM group_message_views v
+      JOIN users ON users.id = v.user_id
+      WHERE v.message_id = $1
+      ORDER BY v.created_at DESC
+      LIMIT 200
+    `,
+    [messageId]
+  );
+  return result.rows;
 }
 
 // All replies of a thread, oldest first.
@@ -1526,6 +1628,7 @@ export function toPublicGroupChannel(channel: GroupChannelRecord, requiredRoleId
     bitrate: channel.bitrate ?? 64000,
     feedChatChannelId: channel.feed_chat_channel_id ?? null,
     feedParentChannelId: channel.feed_parent_channel_id ?? null,
+    signPosts: Boolean(channel.sign_posts),
     requiredRoleIds
   };
 }
