@@ -2,9 +2,93 @@
 // /8ball, /pick). The full result is baked into the marker by the server, so
 // this component parses locally and never fetches — rendering is instant and
 // the reveal animation is pure CSS.
-import { useMemo } from 'react';
+import { useMemo, type CSSProperties } from 'react';
 import type { Language } from '../api/types';
 import { t } from '../i18n';
+
+// ── Real 3D dice and coins ───────────────────────────────────────────────────
+// A CSS cube / coin flipped by compositor-only transform keyframes that land
+// on the server-rolled result. The final orientation is passed via CSS vars.
+
+const PIPS: Record<number, Array<[number, number]>> = {
+  1: [[50, 50]],
+  2: [[30, 30], [70, 70]],
+  3: [[28, 28], [50, 50], [72, 72]],
+  4: [[30, 30], [70, 30], [30, 70], [70, 70]],
+  5: [[30, 30], [70, 30], [50, 50], [30, 70], [70, 70]],
+  6: [[32, 26], [32, 50], [32, 74], [68, 26], [68, 50], [68, 74]]
+};
+
+function DieFacePips({ value }: { value: number }) {
+  return (
+    <svg viewBox="0 0 100 100" aria-hidden="true">
+      {PIPS[value].map(([x, y], index) => <circle key={index} cx={x} cy={y} r="10.5" />)}
+    </svg>
+  );
+}
+
+// Cube rotation that brings the rolled face to the front.
+const DIE_ORIENTATION: Record<number, [number, number]> = {
+  1: [0, 0],
+  2: [-90, 0],
+  3: [0, -90],
+  4: [0, 90],
+  5: [90, 0],
+  6: [0, 180]
+};
+
+function Die3D({ value, delayMs }: { value: number; delayMs: number }) {
+  const [rx, ry] = DIE_ORIENTATION[value] ?? [0, 0];
+  return (
+    <span
+      className="die3d-scene"
+      style={{ '--fx': `${rx}deg`, '--fy': `${ry}deg`, '--delay': `${delayMs}ms` } as CSSProperties}
+    >
+      <span className="die3d">
+        {[1, 2, 3, 4, 5, 6].map((face) => (
+          <span key={face} className={`die3d-face die3d-face-${face}`}>
+            <DieFacePips value={face} />
+          </span>
+        ))}
+      </span>
+    </span>
+  );
+}
+
+function CoinFace({ side }: { side: 'heads' | 'tails' }) {
+  return (
+    <svg viewBox="0 0 100 100" aria-hidden="true">
+      <circle cx="50" cy="50" r="48" className="coin3d-rim" />
+      <circle cx="50" cy="50" r="47" className="coin3d-ridge" strokeDasharray="2.4 2.8" />
+      <circle cx="50" cy="50" r="37" className="coin3d-inner" />
+      {side === 'heads' ? (
+        // Radiating star emblem for heads.
+        <g className="coin3d-emblem">
+          <path d="M50 22l6.5 17.5L74 42l-14 11 5 18-15-10.5L35 71l5-18-14-11 17.5-2.5z" />
+        </g>
+      ) : (
+        // Wreathed "1" for tails.
+        <g className="coin3d-emblem">
+          <path d="M46 30l10-5v50h-9V38l-7 3z" />
+          <path d="M28 62c2 8 6 12 10 14M72 62c-2 8-6 12-10 14" fill="none" strokeWidth="4" strokeLinecap="round" className="coin3d-wreath" />
+        </g>
+      )}
+    </svg>
+  );
+}
+
+function Coin3D({ result, delayMs }: { result: 'heads' | 'tails'; delayMs: number }) {
+  // Five full spins, plus a half turn when tails must face the viewer.
+  const finalY = result === 'heads' ? 1800 : 1980;
+  return (
+    <span className="coin3d-scene" style={{ '--fy': `${finalY}deg`, '--delay': `${delayMs}ms` } as CSSProperties}>
+      <span className="coin3d">
+        <span className="coin3d-face coin3d-front"><CoinFace side="heads" /></span>
+        <span className="coin3d-face coin3d-back"><CoinFace side="tails" /></span>
+      </span>
+    </span>
+  );
+}
 
 const GAME_MARKER_RE = /^\[game:(roll|coin|8ball|pick):([A-Za-z0-9_-]+)\]$/;
 
@@ -69,17 +153,24 @@ export function GameEmbed({ game, language }: { game: GamePayload; language: Lan
         );
       }
       const rolls = game.rolls ?? [];
+      // Six-sided dice tumble as real 3D cubes; exotic dice keep number chips.
+      const realDice = game.sides === 6;
       return (
         <>
           <div className="game-embed-head">
-            <span className="game-embed-icon game-reveal" aria-hidden="true">🎲</span>
             <strong>{rolls.length}d{game.sides}</strong>
           </div>
-          <div className="game-embed-dice game-reveal-late">
-            {rolls.map((roll, index) => <span key={index} className="game-die">{roll}</span>)}
-          </div>
+          {realDice ? (
+            <div className="game-embed-dice3d">
+              {rolls.map((roll, index) => <Die3D key={index} value={roll} delayMs={index * 160} />)}
+            </div>
+          ) : (
+            <div className="game-embed-dice game-reveal-late">
+              {rolls.map((roll, index) => <span key={index} className="game-die">{roll}</span>)}
+            </div>
+          )}
           {rolls.length > 1 ? (
-            <div className="game-embed-footer">{t(language, 'gameTotal')}: <strong>{game.total}</strong></div>
+            <div className="game-embed-footer game-footer-after-roll">{t(language, 'gameTotal')}: <strong>{game.total}</strong></div>
           ) : null}
         </>
       );
@@ -87,8 +178,11 @@ export function GameEmbed({ game, language }: { game: GamePayload; language: Lan
     if (game.kind === 'coin') {
       return (
         <>
-          <div className="game-embed-head"><span className="game-embed-icon game-flip" aria-hidden="true">🪙</span><strong>{t(language, 'gameCoin')}</strong></div>
-          <div className="game-embed-result game-reveal-late">
+          <div className="game-embed-head"><strong>{t(language, 'gameCoin')}</strong></div>
+          <div className="game-embed-coins">
+            {game.flips.map((flip, index) => <Coin3D key={index} result={flip} delayMs={index * 220} />)}
+          </div>
+          <div className="game-embed-result game-footer-after-flip">
             {game.flips.map((flip) => t(language, flip === 'heads' ? 'coinHeads' : 'coinTails')).join(' · ')}
           </div>
         </>
