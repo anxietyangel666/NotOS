@@ -187,6 +187,16 @@ function broadcastLobby(io: Server) {
   io.to('watch:lobby').emit('watch:lobby', { rooms: list });
 }
 
+// All users currently inside any Watch Together room (for presence activity
+// badges).
+export function listWatchActiveUserIds(): string[] {
+  const ids = new Set<string>();
+  for (const room of rooms.values()) {
+    for (const member of room.members.values()) ids.add(member.userId);
+  }
+  return [...ids];
+}
+
 export function registerWatchHandlers(io: Server, socket: Socket, userId: string) {
   function leaveRoom(roomId: string) {
     const room = rooms.get(roomId);

@@ -16,7 +16,7 @@ import { createDesktopWallRouter } from './modules/desktop-wall/desktop-wall.rou
 import { createEmojiGgRouter } from './modules/emoji-gg/emoji-gg.routes.js';
 import { createGifRouter } from './modules/gifs/gif.routes.js';
 import { createGroupRouter } from './modules/messenger/group.routes.js';
-import { createMessengerRouter } from './modules/messenger/messenger.routes.js';
+import { createMessengerRouter, startExpiredMessageSweeper } from './modules/messenger/messenger.routes.js';
 import { createStorageRouter } from './modules/storage/storage.routes.js';
 import { createUserRouter } from './modules/users/user.routes.js';
 import { uploadRoot } from './modules/messenger/upload-storage.js';
@@ -49,6 +49,7 @@ async function main() {
   });
 
   setupRealtime(io);
+  startExpiredMessageSweeper(io);
 
   app.use(
     helmet({

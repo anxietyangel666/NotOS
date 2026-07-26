@@ -22822,3 +22822,213 @@ div.settings-music-row {
 .remote-desktop-icon .tile-icon-inbox {
   --desktop-app-icon-size: 26px;
 }
+
+/* ── Saved Messages (self-DM) pinned entry ── */
+.messenger-conversation-saved .messenger-saved-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--blue);
+  color: #fff;
+  border-radius: 50%;
+}
+
+/* ── Link preview card (OpenGraph unfurl) ── */
+.link-preview-card {
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+  margin-top: 6px;
+  padding: 8px 10px;
+  max-width: 420px;
+  text-align: left;
+  border: none;
+  border-left: 3px solid var(--blue);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--blue) 8%, transparent);
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+.link-preview-card:hover {
+  background: color-mix(in srgb, var(--blue) 14%, transparent);
+}
+.link-preview-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+.link-preview-site {
+  opacity: 0.7;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.link-preview-title {
+  font-size: 13px;
+  color: var(--blue);
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.link-preview-description {
+  font-size: 12px;
+  opacity: 0.85;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+}
+.link-preview-image {
+  width: 72px;
+  height: 72px;
+  flex: none;
+  align-self: center;
+  object-fit: cover;
+  border-radius: 6px;
+}
+
+/* ── AI channel summary panel ── */
+.group-chat-main {
+  position: relative;
+}
+.channel-summary-panel {
+  position: absolute;
+  top: 54px;
+  right: 12px;
+  z-index: 30;
+  width: min(420px, calc(100% - 24px));
+  max-height: 50vh;
+  overflow-y: auto;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--panel-bg, rgba(30, 30, 34, 0.97));
+  border: 1px solid color-mix(in srgb, var(--blue) 35%, transparent);
+  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.35);
+}
+.channel-summary-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.channel-summary-head button {
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: inherit;
+  opacity: 0.7;
+}
+.channel-summary-head button:hover { opacity: 1; }
+.channel-summary-text {
+  white-space: pre-wrap;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.channel-summary-loading,
+.channel-summary-error {
+  font-size: 13px;
+  opacity: 0.8;
+  margin: 0;
+}
+.channel-summary-error { color: #e5534b; }
+
+/* ── Voice message transcription ── */
+.voice-message-transcribe {
+  border: none;
+  background: color-mix(in srgb, currentColor 12%, transparent);
+  color: inherit;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 6px;
+  cursor: pointer;
+  align-self: center;
+}
+.voice-message-transcribe:hover { background: color-mix(in srgb, currentColor 22%, transparent); }
+.voice-message-transcribe:disabled { opacity: 0.5; cursor: default; }
+.voice-message-transcript {
+  flex-basis: 100%;
+  width: 100%;
+  margin: 6px 0 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  opacity: 0.9;
+  white-space: pre-wrap;
+}
+.voice-message-transcript.pending,
+.voice-message-transcript.error { opacity: 0.6; }
+.voice-message-player { flex-wrap: wrap; }
+
+/* ── Slash command hints above the composer ── */
+.slash-command-hints {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0 8px 4px;
+  padding: 6px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--blue) 8%, transparent);
+}
+.slash-command-hints button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 8px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  text-align: left;
+}
+.slash-command-hints button:hover { background: color-mix(in srgb, var(--blue) 16%, transparent); }
+.slash-command-hints button span { opacity: 0.65; }
+
+/* ── Disappearing-message timer options in the chat menu ── */
+.context-menu-ttl {
+  padding: 6px 10px;
+  border-top: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+  margin-top: 4px;
+}
+.context-menu-ttl-label {
+  display: block;
+  font-size: 11px;
+  opacity: 0.7;
+  margin-bottom: 4px;
+}
+.context-menu-ttl-options {
+  display: flex;
+  gap: 4px;
+}
+.context-menu-ttl-options button {
+  flex: 1;
+  border: none;
+  border-radius: 6px;
+  padding: 3px 0;
+  font-size: 12px;
+  cursor: pointer;
+  background: color-mix(in srgb, currentColor 10%, transparent);
+  color: inherit;
+}
+.context-menu-ttl-options button.active {
+  background: var(--blue);
+  color: #fff;
+}
+
+/* ── Presence activity badge (voice / watch together) ── */
+.presence-activity-badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  font-size: 11px;
+  line-height: 1;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.4));
+  pointer-events: none;
+}

@@ -81,6 +81,8 @@ export const config = {
   // Separate (lighter/faster) model used ONLY for the chat "Translate" feature,
   // so message translation does not depend on the main AI Chat model.
   groqTranslateModel: process.env.GROQ_TRANSLATE_MODEL ?? 'llama-3.1-8b-instant',
+  // Speech-to-text model for voice message transcription.
+  groqWhisperModel: process.env.GROQ_WHISPER_MODEL ?? 'whisper-large-v3-turbo',
   // Daily AI request quota for regular users (Dev users are unlimited).
   aiDailyRequestLimit: readNumber('AI_DAILY_REQUEST_LIMIT', 40),
   tenorApiKey: process.env.TENOR_KEY ?? process.env.VITE_TENOR_KEY ?? 'AIzaSyAyimkuYQYF_FXVALexPuGQctUWRURdCYQ',

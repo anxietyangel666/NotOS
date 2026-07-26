@@ -27,6 +27,8 @@ import {
   requestFriendship,
   searchConversation,
   setConversationBackground,
+  setConversationTtl,
+  sweepExpiredMessages,
   unpinMessage,
   updateMessage,
   toPublicMessage,
@@ -56,6 +58,9 @@ import { HttpError } from '../../http/errors.js';
 import { type AuthenticatedRequest, requireAuth } from '../../middleware/require-auth.js';
 import { mentionedUserIdsFromBody } from './mentions.js';
 import { saveChatImageDataUrl } from './upload-storage.js';
+import { getLinkPreviewForBody } from './link-preview.js';
+import { transcribeAudioDataUrl } from '../ai/transcribe.js';
+import { consumeAiQuota } from '../../db/ai-quota.js';
 import { config } from '../../config.js';
 
 const friendSchema = z.object({
@@ -106,6 +111,30 @@ function publicUrl(_req: AuthenticatedRequest, urlPath: string) {
 
 const CHAT_BACKGROUND_SET_MARKER = '[chat-background:set]';
 const CHAT_BACKGROUND_CLEAR_MARKER = '[chat-background:clear]';
+
+// Allowed disappearing-message timers (seconds): off, 1h, 24h, 7d.
+const ALLOWED_MESSAGE_TTLS = [0, 3600, 86400, 604800];
+
+// Every minute, hard-delete disappearing messages whose timer ran out and
+// notify both participants so open chats drop the bubble live.
+export function startExpiredMessageSweeper(io: Server) {
+  const timer = setInterval(async () => {
+    try {
+      const expired = await sweepExpiredMessages();
+      for (const record of expired) {
+        const message = toPublicMessage(record);
+        io.to(record.sender_id).emit('messenger:messageDeleted', { message });
+        if (record.recipient_id !== record.sender_id) {
+          io.to(record.recipient_id).emit('messenger:messageDeleted', { message });
+        }
+      }
+    } catch (error) {
+      console.error('Expired message sweep failed', error);
+    }
+  }, 60_000);
+  timer.unref();
+  return timer;
+}
 
 async function friendPayload(userId: string) {
   const [friends, requests] = await Promise.all([listFriends(userId), listFriendRequests(userId)]);
@@ -466,6 +495,35 @@ export function createMessengerRouter(io: Server) {
     })
   );
 
+  // Disappearing messages: set the conversation's TTL. Either participant can
+  // change it; both get a socket event plus a system marker in the history.
+  router.patch(
+    '/conversations/:userId/ttl',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const userId = z.string().uuid().parse(req.params.userId);
+      const input = z.object({
+        ttlSeconds: z.number().int().refine((value) => ALLOWED_MESSAGE_TTLS.includes(value), { message: 'Unsupported TTL' })
+      }).parse(req.body ?? {});
+      if (userId === req.auth.userId) throw new HttpError(400, 'Cannot update your own conversation', 'INVALID_RECIPIENT');
+      if (!(await userExistsById(userId))) throw new HttpError(404, 'User not found', 'USER_NOT_FOUND');
+      if (await blockExistsBetween(req.auth.userId, userId)) {
+        throw new HttpError(403, 'You cannot update this conversation', 'USER_BLOCKED');
+      }
+
+      const settings = await setConversationTtl(req.auth.userId, userId, input.ttlSeconds);
+      const created = await createMessage(req.auth.userId, userId, `[chat-ttl:${input.ttlSeconds}]`);
+      const message = toPublicMessage(created);
+      const publicSettings = toPublicConversationSettings(settings);
+
+      io.to(req.auth.userId).emit('messenger:conversationTtlChanged', { userId, ttlSeconds: input.ttlSeconds, updatedBy: req.auth.userId });
+      io.to(userId).emit('messenger:conversationTtlChanged', { userId: req.auth.userId, ttlSeconds: input.ttlSeconds, updatedBy: req.auth.userId });
+      io.to(req.auth.userId).emit('messenger:message', { message });
+      io.to(userId).emit('messenger:message', { message });
+      res.json({ settings: publicSettings, message });
+    })
+  );
+
   // Blocking.
   router.get(
     '/block/:userId',
@@ -578,9 +636,9 @@ export function createMessengerRouter(io: Server) {
     asyncHandler<AuthenticatedRequest>(async (req, res) => {
       const input = messageSchema.parse(req.body);
 
-      if (input.recipientId === req.auth.userId) {
-        throw new HttpError(400, 'Cannot send a message to yourself', 'INVALID_RECIPIENT');
-      }
+      // Messaging yourself is allowed: it powers the "Saved Messages" chat
+      // (notes/files sent to yourself). Blocks and mentions don't apply there.
+      const isSelfMessage = input.recipientId === req.auth.userId;
 
       const recipient = await findUserById(input.recipientId);
       if (!recipient) {
@@ -588,12 +646,12 @@ export function createMessengerRouter(io: Server) {
       }
 
       // A block in either direction prevents messaging.
-      if (await blockExistsBetween(req.auth.userId, input.recipientId)) {
+      if (!isSelfMessage && (await blockExistsBetween(req.auth.userId, input.recipientId))) {
         throw new HttpError(403, 'You cannot message this user', 'USER_BLOCKED');
       }
 
       let senderGroup: { id: string; name: string; avatarData: string } | null = null;
-      if (input.senderGroupId) {
+      if (input.senderGroupId && !isSelfMessage) {
         if (recipient.allow_group_identity_messages === false) {
           throw new HttpError(403, 'This user does not allow group identity messages', 'GROUP_IDENTITY_MESSAGES_DISABLED');
         }
@@ -604,11 +662,24 @@ export function createMessengerRouter(io: Server) {
         senderGroup = { id: group.id, name: group.name, avatarData: group.avatar_data };
       }
 
-      const created = await createMessage(req.auth.userId, input.recipientId, input.body, input.image, input.replyTo, senderGroup, input.mediaItems);
+      // Disappearing messages: apply the conversation's TTL (Saved Messages
+      // has no settings row and never expires).
+      const conversationSettings = isSelfMessage ? null : await getConversationSettings(req.auth.userId, input.recipientId);
+      const messageTtlSeconds = conversationSettings?.message_ttl_seconds ?? 0;
+
+      const created = await createMessage(req.auth.userId, input.recipientId, input.body, input.image, input.replyTo, senderGroup, input.mediaItems, messageTtlSeconds);
+      if (isSelfMessage) {
+        // Saved Messages never show an unread badge: mark the note read on write.
+        const read = await pool.query<{ read_at: Date }>(
+          'UPDATE messages SET read_at = NOW() WHERE id = $1 RETURNING read_at',
+          [created.id]
+        );
+        created.read_at = read.rows[0]?.read_at ?? created.read_at;
+      }
       const message = input.replyTo ? await toPublicMessageEnriched(created) : toPublicMessage(created);
-      io.to(input.recipientId).emit('messenger:message', { message });
       io.to(req.auth.userId).emit('messenger:message', { message });
-      if (input.body.includes('@') && mentionedUserIdsFromBody(input.body, [{ id: recipient.id, nickname: recipient.nickname }], req.auth.userId).includes(recipient.id)) {
+      if (!isSelfMessage) io.to(input.recipientId).emit('messenger:message', { message });
+      if (!isSelfMessage && input.body.includes('@') && mentionedUserIdsFromBody(input.body, [{ id: recipient.id, nickname: recipient.nickname }], req.auth.userId).includes(recipient.id)) {
         const sender = await findUserById(req.auth.userId);
         if (sender) {
           io.to(recipient.id).emit('messenger:mention', {
@@ -619,6 +690,23 @@ export function createMessengerRouter(io: Server) {
         }
       }
       res.json({ message });
+
+      // Best-effort: attach an OpenGraph preview of the first URL after the
+      // message is already delivered, then push the updated message to both
+      // sides. Never blocks or fails the send.
+      void (async () => {
+        const preview = await getLinkPreviewForBody(input.body);
+        if (!preview) return;
+        const updated = await pool.query<MessageRecord>(
+          'UPDATE messages SET link_preview = $2::jsonb WHERE id = $1 AND deleted_at IS NULL RETURNING *',
+          [created.id, JSON.stringify(preview)]
+        );
+        const row = updated.rows[0];
+        if (!row) return;
+        const withPreview = await toPublicMessageEnriched(row);
+        io.to(req.auth.userId).emit('messenger:messageUpdated', { message: withPreview });
+        if (!isSelfMessage) io.to(input.recipientId).emit('messenger:messageUpdated', { message: withPreview });
+      })().catch(() => undefined);
     })
   );
 
@@ -694,6 +782,39 @@ export function createMessengerRouter(io: Server) {
       io.to(updated.recipient_id).emit('messenger:messagePinned', { message });
       io.to(updated.sender_id).emit('messenger:messagePinned', { message });
       res.json({ message });
+    })
+  );
+
+  // Transcribe a voice message with Whisper. The transcript is cached on the
+  // message row, so only the first request per message consumes AI quota.
+  router.post(
+    '/messages/:messageId/transcribe',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const messageId = z.string().uuid().parse(req.params.messageId);
+      const result = await pool.query<MessageRecord & { transcript: string | null }>(
+        'SELECT * FROM messages WHERE id = $1 AND deleted_at IS NULL',
+        [messageId]
+      );
+      const message = result.rows[0];
+      if (!message) throw new HttpError(404, 'Message not found', 'MESSAGE_NOT_FOUND');
+      if (message.sender_id !== req.auth.userId && message.recipient_id !== req.auth.userId) {
+        throw new HttpError(403, 'Cannot transcribe this message', 'TRANSCRIBE_FORBIDDEN');
+      }
+      if (message.transcript) {
+        res.json({ transcript: message.transcript });
+        return;
+      }
+
+      const user = await findUserById(req.auth.userId);
+      const quota = await consumeAiQuota(req.auth.userId, user?.role === 'dev');
+      if (!quota.unlimited && quota.limit !== null && quota.used > quota.limit) {
+        throw new HttpError(429, 'Daily AI limit reached', 'AI_QUOTA_EXCEEDED');
+      }
+
+      const transcript = await transcribeAudioDataUrl(message.image_data ?? '');
+      await pool.query('UPDATE messages SET transcript = $2 WHERE id = $1', [messageId, transcript]);
+      res.json({ transcript });
     })
   );
 

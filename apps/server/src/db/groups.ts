@@ -99,6 +99,7 @@ export type GroupMessageRecord = {
   feed_source_id: string | null;
   feed_mirror: boolean;
   view_count?: number;
+  link_preview: { url: string; title: string; description: string; imageUrl: string; siteName: string } | null;
   created_at: Date;
 };
 
@@ -214,6 +215,7 @@ export type PublicGroupMessage = {
   viewCount: number;
   reactions: GroupMessageReaction[];
   replyTo: GroupMessageReplySnippet | null;
+  linkPreview: { url: string; title: string; description: string; imageUrl: string; siteName: string } | null;
   createdAt: string;
 };
 
@@ -271,6 +273,7 @@ export function toPublicGroupMessage(message: GroupMessageRecord, reactions: Gro
     viewCount: Number(message.view_count ?? 0),
     reactions: message.deleted_at ? [] : reactions,
     replyTo,
+    linkPreview: message.deleted_at ? null : message.link_preview ?? null,
     createdAt: message.created_at.toISOString()
   };
 }

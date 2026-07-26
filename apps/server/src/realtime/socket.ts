@@ -3,8 +3,8 @@ import { verifyAccessToken } from '../modules/auth/token.js';
 import { findUserById } from '../db/users.js';
 import { createMessage, toPublicMessage, blockExistsBetween } from '../db/messenger.js';
 import { isGroupMember, listGroupMemberIds } from '../db/groups.js';
-import { registerVoiceHandlers } from './voice-rooms.js';
-import { registerWatchHandlers } from './watch-rooms.js';
+import { listVoiceActiveUserIds, registerVoiceHandlers } from './voice-rooms.js';
+import { listWatchActiveUserIds, registerWatchHandlers } from './watch-rooms.js';
 
 type PresenceStatus = 'online' | 'idle' | 'dnd' | 'invisible';
 
@@ -134,12 +134,21 @@ function visibleOnlineUserIds() {
   return Array.from(activeUsers.keys()).filter(isVisibleOnline);
 }
 
+// What visible users are currently doing (in a voice channel / watch room),
+// shown as a small badge on their avatar. Voice wins when both apply.
+function presenceActivitiesPayload() {
+  const activities: Record<string, 'voice' | 'watch'> = {};
+  for (const id of listWatchActiveUserIds()) activities[id] = 'watch';
+  for (const id of listVoiceActiveUserIds()) activities[id] = 'voice';
+  return activities;
+}
+
 function presenceSnapshotPayload() {
   const onlineUserIds = visibleOnlineUserIds();
   const statuses = Object.fromEntries(
     onlineUserIds.map((userId) => [userId, presenceStatuses.get(userId) ?? 'online'])
   );
-  return { onlineUserIds, statuses };
+  return { onlineUserIds, statuses, activities: presenceActivitiesPayload() };
 }
 
 function setUserOnline(io: Server, userId: string) {
@@ -187,6 +196,19 @@ function removeWatcher(io: Server, ownerId: string, socketId: string, userId: st
 }
 
 export function setupRealtime(io: Server) {
+  // Broadcast activity changes (voice/watch membership) on a short poll — the
+  // room modules keep their state private, so diffing here is the simplest
+  // way to stay decoupled from their join/leave paths.
+  let lastActivitiesJson = '';
+  const activityTimer = setInterval(() => {
+    const activities = presenceActivitiesPayload();
+    const json = JSON.stringify(activities);
+    if (json === lastActivitiesJson) return;
+    lastActivitiesJson = json;
+    io.emit('presence:activities', { activities });
+  }, 5000);
+  activityTimer.unref();
+
   io.use((socket, next) => {
     const token = socket.handshake.auth?.token;
 
@@ -219,6 +241,7 @@ export function setupRealtime(io: Server) {
     socket.join(userId);
     socket.join(`desktop:${userId}`);
     socket.emit('system:ready', { serverTime: new Date().toISOString() });
+    socket.emit('presence:activities', { activities: presenceActivitiesPayload() });
 
     // Multi-party group voice channels (WebRTC mesh + ephemeral chat).
     registerVoiceHandlers(io, socket, userId);

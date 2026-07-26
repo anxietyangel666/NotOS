@@ -2,6 +2,11 @@ import { Router } from 'express';
 import type { Server } from 'socket.io';
 import { z } from 'zod';
 import { chatImageSchema, chatMediaItemsSchema } from './media.js';
+import { getLinkPreviewForBody } from './link-preview.js';
+import { callGroq } from '../ai/groq.js';
+import { transcribeAudioDataUrl } from '../ai/transcribe.js';
+import { consumeAiQuota } from '../../db/ai-quota.js';
+import { config } from '../../config.js';
 import { pool } from '../../db/pool.js';
 import {
   createGroup,
@@ -1643,6 +1648,22 @@ export function createGroupRouter(io: Server) {
 
       const memberIds = await visibleMemberIdsForChannel(groupId, input.channelId);
       for (const id of memberIds) io.to(id).emit('messenger:groupMessage', { message: publicMessage });
+
+      // Best-effort OpenGraph preview for the first URL in the body, attached
+      // asynchronously (and mirrored to feed-linked copies of the message).
+      void (async () => {
+        const preview = await getLinkPreviewForBody(input.body);
+        if (!preview) return;
+        await pool.query(
+          `
+            UPDATE group_messages SET link_preview = $2::jsonb
+            WHERE deleted_at IS NULL AND (id = $1 OR feed_source_id = $1)
+          `,
+          [message.id, JSON.stringify(preview)]
+        );
+        await emitFeedLinkedMessages('messenger:groupMessageUpdated', groupId, message.id);
+      })().catch(() => undefined);
+
       let feedChatChannelId = channel.feed_chat_channel_id;
       if (channel.type === 'feed' && !feedChatChannelId) {
         const chatChannel = await pool.query<{ id: string }>(
@@ -1871,6 +1892,100 @@ export function createGroupRouter(io: Server) {
       const message = messages.find((item) => item.id === messageId) ?? messages.find((item) => item.id === canonicalMessageId) ?? await toPublicGroupMessageEnriched(groupMessage);
 
       res.json({ message });
+    })
+  );
+
+  // Transcribe a group voice message with Whisper (cached on the row).
+  router.post(
+    '/groups/:groupId/messages/:messageId/transcribe',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      const messageId = z.string().uuid().parse(req.params.messageId);
+      const result = await pool.query<GroupMessageRecord & { transcript: string | null }>(
+        'SELECT * FROM group_messages WHERE id = $1 AND group_id = $2 AND deleted_at IS NULL',
+        [messageId, groupId]
+      );
+      const message = result.rows[0];
+      if (!message) throw new HttpError(404, 'Message not found', 'MESSAGE_NOT_FOUND');
+      if (!message.channel_id) throw new HttpError(404, 'Message not found', 'MESSAGE_NOT_FOUND');
+      await requireChannelPermission(groupId, message.channel_id, req.auth.userId, 'ViewChannel', 'CHANNEL_VIEW_FORBIDDEN');
+      if (message.transcript) {
+        res.json({ transcript: message.transcript });
+        return;
+      }
+
+      const user = await findUserById(req.auth.userId);
+      const quota = await consumeAiQuota(req.auth.userId, user?.role === 'dev');
+      if (!quota.unlimited && quota.limit !== null && quota.used > quota.limit) {
+        throw new HttpError(429, 'Daily AI limit reached', 'AI_QUOTA_EXCEEDED');
+      }
+
+      const transcript = await transcribeAudioDataUrl(message.image_data ?? '');
+      await pool.query('UPDATE group_messages SET transcript = $2 WHERE id = $1', [messageId, transcript]);
+      res.json({ transcript });
+    })
+  );
+
+  // ── AI channel summary ("what did I miss?") ───────────────────────────────
+  // Summarizes the last N text messages of a channel with Groq. Counts against
+  // the caller's daily AI quota (dev accounts are unlimited).
+  router.post(
+    '/groups/:groupId/channels/:channelId/summarize',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      const channelId = z.string().uuid().parse(req.params.channelId);
+      const input = z.object({ count: z.number().int().min(5).max(200).optional() }).parse(req.body ?? {});
+
+      await requireChannelPermission(groupId, channelId, req.auth.userId, 'ViewChannel', 'CHANNEL_VIEW_FORBIDDEN');
+      await requireChannelPermission(groupId, channelId, req.auth.userId, 'ReadMessageHistory', 'READ_HISTORY_FORBIDDEN');
+
+      const user = await findUserById(req.auth.userId);
+      if (!user) throw new HttpError(404, 'User not found', 'USER_NOT_FOUND');
+      const quota = await consumeAiQuota(req.auth.userId, user.role === 'dev');
+      if (!quota.unlimited && quota.limit !== null && quota.used > quota.limit) {
+        throw new HttpError(429, 'Daily AI limit reached', 'AI_QUOTA_EXCEEDED');
+      }
+
+      const count = input.count ?? 100;
+      const rows = await pool.query<{ nickname: string; body: string; created_at: Date }>(
+        `
+          SELECT users.nickname, group_messages.body, group_messages.created_at
+          FROM group_messages
+          JOIN users ON users.id = group_messages.sender_id
+          WHERE group_messages.group_id = $1
+            AND group_messages.channel_id = $2
+            AND group_messages.deleted_at IS NULL
+            AND group_messages.body <> ''
+          ORDER BY group_messages.created_at DESC
+          LIMIT $3
+        `,
+        [groupId, channelId, count]
+      );
+      if (rows.rows.length === 0) {
+        res.json({ summary: '', messageCount: 0 });
+        return;
+      }
+
+      const transcript = rows.rows
+        .reverse()
+        .map((row) => `[${row.created_at.toISOString().slice(5, 16).replace('T', ' ')}] ${row.nickname}: ${row.body.slice(0, 400)}`)
+        .join('\n');
+
+      const languageName = user.language_code === 'ru' ? 'Russian' : user.language_code === 'uk' ? 'Ukrainian' : 'English';
+      const summary = await callGroq(
+        [
+          'You summarize a group chat transcript for a member who was away.',
+          'Write at most 6 short bullet points: key topics, decisions and who said what.',
+          'Skip greetings, spam and media-only messages. Do not invent anything.',
+          `Answer in ${languageName}.`
+        ].join('\n'),
+        [{ role: 'user', content: transcript.slice(0, 24_000) }],
+        { model: config.groqTranslateModel, temperature: 0.3 }
+      );
+
+      res.json({ summary, messageCount: rows.rows.length });
     })
   );
 

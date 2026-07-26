@@ -19,6 +19,8 @@ export type MessageRecord = {
   read_at: Date | null;
   pinned_at: Date | null;
   reply_to: string | null;
+  link_preview: { url: string; title: string; description: string; imageUrl: string; siteName: string } | null;
+  expires_at: Date | null;
   created_at: Date;
 };
 
@@ -64,6 +66,8 @@ export type PublicMessage = {
   pinnedAt: string | null;
   reactions: MessageReaction[];
   replyTo: MessageReplySnippet | null;
+  linkPreview: { url: string; title: string; description: string; imageUrl: string; siteName: string } | null;
+  expiresAt: string | null;
 };
 
 export type ConversationPreview = {
@@ -76,12 +80,14 @@ export type ConversationSettingsRecord = {
   user_a: string;
   user_b: string;
   background_data: string;
+  message_ttl_seconds: number;
   updated_by: string | null;
   updated_at: Date;
 };
 
 export type PublicConversationSettings = {
   backgroundData: string;
+  messageTtlSeconds: number;
   updatedBy: string | null;
   updatedAt: string | null;
 };
@@ -134,7 +140,9 @@ export function toPublicMessage(message: MessageRecord, reactions: MessageReacti
     createdAt: message.created_at.toISOString(),
     pinnedAt: message.pinned_at?.toISOString() ?? null,
     reactions: message.deleted_at ? [] : reactions,
-    replyTo
+    replyTo,
+    linkPreview: message.deleted_at ? null : message.link_preview ?? null,
+    expiresAt: message.expires_at?.toISOString() ?? null
   };
 }
 
@@ -719,9 +727,43 @@ export async function markConversationRead(userId: string, friendId: string) {
 export function toPublicConversationSettings(settings: ConversationSettingsRecord | null): PublicConversationSettings {
   return {
     backgroundData: settings?.background_data ?? '',
+    messageTtlSeconds: settings?.message_ttl_seconds ?? 0,
     updatedBy: settings?.updated_by ?? null,
     updatedAt: settings?.updated_at?.toISOString() ?? null
   };
+}
+
+export async function setConversationTtl(userId: string, friendId: string, ttlSeconds: number) {
+  const result = await pool.query<ConversationSettingsRecord>(
+    `
+      INSERT INTO conversation_settings (user_a, user_b, message_ttl_seconds, updated_by)
+      VALUES (LEAST($1::uuid, $2::uuid), GREATEST($1::uuid, $2::uuid), $3, $1)
+      ON CONFLICT (user_a, user_b)
+      DO UPDATE SET
+        message_ttl_seconds = EXCLUDED.message_ttl_seconds,
+        updated_by = EXCLUDED.updated_by,
+        updated_at = NOW()
+      RETURNING *
+    `,
+    [userId, friendId, ttlSeconds]
+  );
+  return result.rows[0];
+}
+
+// Marks expired disappearing messages as deleted and returns the affected
+// rows so the caller can notify both participants over sockets.
+export async function sweepExpiredMessages() {
+  const result = await pool.query<MessageRecord>(
+    `
+      UPDATE messages
+      SET deleted_at = NOW()
+      WHERE expires_at IS NOT NULL
+        AND expires_at <= NOW()
+        AND deleted_at IS NULL
+      RETURNING *
+    `
+  );
+  return result.rows;
 }
 
 export async function getConversationSettings(userId: string, friendId: string) {
@@ -762,15 +804,17 @@ export async function createMessage(
   image?: { dataUrl: string; name?: string; spoiler?: boolean },
   replyTo?: string | null,
   senderGroup?: { id: string; name: string; avatarData: string } | null,
-  mediaItems?: Array<{ dataUrl: string; name?: string | null; spoiler?: boolean }>
+  mediaItems?: Array<{ dataUrl: string; name?: string | null; spoiler?: boolean }>,
+  expiresInSeconds?: number | null
 ) {
   const items = (mediaItems && mediaItems.length > 0 ? mediaItems : image ? [image] : [])
     .map((item) => ({ dataUrl: item.dataUrl, name: item.name ?? null, spoiler: Boolean(item.spoiler) }));
   const first = items[0];
   const result = await pool.query<MessageRecord>(
     `
-      INSERT INTO messages (id, sender_id, recipient_id, sender_group_id, sender_group_name, sender_group_avatar_data, body, image_data, image_name, image_spoiler, media_items, reply_to)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12)
+      INSERT INTO messages (id, sender_id, recipient_id, sender_group_id, sender_group_name, sender_group_avatar_data, body, image_data, image_name, image_spoiler, media_items, reply_to, expires_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12,
+        CASE WHEN $13::int IS NULL OR $13::int <= 0 THEN NULL ELSE NOW() + make_interval(secs => $13::int) END)
       RETURNING *
     `,
     [
@@ -785,7 +829,8 @@ export async function createMessage(
       first?.name ?? null,
       first?.spoiler ?? false,
       items.length > 0 ? JSON.stringify(items) : null,
-      replyTo ?? null
+      replyTo ?? null,
+      expiresInSeconds ?? null
     ]
   );
 

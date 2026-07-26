@@ -436,6 +436,13 @@ export const api = {
   getConversationSettings(token: string, userId: string) {
     return request<{ settings: ConversationSettings }>(`/api/messenger/conversations/${encodeURIComponent(userId)}/settings`, { token });
   },
+  setConversationTtl(token: string, userId: string, ttlSeconds: number) {
+    return request<{ settings: ConversationSettings; message: MessengerMessage }>(`/api/messenger/conversations/${encodeURIComponent(userId)}/ttl`, {
+      method: 'PATCH',
+      token,
+      body: { ttlSeconds }
+    });
+  },
   setConversationBackground(token: string, userId: string, backgroundData: string) {
     return request<{ settings: ConversationSettings; message: MessengerMessage }>(`/api/messenger/conversations/${encodeURIComponent(userId)}/background`, {
       method: 'PATCH',
@@ -560,6 +567,21 @@ export const api = {
   // Load one page of a channel. Pass `before` (a message id) to fetch the page
   // of older messages for scroll-up pagination. `hasMore` indicates that an
   // even older page still exists.
+  transcribeMessage(token: string, messageId: string) {
+    return request<{ transcript: string }>(`/api/messenger/messages/${encodeURIComponent(messageId)}/transcribe`, { token, method: 'POST', body: {} });
+  },
+  transcribeGroupMessage(token: string, groupId: string, messageId: string) {
+    return request<{ transcript: string }>(
+      `/api/messenger/groups/${encodeURIComponent(groupId)}/messages/${encodeURIComponent(messageId)}/transcribe`,
+      { token, method: 'POST', body: {} }
+    );
+  },
+  summarizeGroupChannel(token: string, groupId: string, channelId: string, count?: number) {
+    return request<{ summary: string; messageCount: number }>(
+      `/api/messenger/groups/${encodeURIComponent(groupId)}/channels/${encodeURIComponent(channelId)}/summarize`,
+      { token, method: 'POST', body: count ? { count } : {} }
+    );
+  },
   getGroupMessages(token: string, groupId: string, channelId?: string, options?: { before?: string; limit?: number }) {
     const params = new URLSearchParams();
     if (channelId) params.set('channelId', channelId);

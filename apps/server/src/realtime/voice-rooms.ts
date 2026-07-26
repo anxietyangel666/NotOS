@@ -102,6 +102,16 @@ async function isGroupAdmin(groupId: string, userId: string): Promise<boolean> {
   return perms.includes('ManageChannels') || perms.includes('ManageRoles') || perms.includes('KickMembers');
 }
 
+// All users currently connected to any group voice channel (for presence
+// activity badges).
+export function listVoiceActiveUserIds(): string[] {
+  const ids = new Set<string>();
+  for (const participants of rooms.values()) {
+    for (const participant of participants.values()) ids.add(participant.userId);
+  }
+  return [...ids];
+}
+
 export function registerVoiceHandlers(io: Server, socket: Socket, userId: string) {
   async function leaveRoom(channelId: string, reason: 'leave' | 'disconnect') {
     const room = rooms.get(channelId);

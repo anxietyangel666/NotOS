@@ -31,6 +31,8 @@ import { useUserStatus, type PresenceStatus } from '../utils/user-status';
 import { buildGroupInviteLink, extractGroupInviteChannelId, extractGroupInviteCode } from '../utils/group-invite-link';
 import { extractWatchInvite } from '../utils/watch-invite-link';
 import { WatchInviteEmbed } from './WatchInviteEmbed';
+import { LinkPreviewCard } from './LinkPreviewCard';
+import { applySlashCommand, SLASH_COMMANDS } from '../utils/slash-commands';
 import { copyImageToClipboard, MediaLightbox, type MediaLightboxItem } from './MediaLightbox';
 
 import {
@@ -142,6 +144,8 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
   const [groupSearchOpen, setGroupSearchOpen] = useState(false);
   const [groupSearchQuery, setGroupSearchQuery] = useState('');
   const [groupSearchActiveId, setGroupSearchActiveId] = useState<string | null>(null);
+  // AI "what did I miss?" summary of the active channel.
+  const [channelSummary, setChannelSummary] = useState<{ open: boolean; loading: boolean; text: string; error: string }>({ open: false, loading: false, text: '', error: '' });
   const [groupMembersHidden, setGroupMembersHidden] = useState(false);
   const [messageMenu, setMessageMenu] = useState<{ x: number; y: number; message: GroupMessage; imageSrc?: string } | null>(null);
   const [channelMenu, setChannelMenu] = useState<{ x: number; y: number; kind: 'channel' | 'folder'; id: string; name: string } | null>(null);
@@ -1745,7 +1749,7 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
     if (voiceOverride && !canSendVoiceMessagesInActiveChannel) return;
     if (videoCircleOverride && !canSendVideoCirclesInActiveChannel) return;
     if (image && !recordingOverride && !canAttachInActiveChannel) return;
-    const body = recordingOverride ? '' : expandCustomEmojiShortcodes((image ? imageCaptionDraft : draft).trim());
+    const body = recordingOverride ? '' : applySlashCommand(expandCustomEmojiShortcodes((image ? imageCaptionDraft : draft).trim()));
     if (!canUseExternalEmojisInActiveChannel && body.includes('<ce:')) return;
     if (!body && !image) return;
     emitGroupTyping(false, activeChannel);
@@ -3150,6 +3154,36 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
             </h3>
           )}
           <div className="messenger-chat-header-actions">
+            {!showVoiceView && activeChannel ? (
+              <button
+                className={channelSummary.open ? 'messenger-call-button active' : 'messenger-call-button'}
+                type="button"
+                title={language === 'ru' ? 'Что я пропустил? (AI)' : language === 'uk' ? 'Що я пропустив? (AI)' : 'What did I miss? (AI)'}
+                aria-label={language === 'ru' ? 'Что я пропустил?' : 'What did I miss?'}
+                onClick={() => {
+                  if (channelSummary.open) {
+                    setChannelSummary({ open: false, loading: false, text: '', error: '' });
+                    return;
+                  }
+                  setChannelSummary({ open: true, loading: true, text: '', error: '' });
+                  api.summarizeGroupChannel(token, group.id, activeChannel, 100)
+                    .then((result) => setChannelSummary({
+                      open: true,
+                      loading: false,
+                      text: result.summary || (language === 'ru' ? 'Пока нечего пересказывать' : 'Nothing to summarize yet'),
+                      error: ''
+                    }))
+                    .catch(() => setChannelSummary({
+                      open: true,
+                      loading: false,
+                      text: '',
+                      error: language === 'ru' ? 'Не удалось получить пересказ' : 'Failed to summarize'
+                    }));
+                }}
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6L12 3z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8L19 15z"/></svg>
+              </button>
+            ) : null}
             <button
               className={groupSearchOpen ? 'messenger-call-button active' : 'messenger-call-button'}
               type="button"
@@ -3179,6 +3213,21 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
             </button>
           </div>
         </header>
+        {channelSummary.open ? (
+          <div className="channel-summary-panel">
+            <div className="channel-summary-head">
+              <strong>{language === 'ru' ? 'Пересказ канала' : language === 'uk' ? 'Переказ каналу' : 'Channel recap'}</strong>
+              <button type="button" onClick={() => setChannelSummary({ open: false, loading: false, text: '', error: '' })} aria-label="close">✕</button>
+            </div>
+            {channelSummary.loading ? (
+              <p className="channel-summary-loading">{language === 'ru' ? 'AI читает сообщения...' : 'AI is reading the messages...'}</p>
+            ) : channelSummary.error ? (
+              <p className="channel-summary-error">{channelSummary.error}</p>
+            ) : (
+              <div className="channel-summary-text">{channelSummary.text}</div>
+            )}
+          </div>
+        ) : null}
         {showVoiceView ? null : (
           <>
             <VoicePlaybackBar language={language} />
@@ -3424,7 +3473,7 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
                           return <VideoCircleMessagePlayer src={message.imageData} senderName={senderName} createdAt={message.createdAt} />;
                         }
                         if (isVoiceAttachment(message.imageData, message.imageName)) {
-                          return <VoiceMessagePlayer src={message.imageData} senderName={senderName} createdAt={message.createdAt} />;
+                          return <VoiceMessagePlayer src={message.imageData} senderName={senderName} createdAt={message.createdAt} transcribe={!message.pending ? () => api.transcribeGroupMessage(token, group.id, message.id).then((r) => r.transcript) : undefined} />;
                         }
                         if (isGifAttachment(message) && !spoilerHidden && message.imageData) {
                           return (
@@ -3539,6 +3588,9 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
                             const watchInvite = extractWatchInvite(message.body);
                             return watchInvite ? <WatchInviteEmbed language={language} invite={watchInvite} onOpen={onOpenWatchTogether} /> : null;
                           })()}
+                          {message.linkPreview && !extractGroupInviteCode(message.body) && !extractWatchInvite(message.body) ? (
+                            <LinkPreviewCard preview={message.linkPreview} />
+                          ) : null}
                         </>
                       ) : null}
                     </>
@@ -3718,6 +3770,16 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
               e.currentTarget.value = '';
               files.forEach((file) => void prepareImageFromFile(file));
             }} />
+          {draft.startsWith('/') && !draft.includes(' ') ? (
+            <div className="slash-command-hints">
+              {SLASH_COMMANDS.filter((command) => command.name.startsWith(draft.slice(1).toLowerCase())).map((command) => (
+                <button key={command.name} type="button" onClick={() => updateGroupDraft(`/${command.name} `)}>
+                  <strong>/{command.name}</strong>
+                  <span>{command.hint}</span>
+                </button>
+              ))}
+            </div>
+          ) : null}
           <div className="emoji-input-shell messenger-emoji-input">
             <button className="emoji-toggle inline messenger-attach-inline" type="button" aria-label={t(language, 'imageMessage')}
               disabled={Boolean(editingMessage) || !canAttachInActiveChannel || activeNsfwBlocked}

@@ -16,6 +16,8 @@ import { GroupCreateModal } from './GroupCreateModal';
 import { RailFolders, type RailItem } from './RailFolders';
 import { InviteEmbed } from './InviteEmbed';
 import { UserEmbed } from './UserEmbed';
+import { LinkPreviewCard } from './LinkPreviewCard';
+import { applySlashCommand, SLASH_COMMANDS } from '../utils/slash-commands';
 import { UserName } from './UserName';
 import { extractProfileUserId } from '../utils/profile-link';
 import { extractGroupInviteChannelId, extractGroupInviteCode } from '../utils/group-invite-link';
@@ -352,6 +354,30 @@ function parseChatBackgroundMarker(body: string) {
   if (body === CHAT_BACKGROUND_SET_MARKER) return 'set';
   if (body === CHAT_BACKGROUND_CLEAR_MARKER) return 'clear';
   return null;
+}
+
+// `[chat-ttl:N]` system marker: the disappearing-message timer was changed.
+function parseChatTtlMarker(body: string): number | null {
+  const match = /^\[chat-ttl:(\d+)\]$/.exec(body);
+  return match ? Number(match[1]) : null;
+}
+
+function chatTtlLabel(seconds: number, language: Language) {
+  if (seconds >= 604800) return language === 'ru' ? '7 дней' : '7 days';
+  if (seconds >= 86400) return language === 'ru' ? '24 часа' : '24 hours';
+  if (seconds >= 3600) return language === 'ru' ? '1 час' : '1 hour';
+  return '';
+}
+
+function chatTtlEventText(seconds: number, actorName: string, language: Language) {
+  if (seconds > 0) {
+    return language === 'ru'
+      ? `${actorName} включил(а) исчезающие сообщения: ${chatTtlLabel(seconds, language)}`
+      : `${actorName} enabled disappearing messages: ${chatTtlLabel(seconds, language)}`;
+  }
+  return language === 'ru'
+    ? `${actorName} отключил(а) исчезающие сообщения`
+    : `${actorName} turned off disappearing messages`;
 }
 
 function chatBackgroundEventText(action: 'set' | 'clear', actorName: string, language: Language) {
@@ -845,6 +871,10 @@ export function MessengerWindow({
   const [imageEmojiOpen, setImageEmojiOpen] = useState(false);
   const backgroundInputRef = useRef<HTMLInputElement | null>(null);
   const [dmBackgrounds, setDmBackgrounds] = useState<Record<string, string>>({});
+  // Per-conversation disappearing-message timer (seconds, 0 = off).
+  const [dmTtls, setDmTtls] = useState<Record<string, number>>({});
+  // What users are doing right now (in a voice channel / watch room).
+  const [presenceActivities, setPresenceActivities] = useState<Record<string, 'voice' | 'watch'>>({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [groups, setGroups] = useState<Group[]>([]);
@@ -884,13 +914,15 @@ export function MessengerWindow({
   const imageDropEnabled = Boolean(selectedUser && activeView === 'directMessages' && !editingMessage && !isAiAssistantSelected);
   const sortedConversations = useMemo(() => {
     const pinned = pinnedConversations;
-    return [...conversations].sort((a, b) => {
+    // The self-conversation (Saved Messages) has its own pinned entry above
+    // the list, so keep it out of the regular conversation rows.
+    return conversations.filter((conversation) => conversation.user.id !== currentUser.id).sort((a, b) => {
       const aPinned = pinned.has(a.user.id) ? 1 : 0;
       const bPinned = pinned.has(b.user.id) ? 1 : 0;
       if (aPinned !== bPinned) return bPinned - aPinned;
       return new Date(b.message.createdAt).getTime() - new Date(a.message.createdAt).getTime();
     });
-  }, [conversations, pinnedConversations]);
+  }, [conversations, pinnedConversations, currentUser.id]);
   const visibleConversations = useMemo(() => {
     const filter = directMessageFilter.trim().toLocaleLowerCase();
     if (!filter) return sortedConversations;
@@ -996,6 +1028,7 @@ export function MessengerWindow({
       .then((payload) => {
         if (!alive) return;
         setDmBackgrounds((current) => ({ ...current, [userId]: payload.settings.backgroundData }));
+        setDmTtls((current) => ({ ...current, [userId]: payload.settings.messageTtlSeconds ?? 0 }));
       })
       .catch(() => undefined);
     return () => {
@@ -1487,6 +1520,10 @@ export function MessengerWindow({
       setDmBackgrounds((current) => ({ ...current, [payload.userId]: payload.backgroundData }));
     }
 
+    function onConversationTtlChanged(payload: { userId: string; ttlSeconds: number }) {
+      setDmTtls((current) => ({ ...current, [payload.userId]: payload.ttlSeconds }));
+    }
+
     function onFriendsChanged(payload: FriendsChangedPayload) {
       payload.friends.forEach(cacheUser);
       setFriends(uniqueById(payload.friends));
@@ -1496,6 +1533,10 @@ export function MessengerWindow({
     function onUserChanged(payload: { user: PublicUser }) {
       cacheUser(payload.user);
       replaceKnownUser(payload.user);
+    }
+
+    function onPresenceActivities(payload: { activities?: Record<string, 'voice' | 'watch'> }) {
+      setPresenceActivities(payload.activities ?? {});
     }
 
     function onPresenceSnapshot(payload: PresenceSnapshotPayload) {
@@ -1610,10 +1651,12 @@ export function MessengerWindow({
     socket.on('messenger:messagePinned', onMessagePinned);
     socket.on('messenger:conversationCleared', onConversationCleared);
     socket.on('messenger:conversationBackgroundChanged', onConversationBackgroundChanged);
+    socket.on('messenger:conversationTtlChanged', onConversationTtlChanged);
     socket.on('messenger:friendsChanged', onFriendsChanged);
     socket.on('desktop:userChanged', onUserChanged);
     socket.on('presence:snapshot', onPresenceSnapshot);
     socket.on('presence:changed', onPresenceChanged);
+    socket.on('presence:activities', onPresenceActivities);
     socket.on('messenger:typing', onTyping);
     socket.on('messenger:messagesRead', onMessagesRead);
     socket.on('messenger:groupCreated', onGroupCreated);
@@ -1635,10 +1678,12 @@ export function MessengerWindow({
       socket.off('messenger:messagePinned', onMessagePinned);
       socket.off('messenger:conversationCleared', onConversationCleared);
       socket.off('messenger:conversationBackgroundChanged', onConversationBackgroundChanged);
+      socket.off('messenger:conversationTtlChanged', onConversationTtlChanged);
       socket.off('messenger:friendsChanged', onFriendsChanged);
       socket.off('desktop:userChanged', onUserChanged);
       socket.off('presence:snapshot', onPresenceSnapshot);
       socket.off('presence:changed', onPresenceChanged);
+      socket.off('presence:activities', onPresenceActivities);
       socket.off('messenger:typing', onTyping);
       socket.off('messenger:messagesRead', onMessagesRead);
       typingExpiryRef.current.forEach((timer) => window.clearTimeout(timer));
@@ -2262,7 +2307,7 @@ export function MessengerWindow({
     }
 
     for (const message of sourceMessages) {
-      if (message.deletedAt || parseChatBackgroundMarker(message.body)) continue;
+      if (message.deletedAt || parseChatBackgroundMarker(message.body) || parseChatTtlMarker(message.body) !== null) continue;
       const senderUser = message.senderGroup ? undefined : (message.senderId === currentUser.id ? currentUser : selectedUser ?? undefined);
       const senderName = message.senderGroup?.name || senderUser?.nickname || '';
       getMessageMediaItems(message).forEach((media, index) => {
@@ -2445,7 +2490,7 @@ export function MessengerWindow({
     const recordingOverride = Boolean(attachmentOverride && (isVoiceAttachment(attachmentOverride.dataUrl, attachmentOverride.name) || isVideoCircleAttachment(attachmentOverride.dataUrl, attachmentOverride.name)));
     const batchImages = attachmentOverride ? [attachmentOverride] : pendingImages;
     const image = batchImages[0] ?? null;
-    const body = recordingOverride ? '' : expandCustomEmojiShortcodes((image ? imageCaptionDraft : messageDraftRef.current).trim());
+    const body = recordingOverride ? '' : applySlashCommand(expandCustomEmojiShortcodes((image ? imageCaptionDraft : messageDraftRef.current).trim()));
     if (!body && !image) return;
     const activeSenderGroup = selectedUser.allowGroupIdentityMessages === false ? null : selectedGroupIdentity;
 
@@ -2919,6 +2964,15 @@ export function MessengerWindow({
     if (message.deletedAt) return { kind: 'plain', value: t(language, 'messageDeleted') };
     const callLabel = callMessageLabel(message, currentUser.id, language);
     if (callLabel) return { kind: 'plain', value: `\u{1F4DE} ${callLabel}` };
+    const ttlMarker = parseChatTtlMarker(message.body);
+    if (ttlMarker !== null) {
+      return {
+        kind: 'plain',
+        value: language === 'ru'
+          ? (ttlMarker > 0 ? '⏱ Исчезающие сообщения включены' : '⏱ Исчезающие сообщения выключены')
+          : (ttlMarker > 0 ? '⏱ Disappearing messages on' : '⏱ Disappearing messages off')
+      };
+    }
     const backgroundAction = parseChatBackgroundMarker(message.body);
     if (backgroundAction) {
       return {
@@ -3485,6 +3539,19 @@ export function MessengerWindow({
               </span>
             </span>
           </button>
+          <button
+            className={selectedUser?.id === currentUser.id ? 'messenger-conversation active messenger-conversation-saved' : 'messenger-conversation messenger-conversation-saved'}
+            type="button"
+            onClick={() => void chooseUser(currentUser)}
+          >
+            <span className="messenger-avatar-wrap messenger-saved-avatar">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 2h12a2 2 0 0 1 2 2v18l-8-4.5L4 22V4a2 2 0 0 1 2-2z"/></svg>
+            </span>
+            <span className="messenger-conversation-text">
+              <strong>{language === 'ru' ? 'Избранное' : language === 'uk' ? 'Збережене' : 'Saved Messages'}</strong>
+              <small>{language === 'ru' ? 'Заметки и файлы для себя' : language === 'uk' ? 'Нотатки та файли для себе' : 'Notes and files for yourself'}</small>
+            </span>
+          </button>
           <div className="messenger-search-box messenger-direct-message-search">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.5" y2="16.5"/></svg>
             <input
@@ -3521,6 +3588,17 @@ export function MessengerWindow({
                   <i className={`${presenceDotClass(conversation.user)}${typingUserIds.includes(conversation.user.id) ? ' typing' : ''}`}>
                     {typingUserIds.includes(conversation.user.id) ? <span className="typing-presence-dots" aria-hidden="true"><b /><b /><b /></span> : null}
                   </i>
+                  {presenceActivities[conversation.user.id] ? (
+                    <span
+                      className="presence-activity-badge"
+                      title={presenceActivities[conversation.user.id] === 'voice'
+                        ? (language === 'ru' ? 'В голосовом канале' : 'In a voice channel')
+                        : (language === 'ru' ? 'Смотрит Watch Together' : 'Watching together')}
+                      aria-hidden="true"
+                    >
+                      {presenceActivities[conversation.user.id] === 'voice' ? '🎧' : '📺'}
+                    </span>
+                  ) : null}
                 </span>
                 <span className="messenger-conversation-text">
                   <UserName user={conversation.user} as="strong" />
@@ -3826,6 +3904,26 @@ export function MessengerWindow({
                   const senderName = message.senderGroup?.name || (message.senderId === currentUser.id ? currentUser.nickname : (selectedUser?.nickname ?? ''));
                   const callLogText = callLabel ? callLogSystemText(message, currentUser.id, language) : null;
 
+                  {
+                    const ttlMarkerSeconds = parseChatTtlMarker(message.body);
+                    if (ttlMarkerSeconds !== null) {
+                      return (
+                        <Fragment key={message.clientKey ?? message.id}>
+                          {showDateDivider ? (
+                            <div className="message-date-divider"><span>{formatMessageDate(message.createdAt, language)}</span></div>
+                          ) : null}
+                          <div className="dm-background-event" id={'msg-' + message.id} data-message-id={message.id}>
+                            <div className="dm-background-event-card">
+                              <div className="dm-background-event-title">
+                                ⏱ {chatTtlEventText(ttlMarkerSeconds, senderName, language)}
+                              </div>
+                              <time>{formatMessageTime(message.createdAt, language)}</time>
+                            </div>
+                          </div>
+                        </Fragment>
+                      );
+                    }
+                  }
                   if (backgroundAction) {
                     return (
                       <Fragment key={message.clientKey ?? message.id}>
@@ -3951,7 +4049,7 @@ export function MessengerWindow({
                             ) : message.imageData && !forwarded && isVideoCircleAttachment(message.imageData, message.imageName) ? (
                               <VideoCircleMessagePlayer src={message.imageData} senderName={senderName} createdAt={message.createdAt} />
                             ) : message.imageData && !forwarded && isVoiceAttachment(message.imageData, message.imageName) ? (
-                              <VoiceMessagePlayer src={message.imageData} senderName={senderName} createdAt={message.createdAt} />
+                              <VoiceMessagePlayer src={message.imageData} senderName={senderName} createdAt={message.createdAt} transcribe={!message.pending ? () => api.transcribeMessage(token, message.id).then((r) => r.transcript) : undefined} />
                             ) : message.imageData && !forwarded && isGifAttachment(message) && !spoilerHidden ? (
                               <ChatGifAttachment
                                 src={message.imageData}
@@ -4083,6 +4181,9 @@ export function MessengerWindow({
                                     />
                                   ) : null;
                                 })()}
+                                {message.linkPreview && !extractGroupInviteCode(message.body) && !extractWatchInvite(message.body) && !extractProfileUserId(message.body) ? (
+                                  <LinkPreviewCard preview={message.linkPreview} />
+                                ) : null}
                               </>
                             ) : null}
                           </>
@@ -4246,6 +4347,27 @@ export function MessengerWindow({
                       <MenuDeleteIcon />
                     </button>
                   ) : null}
+                  <div className="context-menu-ttl">
+                    <span className="context-menu-ttl-label">{language === 'ru' ? 'Таймер сообщений' : 'Message timer'}</span>
+                    <div className="context-menu-ttl-options">
+                      {([[0, language === 'ru' ? 'Выкл' : 'Off'], [3600, '1h'], [86400, '24h'], [604800, '7d']] as const).map(([seconds, label]) => (
+                        <button
+                          key={seconds}
+                          type="button"
+                          className={(dmTtls[selectedUser.id] ?? 0) === seconds ? 'active' : ''}
+                          onClick={() => {
+                            const userId = selectedUser.id;
+                            setChatMenu(null);
+                            api.setConversationTtl(token, userId, seconds)
+                              .then((payload) => setDmTtls((current) => ({ ...current, [userId]: payload.settings.messageTtlSeconds })))
+                              .catch(() => undefined);
+                          }}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                 </div>
               ) : null}
 
@@ -4347,6 +4469,16 @@ export function MessengerWindow({
                     event.currentTarget.value = '';
                     files.forEach((file) => void prepareImageFromFile(file));
                   }} />
+                {messageDraft.startsWith('/') && !messageDraft.includes(' ') ? (
+                  <div className="slash-command-hints">
+                    {SLASH_COMMANDS.filter((command) => command.name.startsWith(messageDraft.slice(1).toLowerCase())).map((command) => (
+                      <button key={command.name} type="button" onClick={() => updateMessageDraft(`/${command.name} `)}>
+                        <strong>/{command.name}</strong>
+                        <span>{command.hint}</span>
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
                 <div className="emoji-input-shell messenger-emoji-input">
                   <button className="emoji-toggle inline messenger-attach-inline" type="button" aria-label={t(language, 'imageMessage')}
                     disabled={Boolean(editingMessage)}

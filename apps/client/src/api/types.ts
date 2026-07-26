@@ -164,11 +164,22 @@ export type MessengerMessage = {
   pinnedAt: string | null;
   reactions: GroupMessageReaction[];
   replyTo: MessageReplySnippet | null;
+  linkPreview?: LinkPreview | null;
   // Client-only: a stable React key kept across the optimistic→server swap so
   // the bubble reconciles in place instead of remounting (no flash/jump). Also
   // marks a message as still-sending for a subtle pending style.
   clientKey?: string;
   pending?: boolean;
+};
+
+// OpenGraph preview of the first URL in a message body, attached by the server
+// shortly after the message is sent.
+export type LinkPreview = {
+  url: string;
+  title: string;
+  description: string;
+  imageUrl: string;
+  siteName: string;
 };
 
 export type MessageReplySnippet = {
@@ -202,6 +213,7 @@ export type ConversationPreview = {
 
 export type ConversationSettings = {
   backgroundData: string;
+  messageTtlSeconds: number;
   updatedBy: string | null;
   updatedAt: string | null;
 };
@@ -290,6 +302,7 @@ export type GroupMessage = {
   viewCount: number;
   reactions: GroupMessageReaction[];
   replyTo: MessageReplySnippet | null;
+  linkPreview?: LinkPreview | null;
   createdAt: string;
   // Client-only: see MessengerMessage.clientKey/pending.
   clientKey?: string;

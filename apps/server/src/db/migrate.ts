@@ -198,6 +198,25 @@ export async function migrate() {
     ALTER TABLE messages
       ADD COLUMN IF NOT EXISTS reply_to UUID;
 
+    -- OpenGraph preview of the first URL in the body, attached asynchronously
+    -- after the message is created ({url, title, description, imageUrl, siteName}).
+    ALTER TABLE messages
+      ADD COLUMN IF NOT EXISTS link_preview JSONB;
+
+    -- Cached Whisper transcript of a voice message (filled on first request).
+    ALTER TABLE messages
+      ADD COLUMN IF NOT EXISTS transcript TEXT;
+
+    -- Server-side cache of fetched OpenGraph previews keyed by sha256(url).
+    -- data is NULL when the fetch failed, so dead links are not retried on
+    -- every message that repeats them.
+    CREATE TABLE IF NOT EXISTS link_previews (
+      url_hash TEXT PRIMARY KEY,
+      url TEXT NOT NULL,
+      data JSONB,
+      fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
     -- Emoji reactions on direct messages. One row per (message, user, emoji).
     CREATE TABLE IF NOT EXISTS message_reactions (
       message_id UUID NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
@@ -243,6 +262,18 @@ export async function migrate() {
       PRIMARY KEY (user_a, user_b),
       CHECK (user_a < user_b)
     );
+
+    -- Disappearing messages: per-conversation TTL in seconds (0 = off). New
+    -- messages get expires_at = NOW() + ttl and a sweeper deletes them.
+    ALTER TABLE conversation_settings
+      ADD COLUMN IF NOT EXISTS message_ttl_seconds INT NOT NULL DEFAULT 0;
+
+    ALTER TABLE messages
+      ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
+
+    CREATE INDEX IF NOT EXISTS messages_expiring_idx
+      ON messages (expires_at)
+      WHERE expires_at IS NOT NULL AND deleted_at IS NULL;
 
     CREATE TABLE IF NOT EXISTS desktop_wall_messages (
       id UUID PRIMARY KEY,
@@ -386,6 +417,10 @@ export async function migrate() {
     -- Group reply: references the message this one replies to.
     ALTER TABLE group_messages
       ADD COLUMN IF NOT EXISTS reply_to UUID;
+    ALTER TABLE group_messages
+      ADD COLUMN IF NOT EXISTS link_preview JSONB;
+    ALTER TABLE group_messages
+      ADD COLUMN IF NOT EXISTS transcript TEXT;
     ALTER TABLE group_messages
       ADD COLUMN IF NOT EXISTS media_items JSONB;
     ALTER TABLE group_messages
