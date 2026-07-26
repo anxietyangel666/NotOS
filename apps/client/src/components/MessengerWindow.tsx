@@ -747,6 +747,9 @@ export function MessengerWindow({
   const messageDraftRef = useRef('');
   const lastPasteRef = useRef<{ signature: string; at: number } | null>(null);
   const [messageDraftSyncKey, setMessageDraftSyncKey] = useState(0);
+  // Mirrors the leading "/command" being typed so the hint list can render
+  // without putting the whole draft into state on every keystroke.
+  const [composerSlashPrefix, setComposerSlashPrefix] = useState('');
   const [imageCaptionDraft, setImageCaptionDraft] = useState('');
   const [pendingImages, setPendingImages] = useState<PendingChatImage[]>([]);
   const [editingMediaItems, setEditingMediaItems] = useState<PendingChatImage[]>([]);
@@ -2973,6 +2976,11 @@ export function MessengerWindow({
 
   function updateMessageDraft(value: string) {
     messageDraftRef.current = value;
+    // Typing does not push into `messageDraft` state (the input is local for
+    // performance), so mirror just the slash-command prefix into state. That
+    // re-renders only while a command is being typed, not on every keystroke.
+    const slashPrefix = value.startsWith('/') && !value.includes(' ') ? value : '';
+    setComposerSlashPrefix((current) => (current === slashPrefix ? current : slashPrefix));
     if (!selectedUser || editingMessage) return;
     const hasText = Boolean(value.trim());
     emitTyping(selectedUser.id, hasText);
@@ -4688,7 +4696,10 @@ export function MessengerWindow({
                       <MenuTranslateIcon />
                     </button>
                   ) : null}
-                  {selectedUser && !editingMessage && (messageDraft.trim() || pendingImages.length > 0) ? (
+                  {/* The composer keeps its text in a ref (the input is local
+                      for typing performance), so read the ref rather than the
+                      debounced `messageDraft` state. */}
+                  {selectedUser && !editingMessage && (messageDraftRef.current.trim() || pendingImages.length > 0) ? (
                     <>
                       <div className="context-menu-remind">
                         <span className="context-menu-remind-label">{language === 'ru' ? 'Отправить позже' : 'Send later'}</span>
@@ -4827,10 +4838,10 @@ export function MessengerWindow({
                     ))}
                   </div>
                 ) : null}
-                {messageDraft.startsWith('/') && !messageDraft.includes(' ') ? (
+                {composerSlashPrefix ? (
                   <div className="slash-command-hints">
-                    {SLASH_COMMANDS.filter((command) => command.name.startsWith(messageDraft.slice(1).toLowerCase())).map((command) => (
-                      <button key={command.name} type="button" onClick={() => updateMessageDraft(`/${command.name} `)}>
+                    {SLASH_COMMANDS.filter((command) => command.name.startsWith(composerSlashPrefix.slice(1).toLowerCase())).map((command) => (
+                      <button key={command.name} type="button" onClick={() => replaceMessageDraft(`/${command.name} `)}>
                         <strong>/{command.name}</strong>
                         <span>{command.hint}</span>
                       </button>
