@@ -3882,7 +3882,9 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
                             setFeedViewers({ messageId: targetId, users: null });
                             api.getGroupMessageViewers(token, group.id, targetId)
                               .then((payload) => setFeedViewers((current) => (current?.messageId === targetId ? { messageId: targetId, users: payload.viewers } : current)))
-                              .catch(() => setFeedViewers(null));
+                              // Keep the dialog open with an empty state on
+                              // failure instead of snapping shut.
+                              .catch(() => setFeedViewers((current) => (current?.messageId === targetId ? { messageId: targetId, users: [] } : current)));
                           }}
                         >
                           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg>
