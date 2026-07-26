@@ -712,22 +712,13 @@ export function ProfileModal({
               {(() => {
                 const levelInfo = levelFromXp(profileXp);
                 return (
-                  <div className="profile-level-card" title={`${levelInfo.currentXp} XP`}>
-                    <div className="profile-level-badge" aria-hidden="true">
-                      <svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M12 2l2.6 5.6L20 9l-4 4.2.9 6L12 16.4 7.1 19.2l.9-6L4 9l5.4-1.4L12 2z" />
-                      </svg>
-                      <span className="profile-level-number">{levelInfo.level}</span>
+                  <div className="profile-level-card" title={t(language, tierKeyForLevel(levelInfo.level))}>
+                    <div className="profile-level-row">
+                      <span className="profile-level-label">{t(language, 'levelLabel')} {levelInfo.level}</span>
+                      <span className="profile-level-xp">{levelInfo.currentXp} / {levelInfo.nextLevelXp} XP</span>
                     </div>
-                    <div className="profile-level-copy">
-                      <div className="profile-level-titles">
-                        <strong>{t(language, 'levelLabel')} {levelInfo.level}</strong>
-                        <span className="profile-level-tier">{t(language, tierKeyForLevel(levelInfo.level))}</span>
-                      </div>
-                      <div className="profile-level-track">
-                        <div className="profile-level-fill" style={{ width: `${Math.max(2, Math.round(levelInfo.progress * 100))}%` }} />
-                      </div>
-                      <small className="profile-level-xp">{levelInfo.currentXp} / {levelInfo.nextLevelXp} XP</small>
+                    <div className="profile-level-track">
+                      <div className="profile-level-fill" style={{ width: `${Math.max(2, Math.round(levelInfo.progress * 100))}%` }} />
                     </div>
                   </div>
                 );

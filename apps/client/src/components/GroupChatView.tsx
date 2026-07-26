@@ -4501,7 +4501,7 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
 
       {reactionRoleModal ? createPortal(
         <div className="modal-backdrop important" style={{ zIndex: 12000 }} onMouseDown={() => setReactionRoleModal(null)}>
-          <div className="modal reaction-role-modal" onMouseDown={(event) => event.stopPropagation()}>
+          <div className="schedule-modal reaction-role-modal" onMouseDown={(event) => event.stopPropagation()}>
             <h3>{t(language, 'reactionRoles')}</h3>
             <p className="reaction-role-hint">{t(language, 'reactionRolesHint')}</p>
             {reactionRoleModal.bindings === null ? (
@@ -4531,12 +4531,14 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
                 <div className="reaction-role-add">
                   <input
                     type="text"
+                    className="messenger-input"
                     maxLength={8}
                     placeholder="🙂"
                     value={reactionRoleModal.draftEmoji}
                     onChange={(event) => setReactionRoleModal((current) => current ? { ...current, draftEmoji: event.target.value } : current)}
                   />
                   <select
+                    className="messenger-input"
                     value={reactionRoleModal.draftRoleId}
                     onChange={(event) => setReactionRoleModal((current) => current ? { ...current, draftRoleId: event.target.value } : current)}
                   >
@@ -4547,7 +4549,7 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
                   </select>
                   <button
                     type="button"
-                    className="ghost-btn"
+                    className="secondary-action"
                     disabled={!reactionRoleModal.draftEmoji.trim() || !reactionRoleModal.draftRoleId}
                     onClick={() => setReactionRoleModal((current) => {
                       if (!current) return current;
@@ -4561,10 +4563,11 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
                     +
                   </button>
                 </div>
-                <div className="modal-actions">
-                  <button type="button" className="ghost-btn" onClick={() => setReactionRoleModal(null)}>{t(language, 'cancel')}</button>
+                <div className="reaction-role-actions">
+                  <button type="button" className="secondary-action" onClick={() => setReactionRoleModal(null)}>{t(language, 'cancel')}</button>
                   <button
                     type="button"
+                    className="primary-action"
                     disabled={reactionRoleModal.saving}
                     onClick={() => {
                       const modal = reactionRoleModal;
