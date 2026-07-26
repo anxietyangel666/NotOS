@@ -5175,7 +5175,21 @@ export function MessengerWindow({
             </>
           ) : (
             <div className="messenger-empty-state">
-              <h3>{t(language, 'selectUserToMessage')}</h3>
+              <span className="messenger-empty-icon" aria-hidden="true">
+                <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                </svg>
+              </span>
+              <strong className="messenger-empty-title">
+                {language === 'ru' ? 'Выберите чат' : language === 'uk' ? 'Оберіть чат' : 'Select a chat'}
+              </strong>
+              <p className="messenger-empty-hint">
+                {language === 'ru'
+                  ? 'Откройте диалог слева, чтобы начать переписку'
+                  : language === 'uk'
+                    ? 'Відкрийте діалог ліворуч, щоб почати листування'
+                    : 'Open a conversation on the left to start messaging'}
+              </p>
             </div>
           )}
         </section>
