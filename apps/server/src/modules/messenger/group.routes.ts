@@ -27,6 +27,7 @@ import {
   incrementGroupInviteUse,
   listGroupConversationPreviews,
   listGroupMessages,
+  listThreadMessages,
   listGroupPinnedMessages,
   listGroupMediaMessages,
   markGroupMessagesViewed,
@@ -1892,6 +1893,63 @@ export function createGroupRouter(io: Server) {
       const message = messages.find((item) => item.id === messageId) ?? messages.find((item) => item.id === canonicalMessageId) ?? await toPublicGroupMessageEnriched(groupMessage);
 
       res.json({ message });
+    })
+  );
+
+  // ── Threads ───────────────────────────────────────────────────────────────
+  // Replies posted "in thread" hang off a root channel message and stay out
+  // of the main channel flow.
+  router.get(
+    '/groups/:groupId/messages/:messageId/thread',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      const messageId = z.string().uuid().parse(req.params.messageId);
+      const rootResult = await pool.query<GroupMessageRecord>(
+        'SELECT * FROM group_messages WHERE id = $1 AND group_id = $2 AND deleted_at IS NULL',
+        [messageId, groupId]
+      );
+      const root = rootResult.rows[0];
+      if (!root || !root.channel_id) throw new HttpError(404, 'Message not found', 'MESSAGE_NOT_FOUND');
+      if (root.thread_root_id) throw new HttpError(400, 'Threads cannot be nested', 'THREAD_NESTED');
+      await requireChannelPermission(groupId, root.channel_id, req.auth.userId, 'ViewChannel', 'CHANNEL_VIEW_FORBIDDEN');
+
+      const rows = await listThreadMessages(groupId, messageId);
+      const messages = await toPublicGroupMessagesWithReactions(rows);
+      res.json({ root: toPublicGroupMessage(root), messages });
+    })
+  );
+
+  router.post(
+    '/groups/:groupId/messages/:messageId/thread',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      const messageId = z.string().uuid().parse(req.params.messageId);
+      const input = z.object({
+        body: z.string().trim().min(1).max(2000)
+      }).parse(req.body ?? {});
+
+      const rootResult = await pool.query<GroupMessageRecord>(
+        'SELECT * FROM group_messages WHERE id = $1 AND group_id = $2 AND deleted_at IS NULL',
+        [messageId, groupId]
+      );
+      const root = rootResult.rows[0];
+      if (!root || !root.channel_id) throw new HttpError(404, 'Message not found', 'MESSAGE_NOT_FOUND');
+      if (root.thread_root_id) throw new HttpError(400, 'Threads cannot be nested', 'THREAD_NESTED');
+      await requireChannelPermission(groupId, root.channel_id, req.auth.userId, 'ViewChannel', 'CHANNEL_VIEW_FORBIDDEN');
+      await requireChannelPermission(groupId, root.channel_id, req.auth.userId, 'SendMessages', 'GROUP_SEND_FORBIDDEN');
+
+      const message = await createGroupMessage(
+        req.auth.userId, groupId, root.channel_id, input.body,
+        undefined, null, null, undefined, undefined, messageId
+      );
+      if (!message) throw new HttpError(403, 'Cannot send message', 'GROUP_SEND_FORBIDDEN');
+
+      const publicMessage = toPublicGroupMessage(message);
+      const memberIds = await visibleMemberIdsForChannel(groupId, root.channel_id);
+      for (const id of memberIds) io.to(id).emit('messenger:groupThreadMessage', { message: publicMessage });
+      res.json({ message: publicMessage });
     })
   );
 

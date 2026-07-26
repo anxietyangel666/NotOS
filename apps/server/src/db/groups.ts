@@ -99,6 +99,8 @@ export type GroupMessageRecord = {
   feed_source_id: string | null;
   feed_mirror: boolean;
   view_count?: number;
+  thread_root_id: string | null;
+  thread_count?: number;
   link_preview: { url: string; title: string; description: string; imageUrl: string; siteName: string } | null;
   created_at: Date;
 };
@@ -216,6 +218,8 @@ export type PublicGroupMessage = {
   reactions: GroupMessageReaction[];
   replyTo: GroupMessageReplySnippet | null;
   linkPreview: { url: string; title: string; description: string; imageUrl: string; siteName: string } | null;
+  threadRootId: string | null;
+  threadCount: number;
   createdAt: string;
 };
 
@@ -274,6 +278,8 @@ export function toPublicGroupMessage(message: GroupMessageRecord, reactions: Gro
     reactions: message.deleted_at ? [] : reactions,
     replyTo,
     linkPreview: message.deleted_at ? null : message.link_preview ?? null,
+    threadRootId: message.thread_root_id ?? null,
+    threadCount: Number(message.thread_count ?? 0),
     createdAt: message.created_at.toISOString()
   };
 }
@@ -1302,11 +1308,17 @@ export async function listGroupMessages(
           SELECT COUNT(*)::int
           FROM group_message_views gmv
           WHERE gmv.message_id = COALESCE(gm.feed_source_id, gm.id)
-        ) AS view_count
+        ) AS view_count,
+        (
+          SELECT COUNT(*)::int
+          FROM group_messages tr
+          WHERE tr.thread_root_id = gm.id AND tr.deleted_at IS NULL
+        ) AS thread_count
       FROM group_messages gm
       WHERE gm.group_id = $1
         AND gm.channel_id = $2
         AND gm.deleted_at IS NULL
+        AND gm.thread_root_id IS NULL
         ${cursorClause}
       ORDER BY gm.created_at DESC, gm.id DESC
       LIMIT ${limitParam}
@@ -1400,7 +1412,8 @@ export async function createGroupMessage(
   replyTo?: string | null,
   senderGroup?: { id: string; name: string; avatarData: string } | null,
   mediaItems?: Array<{ dataUrl: string; name?: string | null; spoiler?: boolean }>,
-  feed?: { sourceId?: string | null; mirror?: boolean }
+  feed?: { sourceId?: string | null; mirror?: boolean },
+  threadRootId?: string | null
 ) {
   const member = await isGroupMember(groupId, senderId);
   if (!member) return null;
@@ -1413,9 +1426,9 @@ export async function createGroupMessage(
       INSERT INTO group_messages (
         id, group_id, channel_id, sender_id,
         sender_group_id, sender_group_name, sender_group_avatar_data,
-        body, image_data, image_name, image_spoiler, media_items, reply_to, feed_source_id, feed_mirror
+        body, image_data, image_name, image_spoiler, media_items, reply_to, feed_source_id, feed_mirror, thread_root_id
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14, $15)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14, $15, $16)
       RETURNING *
     `,
     [
@@ -1433,11 +1446,29 @@ export async function createGroupMessage(
       items.length > 0 ? JSON.stringify(items) : null,
       replyTo ?? null,
       feed?.sourceId ?? null,
-      Boolean(feed?.mirror)
+      Boolean(feed?.mirror),
+      threadRootId ?? null
     ]
   );
 
   return result.rows[0];
+}
+
+// All replies of a thread, oldest first.
+export async function listThreadMessages(groupId: string, rootId: string): Promise<GroupMessageRecord[]> {
+  const result = await pool.query<GroupMessageRecord>(
+    `
+      SELECT gm.*
+      FROM group_messages gm
+      WHERE gm.group_id = $1
+        AND gm.thread_root_id = $2
+        AND gm.deleted_at IS NULL
+      ORDER BY gm.created_at ASC, gm.id ASC
+      LIMIT 500
+    `,
+    [groupId, rootId]
+  );
+  return result.rows;
 }
 
 export async function updateGroupMessage(

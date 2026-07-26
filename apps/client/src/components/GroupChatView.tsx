@@ -146,6 +146,14 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
   const [groupSearchActiveId, setGroupSearchActiveId] = useState<string | null>(null);
   // AI "what did I miss?" summary of the active channel.
   const [channelSummary, setChannelSummary] = useState<{ open: boolean; loading: boolean; text: string; error: string }>({ open: false, loading: false, text: '', error: '' });
+  // Thread side panel: replies hanging off a root channel message.
+  const [threadViewRootId, setThreadViewRootId] = useState<string | null>(null);
+  const [threadViewRoot, setThreadViewRoot] = useState<GroupMessage | null>(null);
+  const [threadViewMessages, setThreadViewMessages] = useState<GroupMessage[]>([]);
+  const [threadViewLoading, setThreadViewLoading] = useState(false);
+  const [threadViewDraft, setThreadViewDraft] = useState('');
+  const [threadViewSending, setThreadViewSending] = useState(false);
+  const threadViewRootRef = useRef<string | null>(null);
   const [groupMembersHidden, setGroupMembersHidden] = useState(false);
   const [messageMenu, setMessageMenu] = useState<{ x: number; y: number; message: GroupMessage; imageSrc?: string } | null>(null);
   const [channelMenu, setChannelMenu] = useState<{ x: number; y: number; kind: 'channel' | 'folder'; id: string; name: string } | null>(null);
@@ -1370,7 +1378,19 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
       setChannels(payload.channels);
       setFolders(payload.folders);
     }
+    function handleThreadMessage(payload: { message: GroupMessage }) {
+      const msg = payload.message;
+      if (msg.groupId !== group.id || !msg.threadRootId) return;
+      const rootId = msg.threadRootId;
+      // Bump the root's reply counter in the channel flow.
+      setMessages((current) => current.map((m) => (m.id === rootId ? { ...m, threadCount: (m.threadCount ?? 0) + 1 } : m)));
+      if (threadViewRootRef.current === rootId) {
+        setThreadViewMessages((current) => current.some((m) => m.id === msg.id) ? current : [...current, msg]);
+      }
+    }
+
     socket.on('messenger:groupMessage', handleNewMessage);
+    socket.on('messenger:groupThreadMessage', handleThreadMessage);
     socket.on('messenger:groupMessageUpdated', handleUpdateMessage);
     socket.on('messenger:groupMessageDeleted', handleUpdateMessage);
     socket.on('messenger:groupChannelCreated', handleChannelCreated);
@@ -1389,6 +1409,7 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
     // (doing so would tear down presence and every other live feature).
     return () => {
       socket.off('messenger:groupMessage', handleNewMessage);
+      socket.off('messenger:groupThreadMessage', handleThreadMessage);
       socket.off('messenger:groupMessageUpdated', handleUpdateMessage);
       socket.off('messenger:groupMessageDeleted', handleUpdateMessage);
       socket.off('messenger:groupChannelCreated', handleChannelCreated);
@@ -3044,6 +3065,56 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
   // Renders a single channel button (text or voice) for both the folder and
   // root channel lists.
 
+  function openThreadView(message: GroupMessage) {
+    const rootId = message.feedSourceId ?? message.id;
+    threadViewRootRef.current = rootId;
+    setThreadViewRootId(rootId);
+    setThreadViewRoot(message);
+    setThreadViewMessages([]);
+    setThreadViewDraft('');
+    setThreadViewLoading(true);
+    api.getGroupThread(token, group.id, rootId)
+      .then((payload) => {
+        if (threadViewRootRef.current !== rootId) return;
+        setThreadViewRoot(payload.root);
+        setThreadViewMessages(payload.messages);
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (threadViewRootRef.current === rootId) setThreadViewLoading(false);
+      });
+  }
+
+  function closeThreadView() {
+    threadViewRootRef.current = null;
+    setThreadViewRootId(null);
+    setThreadViewRoot(null);
+    setThreadViewMessages([]);
+    setThreadViewDraft('');
+  }
+
+  async function sendThreadViewMessage() {
+    const rootId = threadViewRootRef.current;
+    const body = applySlashCommand(expandCustomEmojiShortcodes(threadViewDraft.trim()));
+    if (!rootId || !body || threadViewSending) return;
+    setThreadViewSending(true);
+    try {
+      const payload = await api.sendGroupThreadMessage(token, group.id, rootId, body);
+      setThreadViewDraft('');
+      setThreadViewMessages((current) => current.some((m) => m.id === payload.message.id) ? current : [...current, payload.message]);
+      setMessages((current) => current.map((m) => (m.id === rootId ? { ...m, threadCount: Math.max((m.threadCount ?? 0), threadViewMessages.length + 1) } : m)));
+    } catch {
+      // Keep the draft so the user can retry.
+    }
+    setThreadViewSending(false);
+  }
+
+  // Close the thread panel when the user switches channel or group.
+  useEffect(() => {
+    closeThreadView();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeChannel, group.id]);
+
   const messengerSettingsTarget = typeof document !== 'undefined'
     ? document.querySelector<HTMLElement>('.messenger-window .messenger-shell') ?? document.body
     : null;
@@ -3213,6 +3284,54 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
             </button>
           </div>
         </header>
+        {threadViewRootId ? (
+          <div className="thread-panel">
+            <div className="thread-panel-head">
+              <strong>{language === 'ru' ? 'Ветка' : language === 'uk' ? 'Гілка' : 'Thread'}</strong>
+              <button type="button" onClick={closeThreadView} aria-label="close">✕</button>
+            </div>
+            {threadViewRoot ? (
+              <div className="thread-panel-root">
+                <img src={knownSenders.get(threadViewRoot.senderId)?.avatarData ?? ''} alt="" />
+                <div className="thread-panel-root-text">
+                  <span className="thread-panel-author">{senderName(threadViewRoot.senderId)}</span>
+                  <span className="thread-panel-body">{threadViewRoot.body ? <MessageText text={threadViewRoot.body} /> : (threadViewRoot.imageData ? '📷' : '')}</span>
+                </div>
+              </div>
+            ) : null}
+            <div className="thread-panel-messages">
+              {threadViewLoading ? (
+                <p className="thread-panel-hint">{language === 'ru' ? 'Загрузка...' : 'Loading...'}</p>
+              ) : threadViewMessages.length === 0 ? (
+                <p className="thread-panel-hint">{language === 'ru' ? 'Ответов пока нет — начните ветку' : 'No replies yet — start the thread'}</p>
+              ) : threadViewMessages.map((reply) => (
+                <div key={reply.id} className="thread-panel-message">
+                  <img src={knownSenders.get(reply.senderId)?.avatarData ?? ''} alt="" />
+                  <div className="thread-panel-message-text">
+                    <span className="thread-panel-message-head">
+                      <span className="thread-panel-author">{senderName(reply.senderId)}</span>
+                      <time>{formatTime(reply.createdAt)}</time>
+                    </span>
+                    <span className="thread-panel-body"><MessageText text={reply.body} /></span>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="thread-panel-compose">
+              <input
+                type="text"
+                className="messenger-input"
+                value={threadViewDraft}
+                placeholder={language === 'ru' ? 'Ответить в ветке...' : 'Reply in thread...'}
+                onChange={(event) => setThreadViewDraft(event.target.value)}
+                onKeyDown={(event) => { if (event.key === 'Enter') void sendThreadViewMessage(); }}
+              />
+              <button type="button" className="primary-action" disabled={!threadViewDraft.trim() || threadViewSending} onClick={() => void sendThreadViewMessage()}>
+                {language === 'ru' ? 'Отпр.' : 'Send'}
+              </button>
+            </div>
+          </div>
+        ) : null}
         {channelSummary.open ? (
           <div className="channel-summary-panel">
             <div className="channel-summary-head">
@@ -3613,6 +3732,12 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
                         );
                       })}
                     </div>
+                  ) : null}
+                  {!message.deletedAt && !isFeedPost && (message.threadCount ?? 0) > 0 ? (
+                    <button type="button" className="message-thread-chip" onClick={() => openThreadView(message)}>
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                      {message.threadCount} {language === 'ru' ? (message.threadCount === 1 ? 'ответ' : (message.threadCount ?? 0) < 5 ? 'ответа' : 'ответов') : ((message.threadCount ?? 0) === 1 ? 'reply' : 'replies')}
+                    </button>
                   ) : null}
                   {!message.deletedAt && isFeedPost ? (
                     <div className="feed-post-footer">
@@ -4040,6 +4165,12 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
           {!messageMenu.message.deletedAt ? (
             <button type="button" className="context-menu-action" onClick={() => replyToMessage(messageMenu.message)}>
               <span className="context-menu-action-text">{t(language, 'reply')}</span>
+              <MenuReplyIcon />
+            </button>
+          ) : null}
+          {!messageMenu.message.deletedAt && !messageMenu.message.threadRootId && activeChannelObj?.type === 'text' ? (
+            <button type="button" className="context-menu-action" onClick={() => { openThreadView(messageMenu.message); setMessageMenu(null); }}>
+              <span className="context-menu-action-text">{language === 'ru' ? 'Ответить в ветке' : language === 'uk' ? 'Відповісти в гілці' : 'Reply in thread'}</span>
               <MenuReplyIcon />
             </button>
           ) : null}

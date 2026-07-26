@@ -421,6 +421,14 @@ export async function migrate() {
       ADD COLUMN IF NOT EXISTS link_preview JSONB;
     ALTER TABLE group_messages
       ADD COLUMN IF NOT EXISTS transcript TEXT;
+
+    -- Threads: replies posted "in thread" reference the root message and are
+    -- hidden from the main channel flow.
+    ALTER TABLE group_messages
+      ADD COLUMN IF NOT EXISTS thread_root_id UUID;
+    CREATE INDEX IF NOT EXISTS group_messages_thread_idx
+      ON group_messages (thread_root_id, created_at)
+      WHERE thread_root_id IS NOT NULL;
     ALTER TABLE group_messages
       ADD COLUMN IF NOT EXISTS media_items JSONB;
     ALTER TABLE group_messages

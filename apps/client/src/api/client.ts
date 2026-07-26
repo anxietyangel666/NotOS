@@ -576,6 +576,18 @@ export const api = {
       { token, method: 'POST', body: {} }
     );
   },
+  getGroupThread(token: string, groupId: string, messageId: string) {
+    return request<{ root: GroupMessage; messages: GroupMessage[] }>(
+      `/api/messenger/groups/${encodeURIComponent(groupId)}/messages/${encodeURIComponent(messageId)}/thread`,
+      { token }
+    );
+  },
+  sendGroupThreadMessage(token: string, groupId: string, messageId: string, body: string) {
+    return request<{ message: GroupMessage }>(
+      `/api/messenger/groups/${encodeURIComponent(groupId)}/messages/${encodeURIComponent(messageId)}/thread`,
+      { token, method: 'POST', body: { body } }
+    );
+  },
   summarizeGroupChannel(token: string, groupId: string, channelId: string, count?: number) {
     return request<{ summary: string; messageCount: number }>(
       `/api/messenger/groups/${encodeURIComponent(groupId)}/channels/${encodeURIComponent(channelId)}/summarize`,

@@ -303,6 +303,8 @@ export type GroupMessage = {
   reactions: GroupMessageReaction[];
   replyTo: MessageReplySnippet | null;
   linkPreview?: LinkPreview | null;
+  threadRootId?: string | null;
+  threadCount?: number;
   createdAt: string;
   // Client-only: see MessengerMessage.clientKey/pending.
   clientKey?: string;
