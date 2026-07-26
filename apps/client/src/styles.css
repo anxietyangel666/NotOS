@@ -23214,6 +23214,9 @@ div.settings-music-row {
 
 /* ── Scheduled messages bar + send-later menu ── */
 .scheduled-messages-bar {
+  /* .messenger-compose is a 2-column grid (input | actions); span both so the
+     bar sits above the input instead of squeezing it into the narrow column. */
+  grid-column: 1 / -1;
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -23312,3 +23315,12 @@ div.settings-music-row {
   cursor: pointer;
 }
 .view-once-open:hover { background: var(--lighter-plus); }
+
+/* Divider between the edit actions and the send-later block in the composer
+   context menu. */
+.context-menu-divider {
+  height: 1px;
+  margin: 4px 6px;
+  border: 0;
+  background: var(--line);
+}

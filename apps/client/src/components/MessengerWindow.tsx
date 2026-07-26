@@ -4701,23 +4701,25 @@ export function MessengerWindow({
                       debounced `messageDraft` state. */}
                   {selectedUser && !editingMessage && (messageDraftRef.current.trim() || pendingImages.length > 0) ? (
                     <>
-                      <div className="context-menu-remind">
-                        <span className="context-menu-remind-label">{language === 'ru' ? 'Отправить позже' : 'Send later'}</span>
-                        <div className="context-menu-remind-options">
-                          {([[3600, '1h'], [10800, '3h'], [86400, '24h']] as const).map(([seconds, label]) => (
-                            <button
-                              key={seconds}
-                              type="button"
-                              onClick={() => {
-                                setComposerMenu(null);
-                                void sendMessage(undefined, { scheduledAt: new Date(Date.now() + seconds * 1000).toISOString() });
-                              }}
-                            >
-                              {label}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
+                      <hr className="context-menu-divider" />
+                      {([
+                        [3600, language === 'ru' ? 'Отправить через час' : language === 'uk' ? 'Надіслати через годину' : 'Send in 1 hour'],
+                        [10800, language === 'ru' ? 'Отправить через 3 часа' : language === 'uk' ? 'Надіслати через 3 години' : 'Send in 3 hours'],
+                        [86400, language === 'ru' ? 'Отправить завтра' : language === 'uk' ? 'Надіслати завтра' : 'Send tomorrow']
+                      ] as const).map(([seconds, label]) => (
+                        <button
+                          key={seconds}
+                          type="button"
+                          className="context-menu-action"
+                          onClick={() => {
+                            setComposerMenu(null);
+                            void sendMessage(undefined, { scheduledAt: new Date(Date.now() + seconds * 1000).toISOString() });
+                          }}
+                        >
+                          <span className="context-menu-action-text">{label}</span>
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+                        </button>
+                      ))}
                       <button
                         type="button"
                         className="context-menu-action"
@@ -4729,6 +4731,7 @@ export function MessengerWindow({
                         <span className="context-menu-action-text">
                           {language === 'ru' ? 'Отправить, когда будет в сети' : language === 'uk' ? 'Надіслати, коли буде онлайн' : 'Send when they are online'}
                         </span>
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor" stroke="none"/><path d="M5.6 5.6a9 9 0 0 0 0 12.8M18.4 5.6a9 9 0 0 1 0 12.8"/></svg>
                       </button>
                     </>
                   ) : null}
