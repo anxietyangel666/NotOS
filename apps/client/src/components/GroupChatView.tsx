@@ -33,6 +33,7 @@ import { extractWatchInvite } from '../utils/watch-invite-link';
 import { WatchInviteEmbed } from './WatchInviteEmbed';
 import { LinkPreviewCard } from './LinkPreviewCard';
 import { PollEmbed, extractPollId } from './PollEmbed';
+import { GameEmbed, parseGameBody } from './GameEmbed';
 import { PollCreateModal } from './PollCreateModal';
 import { applySlashCommand, SLASH_COMMANDS } from '../utils/slash-commands';
 import { copyImageToClipboard, MediaLightbox, type MediaLightboxItem } from './MediaLightbox';
@@ -3632,6 +3633,8 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
                       })() : null}
                       {extractPollId(message.body) ? (
                         <PollEmbed token={token} language={language} pollId={extractPollId(message.body)!} currentUserId={currentUser.id} />
+                      ) : parseGameBody(message.body) ? (
+                        <GameEmbed game={parseGameBody(message.body)!} language={language} />
                       ) : message.body && forwarded ? (
                         (() => {
                           const fwd = forwarded;

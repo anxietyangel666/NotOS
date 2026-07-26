@@ -13,6 +13,10 @@ export type SlashCommandInfo = {
 };
 
 export const SLASH_COMMANDS: SlashCommandInfo[] = [
+  { name: 'roll', hint: '🎲 2d6 · d20 · 1-100' },
+  { name: 'coin', hint: '🪙 heads / tails' },
+  { name: 'pick', hint: '🎯 a | b | c · @everyone' },
+  { name: '8ball', hint: '🎱 …?' },
   { name: 'shrug', hint: '¯\\_(ツ)_/¯' },
   { name: 'tableflip', hint: '(╯°□°)╯︵ ┻━┻' },
   { name: 'unflip', hint: '┬─┬ ノ( ゜-゜ノ)' },

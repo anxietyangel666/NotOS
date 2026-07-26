@@ -18,6 +18,7 @@ import { InviteEmbed } from './InviteEmbed';
 import { UserEmbed } from './UserEmbed';
 import { LinkPreviewCard } from './LinkPreviewCard';
 import { PollEmbed, extractPollId } from './PollEmbed';
+import { GameEmbed, gamePreviewLabel, parseGameBody } from './GameEmbed';
 import { PollCreateModal } from './PollCreateModal';
 import { applySlashCommand, SLASH_COMMANDS } from '../utils/slash-commands';
 import { UserName } from './UserName';
@@ -3241,6 +3242,8 @@ export function MessengerWindow({
     if (extractPollId(message.body)) {
       return { kind: 'plain', value: `📊 ${t(language, 'pollPreviewLabel')}` };
     }
+    const gameLabel = gamePreviewLabel(message.body, language);
+    if (gameLabel) return { kind: 'plain', value: gameLabel };
     const ttlMarker = parseChatTtlMarker(message.body);
     if (ttlMarker !== null) {
       return {
@@ -4636,6 +4639,8 @@ export function MessengerWindow({
                               </p>
                             ) : extractPollId(message.body) ? (
                               <PollEmbed token={token} language={language} pollId={extractPollId(message.body)!} currentUserId={currentUser.id} />
+                            ) : parseGameBody(message.body) ? (
+                              <GameEmbed game={parseGameBody(message.body)!} language={language} />
                             ) : message.body && forwarded ? (
                               (() => {
                                 const fwd = forwarded;

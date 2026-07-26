@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { chatImageSchema, chatMediaItemsSchema } from './media.js';
 import { getLinkPreviewForBody } from './link-preview.js';
 import { createPoll, pollMarker, toPublicPoll } from './polls.js';
+import { resolveGameCommand } from './games.js';
 import { callGroq } from '../ai/groq.js';
 import { transcribeAudioDataUrl } from '../ai/transcribe.js';
 import { consumeAiQuota } from '../../db/ai-quota.js';
@@ -1641,6 +1642,14 @@ export function createGroupRouter(io: Server) {
             return;
           }
         }
+      }
+
+      // Server-side game commands; "/pick @everyone" draws from the channel's
+      // visible members.
+      if (!input.image && !input.mediaItems?.length && /^\/(roll|coin|8ball|pick)\b/i.test(input.body.trim())) {
+        const members = await listGroupMembers(groupId);
+        const gameBody = resolveGameCommand(input.body, members.map((member) => member.nickname));
+        if (gameBody) input.body = gameBody;
       }
 
       const message = await createGroupMessage(req.auth.userId, groupId, input.channelId, input.body, input.image, input.replyTo, senderGroup, input.mediaItems);

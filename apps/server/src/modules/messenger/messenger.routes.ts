@@ -69,6 +69,7 @@ import { mentionedUserIdsFromBody } from './mentions.js';
 import { saveChatImageDataUrl } from './upload-storage.js';
 import { getLinkPreviewForBody } from './link-preview.js';
 import { createPoll, findPoll, pollMarker, setPollVotes, toPublicPoll, type PollContext } from './polls.js';
+import { resolveGameCommand } from './games.js';
 import { isGroupMember, listGroupMemberIds } from '../../db/groups.js';
 import { transcribeAudioDataUrl } from '../ai/transcribe.js';
 import { consumeAiQuota } from '../../db/ai-quota.js';
@@ -995,6 +996,11 @@ export function createMessengerRouter(io: Server) {
       // has no settings row and never expires).
       const conversationSettings = isSelfMessage ? null : await getConversationSettings(req.auth.userId, input.recipientId);
       const messageTtlSeconds = conversationSettings?.message_ttl_seconds ?? 0;
+
+      // Game commands (/roll, /coin, ...) are resolved server-side so the
+      // outcome is authoritative; the body becomes a [game:...] marker.
+      const gameBody = !input.image && !input.mediaItems?.length ? resolveGameCommand(input.body) : null;
+      if (gameBody) input.body = gameBody;
 
       // Scheduled sends stay invisible until the sweeper releases them; they
       // must land in the future and within a month.
