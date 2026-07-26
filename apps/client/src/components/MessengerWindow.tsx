@@ -4100,32 +4100,64 @@ export function MessengerWindow({
                       </p>
                     ) : null}
                     {scheduledForSelectedUser.map((message) => (
-                      <article key={message.id} className="scheduled-view-item">
+                      <div key={message.id} className="scheduled-view-row">
                         <div className="scheduled-view-when">
-                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
                           {message.awaitingOnline
                             ? (language === 'ru' ? 'Когда собеседник будет в сети' : language === 'uk' ? 'Коли співрозмовник буде онлайн' : 'When they come online')
                             : message.scheduledAt
                               ? `${formatMessageDate(message.scheduledAt, language)}, ${formatMessageTime(message.scheduledAt, language)}`
                               : ''}
-                        </div>
-                        <div className="scheduled-view-body">
-                          {message.body ? <MessageText text={message.body} /> : null}
-                          {message.imageData ? <img className="scheduled-view-thumb" src={message.imageData} alt="" /> : null}
-                        </div>
-                        <div className="scheduled-view-actions">
                           <button
                             type="button"
+                            className="scheduled-view-cancel"
+                            title={t(language, 'cancel')}
+                            aria-label={t(language, 'cancel')}
                             onClick={() => {
                               api.cancelScheduledMessage(token, message.id)
                                 .then(() => setScheduledMessages((current) => current.filter((m) => m.id !== message.id)))
                                 .catch(() => undefined);
                             }}
-                          >
-                            {t(language, 'cancel')}
-                          </button>
+                          >✕</button>
                         </div>
-                      </article>
+                        {/* Same bubble markup as the live thread (avatar column,
+                            meta line, body) so scheduled messages render exactly
+                            like sent ones. */}
+                        <article
+                          className={[
+                            'message-bubble',
+                            'message-group-start',
+                            'message-group-end',
+                            'message-avatar-active',
+                            'mine',
+                            message.imageData ? 'has-image' : '',
+                            message.imageData && !message.body ? 'image-only' : ''
+                          ].filter(Boolean).join(' ')}
+                          data-time={message.scheduledAt ? formatMessageTime(message.scheduledAt, language) : ''}
+                        >
+                          <img className="message-avatar" src={currentUser.avatarData} alt="" draggable={false} />
+                          <div className="message-body">
+                            <div className="message-meta">
+                              <UserName user={currentUser} as="strong" className="message-author" />
+                              <time className="message-time">
+                                {message.scheduledAt && !message.awaitingOnline
+                                  ? formatMessageTime(message.scheduledAt, language)
+                                  : (language === 'ru' ? 'в сети' : 'online')}
+                              </time>
+                            </div>
+                            {message.imageData ? (
+                              <button
+                                type="button"
+                                className="message-image"
+                                onClick={() => openImageViewer(message.imageData ?? '', message.imageName ?? t(language, 'imageMessage'))}
+                              >
+                                <img src={message.imageData} alt="" loading="lazy" decoding="async" />
+                              </button>
+                            ) : null}
+                            {message.body ? <p className="message-text"><MessageText text={message.body} /></p> : null}
+                          </div>
+                        </article>
+                      </div>
                     ))}
                   </div>
                 ) : null}
@@ -5045,6 +5077,7 @@ export function MessengerWindow({
                     >
                       <EmojiToggleIcon />
                     </button>
+                    {scheduledForSelectedUser.length > 0 || scheduledViewOpen ? (
                     <button
                       className={scheduledViewOpen ? 'emoji-toggle inline dm-scheduled-toggle active' : 'emoji-toggle inline dm-scheduled-toggle'}
                       type="button"
@@ -5059,6 +5092,7 @@ export function MessengerWindow({
                       </svg>
                       {scheduledForSelectedUser.length > 0 ? <span className="dm-scheduled-count">{scheduledForSelectedUser.length}</span> : null}
                     </button>
+                    ) : null}
                     {emojiOpen ? <EmojiPicker language={language} enlarged initialTab={pickerTab} anchorRef={messageEmojiAnchorRef} placement="top-end" onSelect={insertEmoji} onSelectGif={(gif) => void sendGif(gif)} onClose={() => setEmojiOpen(false)} token={token} currentUser={currentUser} /> : null}
                   </div>
                 </div>

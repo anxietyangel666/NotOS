@@ -23343,16 +23343,20 @@ div.settings-music-row {
 .messenger-thread.scheduled-view {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 14px 16px;
+  gap: 4px;
+  padding: 0 0 12px;
   overflow-y: auto;
 }
 .scheduled-view-head {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding-bottom: 10px;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 10px 16px;
   border-bottom: 1px solid var(--line);
+  background: var(--panel);
 }
 .scheduled-view-head strong { font-size: 14px; }
 .scheduled-view-back {
@@ -23373,37 +23377,26 @@ div.settings-music-row {
   color: var(--muted);
   font-size: 12px;
 }
-.scheduled-view-empty { color: var(--muted); font-size: 13px; margin: 12px 0 0; }
-.scheduled-view-item {
-  padding: 12px 14px;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  background: var(--lighter);
-}
+.scheduled-view-empty { color: var(--muted); font-size: 13px; margin: 16px; }
+
+/* One scheduled entry: a delivery-time strip followed by a normal chat bubble. */
+.scheduled-view-row { display: flex; flex-direction: column; margin-top: 6px; }
 .scheduled-view-when {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-bottom: 6px;
+  padding: 2px 16px 0 68px;
   color: var(--blue);
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 600;
 }
-.scheduled-view-body { font-size: 13.5px; line-height: 1.45; overflow-wrap: anywhere; }
-.scheduled-view-thumb {
-  display: block;
-  max-width: 160px;
-  margin-top: 8px;
-  border-radius: 8px;
-}
-.scheduled-view-actions { display: flex; justify-content: flex-end; margin-top: 8px; }
-.scheduled-view-actions button {
-  padding: 5px 12px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: transparent;
-  color: var(--danger);
-  font-size: 12.5px;
+.scheduled-view-cancel {
+  margin-left: auto;
+  padding: 0 4px;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: 13px;
   cursor: pointer;
 }
-.scheduled-view-actions button:hover { background: var(--bg-soft); }
+.scheduled-view-cancel:hover { color: var(--danger); }
