@@ -10373,6 +10373,10 @@ div.settings-music-row {
 .messenger-thread {
   min-height: 0;
   overflow: auto;
+  /* Reserve the scrollbar gutter up front: without it the bar pops in after
+     the first render, steals ~10px of width and reflows every 16:9 media box
+     (visible as the post "getting grabbed" from the top right). */
+  scrollbar-gutter: stable;
   gap: 0;
   padding: 8px 0;
 }
