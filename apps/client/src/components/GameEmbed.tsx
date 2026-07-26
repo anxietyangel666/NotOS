@@ -55,6 +55,52 @@ function Die3D({ value, delayMs }: { value: number; delayMs: number }) {
   );
 }
 
+// Crystal-style die for non-cube rolls (d20, ranges): a faceted hexagon with
+// the number engraved.
+function CrystalDie({ value, delayMs }: { value: number; delayMs: number }) {
+  return (
+    <span className="game-crystal" style={{ '--delay': `${delayMs}ms` } as CSSProperties}>
+      <svg viewBox="0 0 100 100" aria-hidden="true">
+        <polygon points="50,3 93,26 93,74 50,97 7,74 7,26" className="game-crystal-body" />
+        <polygon points="50,3 93,26 50,50 7,26" className="game-crystal-facet" />
+        <polygon points="93,74 50,97 50,50" className="game-crystal-facet dark" />
+        <text x="50" y="63" textAnchor="middle" className="game-crystal-num">{value}</text>
+      </svg>
+    </span>
+  );
+}
+
+// Glossy magic 8-ball.
+function EightBall() {
+  return (
+    <span className="game-ball">
+      <svg viewBox="0 0 100 100" aria-hidden="true">
+        <circle cx="50" cy="50" r="47" className="game-ball-body" />
+        <ellipse cx="36" cy="30" rx="18" ry="12" className="game-ball-shine" />
+        <circle cx="50" cy="46" r="17" className="game-ball-window" />
+        <text x="50" y="55" textAnchor="middle" className="game-ball-eight">8</text>
+      </svg>
+    </span>
+  );
+}
+
+// Dartboard for /pick.
+function PickTarget() {
+  return (
+    <span className="game-target">
+      <svg viewBox="0 0 100 100" aria-hidden="true">
+        <circle cx="50" cy="50" r="46" className="game-target-red" />
+        <circle cx="50" cy="50" r="34" className="game-target-white" />
+        <circle cx="50" cy="50" r="22" className="game-target-red" />
+        <circle cx="50" cy="50" r="10" className="game-target-white" />
+        <circle cx="50" cy="50" r="4" className="game-target-red" />
+        <path d="M50 50 76 18" className="game-target-dart" />
+        <path d="M76 18l6-10 2 8 8 2-10 6z" className="game-target-flight" />
+      </svg>
+    </span>
+  );
+}
+
 function CoinFace({ side }: { side: 'heads' | 'tails' }) {
   return (
     <svg viewBox="0 0 100 100" aria-hidden="true">
@@ -146,80 +192,81 @@ export function GameEmbed({ game, language }: { game: GamePayload; language: Lan
     if (game.kind === 'roll') {
       if (typeof game.value === 'number') {
         return (
-          <>
-            <div className="game-embed-head"><span className="game-embed-icon game-reveal" aria-hidden="true">🎲</span><strong>{game.min}–{game.max}</strong></div>
-            <div className="game-embed-result game-reveal-late">{game.value}</div>
-          </>
+          <div className="game-line">
+            <span className="game-line-visual"><CrystalDie value={game.value} delayMs={0} /></span>
+            <span className="game-line-text game-delayed">
+              <span className="game-line-result">{game.value}</span>
+              <span className="game-line-sub">{game.min}–{game.max}</span>
+            </span>
+          </div>
         );
       }
       const rolls = game.rolls ?? [];
-      // Six-sided dice tumble as real 3D cubes; exotic dice keep number chips.
-      const realDice = game.sides === 6;
+      const cube = game.sides === 6;
       return (
-        <>
-          <div className="game-embed-head">
-            <strong>{rolls.length}d{game.sides}</strong>
-          </div>
-          {realDice ? (
-            <div className="game-embed-dice3d">
-              {rolls.map((roll, index) => <Die3D key={index} value={roll} delayMs={index * 160} />)}
-            </div>
-          ) : (
-            <div className="game-embed-dice game-reveal-late">
-              {rolls.map((roll, index) => <span key={index} className="game-die">{roll}</span>)}
-            </div>
-          )}
-          {rolls.length > 1 ? (
-            <div className="game-embed-footer game-footer-after-roll">{t(language, 'gameTotal')}: <strong>{game.total}</strong></div>
-          ) : null}
-        </>
+        <div className="game-line">
+          <span className="game-line-visual">
+            {cube
+              ? rolls.map((roll, index) => <Die3D key={index} value={roll} delayMs={index * 160} />)
+              : rolls.map((roll, index) => <CrystalDie key={index} value={roll} delayMs={index * 140} />)}
+          </span>
+          <span className="game-line-text game-delayed">
+            <span className="game-line-result">
+              {rolls.length > 1 ? `${t(language, 'gameTotal')}: ${game.total}` : rolls[0]}
+            </span>
+            <span className="game-line-sub">{rolls.length}d{game.sides}</span>
+          </span>
+        </div>
       );
     }
     if (game.kind === 'coin') {
       return (
-        <>
-          <div className="game-embed-head"><strong>{t(language, 'gameCoin')}</strong></div>
-          <div className="game-embed-coins">
+        <div className="game-line">
+          <span className="game-line-visual">
             {game.flips.map((flip, index) => <Coin3D key={index} result={flip} delayMs={index * 220} />)}
-          </div>
-          <div className="game-embed-result game-footer-after-flip">
-            {game.flips.map((flip) => t(language, flip === 'heads' ? 'coinHeads' : 'coinTails')).join(' · ')}
-          </div>
-        </>
+          </span>
+          <span className="game-line-text game-delayed game-delayed-coin">
+            <span className="game-line-result">
+              {game.flips.map((flip) => t(language, flip === 'heads' ? 'coinHeads' : 'coinTails')).join(' · ')}
+            </span>
+          </span>
+        </div>
       );
     }
     if (game.kind === '8ball') {
       const answers = EIGHT_BALL[language] ?? EIGHT_BALL.en;
       return (
-        <>
-          <div className="game-embed-head"><span className="game-embed-icon game-reveal" aria-hidden="true">🎱</span><em className="game-embed-question">{game.q}</em></div>
-          <div className="game-embed-result game-reveal-late">{answers[game.answer % answers.length]}</div>
-        </>
+        <div className="game-line">
+          <span className="game-line-visual"><EightBall /></span>
+          <span className="game-line-text game-delayed">
+            <span className="game-line-result">{answers[game.answer % answers.length]}</span>
+            <span className="game-line-sub game-line-question">{game.q}</span>
+          </span>
+        </div>
       );
     }
     if (typeof game.member === 'string') {
       return (
-        <>
-          <div className="game-embed-head"><span className="game-embed-icon game-reveal" aria-hidden="true">🎯</span><strong>{t(language, 'gamePickChose')}</strong></div>
-          <div className="game-embed-result game-reveal-late">{game.member}</div>
-          <div className="game-embed-footer">{t(language, 'gamePickOf', { count: String(game.count ?? 0) })}</div>
-        </>
+        <div className="game-line">
+          <span className="game-line-visual"><PickTarget /></span>
+          <span className="game-line-text game-delayed">
+            <span className="game-line-result">{game.member}</span>
+            <span className="game-line-sub">{t(language, 'gamePickOf', { count: String(game.count ?? 0) })}</span>
+          </span>
+        </div>
       );
     }
     const options = game.options ?? [];
     return (
-      <>
-        <div className="game-embed-head"><span className="game-embed-icon game-reveal" aria-hidden="true">🎯</span><strong>{t(language, 'gamePickChose')}</strong></div>
-        <div className="game-embed-options">
-          {options.map((option, index) => (
-            <span key={index} className={index === game.winner ? 'game-embed-option winner game-reveal-late' : 'game-embed-option'}>
-              {option}
-            </span>
-          ))}
-        </div>
-      </>
+      <div className="game-line">
+        <span className="game-line-visual"><PickTarget /></span>
+        <span className="game-line-text game-delayed">
+          <span className="game-line-result">{options[game.winner ?? 0]}</span>
+          <span className="game-line-sub">{options.join(' · ')}</span>
+        </span>
+      </div>
     );
   }, [game, language]);
 
-  return <div className="game-embed">{content}</div>;
+  return content;
 }

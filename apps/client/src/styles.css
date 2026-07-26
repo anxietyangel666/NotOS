@@ -23554,84 +23554,102 @@ div.settings-music-row {
 .scheduled-view-open + .scheduled-view-cancel { margin-left: 6px; }
 
 /* ── Chat mini-games (/roll, /coin, /8ball, /pick) ──
-   Reveal animations are transform/opacity only, so they run on the
-   compositor and never jank the message list. */
-.game-embed {
-  margin-top: 4px;
-  padding: 12px 14px;
-  max-width: 340px;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  background: var(--lighter);
-}
-.game-embed-head {
+   Bare inline layout: the SVG visual sits left, the result is plain text on
+   the right (no card background, no game title). Animations stay
+   transform/opacity-only. */
+.game-line {
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: 13.5px;
+  gap: 14px;
+  margin-top: 4px;
 }
-.game-embed-icon { font-size: 20px; line-height: 1; }
-.game-embed-question { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
-.game-embed-result {
-  margin-top: 8px;
-  font-size: 20px;
-  font-weight: 700;
-  color: var(--blue);
-}
-.game-embed-dice { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
-.game-die {
-  display: inline-flex;
+.game-line-visual {
+  flex: none;
+  display: flex;
   align-items: center;
-  justify-content: center;
-  min-width: 34px;
-  height: 34px;
-  padding: 0 6px;
-  border: 1px solid var(--line-strong);
-  border-radius: 8px;
-  background: var(--panel);
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.game-line-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.game-line-result {
   font-size: 16px;
   font-weight: 700;
+  color: var(--chat-text-color, var(--text));
+  overflow-wrap: anywhere;
 }
-.game-embed-footer { margin-top: 8px; color: var(--muted); font-size: 12px; }
-.game-embed-options { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-.game-embed-option {
-  padding: 4px 10px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: var(--panel);
+.game-line-sub {
+  font-size: 12px;
   color: var(--muted);
-  font-size: 12.5px;
+  overflow-wrap: anywhere;
 }
-.game-embed-option.winner {
-  border-color: var(--blue);
-  background: var(--blue);
-  color: #fff;
-  font-weight: 700;
-}
+.game-line-question { font-style: italic; }
+/* Result text appears once the physics settles. */
+.game-delayed { animation: game-pop 0.3s ease 1.15s backwards; }
+.game-delayed-coin { animation-delay: 1.3s; }
 
-@keyframes game-shake {
-  0% { transform: rotate(0); }
-  25% { transform: rotate(-14deg); }
-  50% { transform: rotate(12deg); }
-  75% { transform: rotate(-8deg); }
-  100% { transform: rotate(0); }
-}
-@keyframes game-flip-spin {
-  from { transform: rotateY(0); }
-  to { transform: rotateY(720deg); }
-}
 @keyframes game-pop {
   0% { opacity: 0; transform: translateY(4px) scale(0.92); }
   60% { opacity: 1; transform: translateY(0) scale(1.04); }
   100% { opacity: 1; transform: none; }
 }
-.game-reveal { animation: game-shake 0.5s ease; }
-.game-flip { display: inline-block; animation: game-flip-spin 0.6s ease; }
-.game-reveal-late { animation: game-pop 0.35s ease 0.45s backwards; }
 
-@media (prefers-reduced-motion: reduce) {
-  .game-reveal, .game-flip, .game-reveal-late { animation: none; }
+/* Crystal die (d20 / ranges) */
+.game-crystal {
+  display: inline-block;
+  width: 46px;
+  height: 46px;
+  animation: crystal-in 0.7s cubic-bezier(0.25, 0.9, 0.3, 1.2) var(--delay, 0ms) backwards;
 }
+.game-crystal svg { width: 100%; height: 100%; display: block; }
+.game-crystal-body { fill: var(--blue); }
+.game-crystal-facet { fill: rgba(255, 255, 255, 0.18); }
+.game-crystal-facet.dark { fill: rgba(0, 0, 0, 0.18); }
+.game-crystal-num {
+  fill: #fff;
+  font-size: 34px;
+  font-weight: 800;
+  font-family: inherit;
+}
+@keyframes crystal-in {
+  0% { opacity: 0; transform: rotate(-160deg) scale(0.4); }
+  100% { opacity: 1; transform: rotate(0) scale(1); }
+}
+
+/* Magic 8-ball */
+.game-ball {
+  display: inline-block;
+  width: 48px;
+  height: 48px;
+  animation: ball-in 0.7s cubic-bezier(0.3, 0.8, 0.3, 1.15) backwards;
+}
+.game-ball svg { width: 100%; height: 100%; display: block; }
+.game-ball-body { fill: #17181d; }
+.game-ball-shine { fill: rgba(255, 255, 255, 0.22); }
+.game-ball-window { fill: #f2f2f0; }
+.game-ball-eight { fill: #17181d; font-size: 24px; font-weight: 800; font-family: inherit; }
+@keyframes ball-in {
+  0% { opacity: 0; transform: translateY(-18px) rotate(-30deg); }
+  60% { opacity: 1; transform: translateY(2px) rotate(6deg); }
+  100% { transform: none; }
+}
+
+/* Dartboard for /pick */
+.game-target {
+  display: inline-block;
+  width: 46px;
+  height: 46px;
+  animation: ball-in 0.7s cubic-bezier(0.3, 0.8, 0.3, 1.15) backwards;
+}
+.game-target svg { width: 100%; height: 100%; display: block; }
+.game-target-red { fill: #d9453c; }
+.game-target-white { fill: #f4f1ea; }
+.game-target-dart { stroke: #8a5a24; stroke-width: 3.4; stroke-linecap: round; }
+.game-target-flight { fill: #2f9e57; }
 
 /* ── Real 3D dice ──
    A 48px CSS cube: six absolutely-positioned faces rotated around the center.
@@ -23680,13 +23698,7 @@ div.settings-music-row {
   72% { transform: translateY(-6px); }
   100% { transform: translateY(0); }
 }
-.game-embed-dice3d {
-  display: flex;
-  gap: 12px;
-  flex-wrap: wrap;
-  margin-top: 12px;
-  padding: 4px 2px 2px;
-}
+
 
 /* ── Real 3D coin ──
    Two circular SVG faces back-to-back; the toss arcs up while the inner disc
@@ -23731,21 +23743,11 @@ div.settings-music-row {
   86% { transform: translateY(-7px); }
   100% { transform: translateY(0); }
 }
-.game-embed-coins {
-  display: flex;
-  gap: 12px;
-  flex-wrap: wrap;
-  margin-top: 12px;
-  padding: 6px 2px 2px;
-}
 
-/* Result lines fade in only after the physics settles. */
-.game-footer-after-roll { animation: game-pop 0.3s ease 1.2s backwards; }
-.game-footer-after-flip { animation: game-pop 0.3s ease 1.3s backwards; }
 
 @media (prefers-reduced-motion: reduce) {
   .die3d-scene, .die3d, .coin3d-scene, .coin3d,
-  .game-footer-after-roll, .game-footer-after-flip { animation: none; }
+  .game-crystal, .game-ball, .game-target, .game-delayed { animation: none; }
   .die3d { transform: rotateX(var(--fx)) rotateY(var(--fy)); }
   .coin3d { transform: rotateY(var(--fy)); }
 }
