@@ -31,6 +31,9 @@ export type UserRecord = {
   id: string;
   nickname: string;
   nickname_normalized: string;
+  login: string | null;
+  login_normalized: string | null;
+  email: string | null;
   role: string;
   avatar_data: string;
   wallpaper: string;
@@ -49,7 +52,9 @@ export type UserRecord = {
   profile_primary_color: string;
   profile_accent_color: string;
   nameplate: NamePlate | null;
+  allow_group_identity_messages: boolean;
   auth_secret_hash: string;
+  password_hash: string | null;
   recovery_key_hash: string;
   created_at: Date;
   updated_at: Date;
@@ -76,6 +81,7 @@ export type PublicUser = {
   profilePrimaryColor: string;
   profileAccentColor: string;
   nameplate: NamePlate | null;
+  allowGroupIdentityMessages: boolean;
   createdAt: string;
   updatedAt: string;
 };
@@ -84,15 +90,15 @@ export function normalizeNickname(nickname: string) {
   return nickname.trim().toLowerCase();
 }
 
-function roleForNickname(nickname: string) {
-  return normalizeNickname(nickname) === 'notqqqq' ? 'dev' : 'user';
+export function normalizeLogin(login: string) {
+  return login.trim().toLowerCase();
 }
 
 export function toPublicUser(user: UserRecord): PublicUser {
   return {
     id: user.id,
     nickname: user.nickname,
-    role: user.role === 'dev' || normalizeNickname(user.nickname) === 'notqqqq' ? 'dev' : 'user',
+    role: user.role === 'dev' ? 'dev' : 'user',
     avatarData: user.avatar_data,
     wallpaper: user.wallpaper,
     language: user.language_code,
@@ -110,6 +116,64 @@ export function toPublicUser(user: UserRecord): PublicUser {
     profilePrimaryColor: user.profile_primary_color,
     profileAccentColor: user.profile_accent_color,
     nameplate: user.nameplate ?? null,
+    allowGroupIdentityMessages: user.allow_group_identity_messages ?? true,
+    createdAt: user.created_at.toISOString(),
+    updatedAt: user.updated_at.toISOString()
+  };
+}
+
+// A trimmed author snapshot for embedding inside lists of messages (wall, DMs,
+// group chat). It drops the heavy per-user base64 blobs that message rendering
+// never needs — `wallpaper`, `pinnedImageData`, `pinnedCards` and the desktop
+// layout — which previously inflated a single wall/conversation response to
+// hundreds of megabytes because the full author was duplicated per message.
+//
+// The fields kept are exactly what the message UI uses: identity (id, nickname,
+// role), the avatar, and name/profile styling (nameStyle, nameplate, profile
+// colours). When a full profile is opened the client re-fetches the complete
+// user via `GET /users/:id/public`, so nothing is lost.
+// The exact set of user columns `toPublicUserLite` reads. Selecting only these
+// (instead of `users.*` / `SELECT *`) keeps the DB from reading and shipping the
+// heavy base64 blobs — wallpaper, pinned image/cards, desktop layout — for every
+// row in a list. Those columns are TOASTed and dominate member/conversation list
+// latency. Use `liteUserColumns('users')` inside a JOIN, or `liteUserColumns()`
+// for a bare `FROM users`.
+const LITE_USER_FIELDS = [
+  'id', 'nickname', 'role', 'avatar_data', 'language_code', 'theme', 'accent_color',
+  'transparency_enabled', 'desktop_icon_size', 'hide_desktop_icons', 'desktop_sort',
+  'status', 'name_style', 'profile_primary_color', 'profile_accent_color', 'nameplate',
+  'allow_group_identity_messages', 'created_at', 'updated_at'
+];
+
+export function liteUserColumns(prefix = ''): string {
+  const p = prefix ? `${prefix}.` : '';
+  return LITE_USER_FIELDS.map((field) => `${p}${field}`).join(', ');
+}
+
+export function toPublicUserLite(user: UserRecord): PublicUser {
+  return {
+    id: user.id,
+    nickname: user.nickname,
+    role: user.role === 'dev' ? 'dev' : 'user',
+    avatarData: user.avatar_data,
+    // Heavy fields intentionally blanked out to keep the payload small.
+    wallpaper: '',
+    language: user.language_code,
+    theme: user.theme,
+    accentColor: user.accent_color,
+    transparencyEnabled: user.transparency_enabled,
+    desktopIcons: {},
+    desktopIconSize: user.desktop_icon_size,
+    hideDesktopIcons: user.hide_desktop_icons,
+    desktopSort: user.desktop_sort,
+    status: user.status,
+    pinnedImageData: '',
+    pinnedCards: [],
+    nameStyle: user.name_style ?? null,
+    profilePrimaryColor: user.profile_primary_color,
+    profileAccentColor: user.profile_accent_color,
+    nameplate: user.nameplate ?? null,
+    allowGroupIdentityMessages: user.allow_group_identity_messages ?? true,
     createdAt: user.created_at.toISOString(),
     updatedAt: user.updated_at.toISOString()
   };
@@ -117,8 +181,11 @@ export function toPublicUser(user: UserRecord): PublicUser {
 
 export async function createUser(input: {
   nickname: string;
+  login?: string | null;
+  email?: string | null;
   avatarData: string;
   authSecretHash: string;
+  passwordHash?: string | null;
   recoveryKeyHash: string;
   language?: string;
   theme?: string;
@@ -129,25 +196,33 @@ export async function createUser(input: {
         id,
         nickname,
         nickname_normalized,
+        login,
+        login_normalized,
+        email,
         role,
         avatar_data,
         language_code,
         theme,
         auth_secret_hash,
+        password_hash,
         recovery_key_hash
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
       RETURNING *
     `,
     [
       randomUUID(),
       input.nickname.trim(),
       normalizeNickname(input.nickname),
-      roleForNickname(input.nickname),
+      input.login?.trim() || null,
+      input.login ? normalizeLogin(input.login) : null,
+      input.email?.trim() || null,
+      'user',
       input.avatarData,
       input.language ?? 'en',
       input.theme ?? 'light',
       input.authSecretHash,
+      input.passwordHash ?? null,
       input.recoveryKeyHash
     ]
   );
@@ -160,9 +235,21 @@ export async function findUserById(id: string) {
   return result.rows[0] ?? null;
 }
 
+export async function userExistsById(id: string) {
+  const result = await pool.query('SELECT 1 FROM users WHERE id = $1 LIMIT 1', [id]);
+  return (result.rowCount ?? 0) > 0;
+}
+
 export async function findUserByNickname(nickname: string) {
   const result = await pool.query<UserRecord>('SELECT * FROM users WHERE nickname_normalized = $1', [
     normalizeNickname(nickname)
+  ]);
+  return result.rows[0] ?? null;
+}
+
+export async function findUserByLogin(login: string) {
+  const result = await pool.query<UserRecord>('SELECT * FROM users WHERE login_normalized = $1', [
+    normalizeLogin(login)
   ]);
   return result.rows[0] ?? null;
 }
@@ -173,7 +260,7 @@ export async function searchUsersByNickname(query: string, currentUserId: string
 
   const result = await pool.query<UserRecord>(
     `
-      SELECT *
+      SELECT ${liteUserColumns()}
       FROM users
       WHERE id <> $1
         AND nickname_normalized LIKE $2
@@ -223,6 +310,7 @@ export async function updateUserSettings(
     profilePrimaryColor?: string;
     profileAccentColor?: string;
     nameplate?: NamePlate | null;
+    allowGroupIdentityMessages?: boolean;
   }
 ) {
   // `nameStyle` is special: `undefined` means "leave unchanged", while an
@@ -256,7 +344,7 @@ export async function updateUserSettings(
         profile_accent_color = COALESCE($19, profile_accent_color),
         nameplate = CASE WHEN $20 = TRUE THEN $21::jsonb ELSE nameplate END,
         pinned_cards = COALESCE($22::jsonb, pinned_cards),
-        role = CASE WHEN COALESCE($3, nickname_normalized) = 'notqqqq' THEN 'dev' ELSE role END,
+        allow_group_identity_messages = COALESCE($23, allow_group_identity_messages),
         updated_at = NOW()
       WHERE id = $1
       RETURNING *
@@ -284,6 +372,7 @@ export async function updateUserSettings(
       nameplateProvided,
       nameplateValue,
       input.pinnedCards === undefined ? undefined : JSON.stringify(input.pinnedCards),
+      input.allowGroupIdentityMessages,
     ]
   );
 

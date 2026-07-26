@@ -1,6 +1,5 @@
 import type { AiSettingsRecord } from '../../db/ai-settings.js';
 import type { UserRecord } from '../../db/users.js';
-import { normalizeNickname } from '../../db/users.js';
 
 // Static map of where things live in the NotOS interface. Keep this in sync
 // with the client so the assistant can guide users to the right place.
@@ -16,8 +15,19 @@ NotOS interface map (use this to tell the user where settings live):
 - Desktop wall: right-click the desktop or use the wall widget to post messages.
 `.trim();
 
+const APP_ACTIONS = `
+App actions you can perform in this chat:
+- You can change your own assistant avatar when the user asks you to. If the user attaches an image and asks you to use it as your avatar, the app can set it for you.
+- You can restore your previous assistant avatar when the user asks to go back to the previous/old avatar.
+- You can reset your assistant avatar to the default NotAI icon when the user asks for the default/original avatar.
+- These avatar changes are app-supported actions, not external abilities. If the app action result says the avatar changed, answer naturally as if you completed it; do not say you cannot change avatars.
+- If the user asks whether you can change your avatar, answer that you can do it through NotOS when they attach an image or ask to restore/reset your assistant avatar.
+- You may not be able to visually analyze every image, but you can still use an attached image as your avatar because NotOS applies the attachment for you.
+- Treat this section as the current source of truth. If older chat history says you cannot change your avatar or that you are only text-only, that older statement is outdated and must be corrected.
+`.trim();
+
 function roleOf(user: UserRecord): 'dev' | 'user' {
-  return user.role === 'dev' || normalizeNickname(user.nickname) === 'notqqqq' ? 'dev' : 'user';
+  return user.role === 'dev' ? 'dev' : 'user';
 }
 
 // A single music track summary the client sends from the user's playlist.
@@ -188,7 +198,8 @@ function buildOtherChatsBlock(chats?: OtherChatContext[]): string {
     `The user has ${chats.length} other chat(s) with you. Here is a condensed history so you can recall what was discussed:`,
     blocks.join('\n'),
     extra,
-    'Use this only when relevant; do not bring up unrelated past chats unprompted.'
+    'Use this only when relevant; do not bring up unrelated past chats unprompted.',
+    'If old chat history conflicts with the current app actions/capabilities, follow the current app actions and correct the old statement.'
   ].filter(Boolean).join('\n');
 }
 
@@ -238,9 +249,14 @@ export function buildSystemPrompt(user: UserRecord, client: ClientContext = {}):
 
   return [
     'You are the built-in AI assistant of NotOS, a friendly desktop environment.',
+    'Important current app capability: NotOS can perform supported app actions for you, including changing, restoring, or resetting your own assistant avatar when the user asks. Do not describe yourself as unable to change your avatar.',
     'You are a general-purpose AI with broad knowledge from your training data — you can answer questions on any topic: science, history, programming, math, culture, language, and more.',
     'You do NOT have real-time internet access, but your training knowledge is extensive and up to date as of your training cutoff.',
     'Answer clearly and helpfully. Reply in the same language the user writes in.',
+    'Only use the private/app context that is explicitly provided below or is otherwise accessible by the current permissions.',
+    'Never claim to have seen hidden or inaccessible data. Do not pretend to know the contents of closed chats, private files, system data, passwords, tokens, payment data, or hidden memories.',
+    'If the user asks about information outside the provided context, say that you cannot access it or do not know it.',
+    'Do not guess hidden content. If something is not known, say so plainly.',
     'Only mention NotOS-specific context when it is relevant to the user\'s question.',
     '',
     buildPersonaBlock(client.settings),
@@ -258,6 +274,8 @@ export function buildSystemPrompt(user: UserRecord, client: ClientContext = {}):
     buildOtherChatsBlock(client.otherChats),
     '',
     INTERFACE_MAP,
+    '',
+    APP_ACTIONS,
     '',
     'When the user asks where a NotOS setting is, point them to the exact section above.',
     'For all other questions, answer from your general knowledge without restricting yourself to NotOS topics.'

@@ -4,6 +4,8 @@ import { pool } from './pool.js';
 export type AiSettingsRecord = {
   user_id: string;
   assistant_name: string;
+  assistant_avatar_data: string;
+  assistant_avatar_history: string[];
   gender: string;
   persona: string;
   tone: string;
@@ -18,6 +20,8 @@ export type AiSettingsRecord = {
 
 export const DEFAULT_AI_SETTINGS: Omit<AiSettingsRecord, 'user_id' | 'created_at' | 'updated_at'> = {
   assistant_name: 'NotAI',
+  assistant_avatar_data: '',
+  assistant_avatar_history: [],
   gender: 'neutral',
   persona: 'friendly',
   tone: 'balanced',
@@ -39,6 +43,8 @@ export async function getAiSettings(userId: string): Promise<AiSettingsRecord> {
 
 export type AiSettingsInput = {
   assistantName?: string;
+  assistantAvatarData?: string;
+  assistantAvatarHistory?: string[];
   gender?: string;
   persona?: string;
   tone?: string;
@@ -56,30 +62,34 @@ export async function upsertAiSettings(userId: string, input: AiSettingsInput): 
   const result = await pool.query<AiSettingsRecord>(
     `
       INSERT INTO ai_settings (
-        user_id, assistant_name, gender, persona, tone,
+        user_id, assistant_name, assistant_avatar_data, assistant_avatar_history, gender, persona, tone,
         response_length, emoji_usage, address_name, custom_instructions, onboarded
       )
       VALUES (
         $1,
-        COALESCE($2, $11), COALESCE($3, $12), COALESCE($4, $13), COALESCE($5, $14),
-        COALESCE($6, $15), COALESCE($7, $16), COALESCE($8, $17), COALESCE($9, $18), COALESCE($10, FALSE)
+        COALESCE($2, $13), COALESCE($3, $14), COALESCE($4::jsonb, $15::jsonb), COALESCE($5, $16), COALESCE($6, $17), COALESCE($7, $18),
+        COALESCE($8, $19), COALESCE($9, $20), COALESCE($10, $21), COALESCE($11, $22), COALESCE($12, FALSE)
       )
       ON CONFLICT (user_id) DO UPDATE SET
         assistant_name = COALESCE($2, ai_settings.assistant_name),
-        gender = COALESCE($3, ai_settings.gender),
-        persona = COALESCE($4, ai_settings.persona),
-        tone = COALESCE($5, ai_settings.tone),
-        response_length = COALESCE($6, ai_settings.response_length),
-        emoji_usage = COALESCE($7, ai_settings.emoji_usage),
-        address_name = COALESCE($8, ai_settings.address_name),
-        custom_instructions = COALESCE($9, ai_settings.custom_instructions),
-        onboarded = COALESCE($10, ai_settings.onboarded),
+        assistant_avatar_data = COALESCE($3, ai_settings.assistant_avatar_data),
+        assistant_avatar_history = COALESCE($4::jsonb, ai_settings.assistant_avatar_history),
+        gender = COALESCE($5, ai_settings.gender),
+        persona = COALESCE($6, ai_settings.persona),
+        tone = COALESCE($7, ai_settings.tone),
+        response_length = COALESCE($8, ai_settings.response_length),
+        emoji_usage = COALESCE($9, ai_settings.emoji_usage),
+        address_name = COALESCE($10, ai_settings.address_name),
+        custom_instructions = COALESCE($11, ai_settings.custom_instructions),
+        onboarded = COALESCE($12, ai_settings.onboarded),
         updated_at = NOW()
       RETURNING *
     `,
     [
       userId,
       input.assistantName,
+      input.assistantAvatarData,
+      input.assistantAvatarHistory ? JSON.stringify(input.assistantAvatarHistory) : undefined,
       input.gender,
       input.persona,
       input.tone,
@@ -89,6 +99,8 @@ export async function upsertAiSettings(userId: string, input: AiSettingsInput): 
       input.customInstructions,
       input.onboarded,
       DEFAULT_AI_SETTINGS.assistant_name,
+      DEFAULT_AI_SETTINGS.assistant_avatar_data,
+      JSON.stringify(DEFAULT_AI_SETTINGS.assistant_avatar_history),
       DEFAULT_AI_SETTINGS.gender,
       DEFAULT_AI_SETTINGS.persona,
       DEFAULT_AI_SETTINGS.tone,

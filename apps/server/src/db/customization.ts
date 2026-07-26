@@ -392,7 +392,17 @@ async function isOptionSelected(groupId: string, userId: string, option: CustomO
   return (result.rowCount ?? 0) > 0;
 }
 
-async function attachRole(groupId: string, userId: string, roleId: string) {
+export async function attachRole(groupId: string, userId: string, roleId: string) {
+  await pool.query(
+    `
+      INSERT INTO group_member_roles (group_id, user_id, role_id)
+      SELECT group_id, user_id, role_id
+      FROM group_members
+      WHERE group_id = $1 AND user_id = $2 AND role_id IS NOT NULL AND role_id <> $3
+      ON CONFLICT (group_id, user_id, role_id) DO NOTHING
+    `,
+    [groupId, userId, roleId]
+  );
   await pool.query(
     `
       INSERT INTO group_member_roles (group_id, user_id, role_id)
@@ -404,12 +414,17 @@ async function attachRole(groupId: string, userId: string, roleId: string) {
   // Also surface the role as the member's displayed (primary) role so the
   // member list, name colour and grouping reflect the pick immediately.
   await pool.query(
-    'UPDATE group_members SET role_id = $3 WHERE group_id = $1 AND user_id = $2',
+    `
+      UPDATE group_members
+      SET role_id = $3,
+          role = COALESCE((SELECT name FROM group_roles WHERE id = $3 AND group_id = $1), role)
+      WHERE group_id = $1 AND user_id = $2
+    `,
     [groupId, userId, roleId]
   );
 }
 
-async function detachRole(groupId: string, userId: string, roleId: string) {
+export async function detachRole(groupId: string, userId: string, roleId: string) {
   await pool.query(
     'DELETE FROM group_member_roles WHERE group_id = $1 AND user_id = $2 AND role_id = $3',
     [groupId, userId, roleId]
@@ -421,7 +436,12 @@ async function detachRole(groupId: string, userId: string, roleId: string) {
     [groupId, userId]
   );
   await pool.query(
-    'UPDATE group_members SET role_id = $3 WHERE group_id = $1 AND user_id = $2 AND role_id = $4',
+    `
+      UPDATE group_members
+      SET role_id = $3,
+          role = COALESCE((SELECT name FROM group_roles WHERE id = $3 AND group_id = $1), 'member')
+      WHERE group_id = $1 AND user_id = $2 AND role_id = $4
+    `,
     [groupId, userId, fallback.rows[0]?.role_id ?? null, roleId]
   );
 }

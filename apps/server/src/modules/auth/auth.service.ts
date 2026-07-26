@@ -3,13 +3,14 @@ import { config } from '../../config.js';
 import {
   createUser,
   findUserById,
+  findUserByLogin,
   findUserByNickname,
   toPublicUser,
   updateUserAuthSecret
 } from '../../db/users.js';
 import { HttpError } from '../../http/errors.js';
 import { buildAuthFilename, decryptAuthFile, encryptAuthFile } from './auth-file.js';
-import type { LoginInput, RecoverInput, RegisterInput } from './auth.schemas.js';
+import type { LoginInput, PasswordLoginInput, PasswordRegisterInput, RecoverInput, RegisterInput } from './auth.schemas.js';
 import { generateAuthSecret, generateRecoveryKey } from './secrets.js';
 import { signAccessToken } from './token.js';
 
@@ -17,6 +18,11 @@ const AUTH_FILE_MIME = 'application/vnd.notoc.auth+json';
 
 function isUniqueViolation(error: unknown) {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === '23505';
+}
+
+function uniqueConstraint(error: unknown) {
+  if (typeof error !== 'object' || error === null || !('constraint' in error)) return '';
+  return typeof error.constraint === 'string' ? error.constraint : '';
 }
 
 async function hashSecret(secret: string) {
@@ -38,16 +44,35 @@ function buildAuthFile(user: { id: string; nickname: string }, authSecret: strin
 }
 
 export async function register(input: RegisterInput) {
+  return createAccount(input);
+}
+
+export async function registerWithPassword(input: PasswordRegisterInput) {
+  return createAccount({
+    nickname: input.login,
+    avatarData: input.avatarData,
+    language: input.language,
+    theme: input.theme
+  }, await hashSecret(input.password), {
+    login: input.login,
+    email: input.email
+  });
+}
+
+async function createAccount(input: RegisterInput, passwordHash?: string, passwordIdentity?: { login: string; email: string }) {
   const recoveryKey = generateRecoveryKey();
   const authSecret = generateAuthSecret();
 
   try {
     const user = await createUser({
       nickname: input.nickname,
+      login: passwordIdentity?.login,
+      email: passwordIdentity?.email,
       avatarData: input.avatarData,
       language: input.language,
       theme: input.theme,
       authSecretHash: await hashSecret(authSecret),
+      passwordHash: passwordHash ?? null,
       recoveryKeyHash: await hashSecret(recoveryKey)
     });
 
@@ -59,6 +84,10 @@ export async function register(input: RegisterInput) {
     };
   } catch (error) {
     if (isUniqueViolation(error)) {
+      const constraint = uniqueConstraint(error);
+      if (constraint.includes('login')) {
+        throw new HttpError(409, 'Login is already taken', 'LOGIN_EXISTS');
+      }
       throw new HttpError(409, 'Nickname is already taken', 'NICKNAME_EXISTS');
     }
 
@@ -77,6 +106,24 @@ export async function login(input: LoginInput) {
   const validSecret = await bcrypt.compare(payload.authSecret, user.auth_secret_hash);
   if (!validSecret) {
     throw new HttpError(401, 'Auth file was revoked or replaced', 'INVALID_AUTH_FILE');
+  }
+
+  return {
+    token: signAccessToken(user.id),
+    user: toPublicUser(user)
+  };
+}
+
+export async function loginWithPassword(input: PasswordLoginInput) {
+  const user = await findUserByLogin(input.login);
+
+  if (!user || !user.password_hash) {
+    throw new HttpError(401, 'Nickname or password is invalid', 'PASSWORD_LOGIN_FAILED');
+  }
+
+  const validPassword = await bcrypt.compare(input.password, user.password_hash);
+  if (!validPassword) {
+    throw new HttpError(401, 'Nickname or password is invalid', 'PASSWORD_LOGIN_FAILED');
   }
 
   return {

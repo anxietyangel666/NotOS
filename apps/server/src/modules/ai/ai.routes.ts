@@ -12,12 +12,13 @@ import {
 import { consumeAiQuota, getAiQuotaStatus } from '../../db/ai-quota.js';
 import { getAiSettings, upsertAiSettings } from '../../db/ai-settings.js';
 import { listDesktopWallMessages } from '../../db/desktop-wall.js';
-import { findUserById, normalizeNickname, type UserRecord } from '../../db/users.js';
+import { findUserById, type UserRecord } from '../../db/users.js';
 import { asyncHandler } from '../../http/async-handler.js';
 import { HttpError } from '../../http/errors.js';
 import { type AuthenticatedRequest, requireAuth } from '../../middleware/require-auth.js';
 import { buildSystemPrompt } from './ai-context.js';
 import { decryptChatJson, encryptChatJson } from './ai-crypto.js';
+import { chatImageSchema, chatMediaItemsSchema } from '../messenger/media.js';
 
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const MAX_HISTORY = 30;
@@ -26,6 +27,10 @@ type ChatMessage = {
   id: string;
   role: 'user' | 'assistant';
   content: string;
+  imageData?: string | null;
+  imageName?: string | null;
+  imageSpoiler?: boolean;
+  mediaItems?: Array<{ dataUrl: string; name: string | null; spoiler: boolean }>;
   createdAt: string;
 };
 
@@ -34,12 +39,19 @@ type StoredChat = {
   messages: ChatMessage[];
 };
 
+type AvatarAction =
+  | { action: 'none'; reason?: string }
+  | { action: 'set_from_attachment'; attachmentIndex?: number; reason?: string }
+  | { action: 'restore_previous'; reason?: string }
+  | { action: 'reset_default'; reason?: string };
+
 function isDevUser(user: UserRecord): boolean {
-  return user.role === 'dev' || normalizeNickname(user.nickname) === 'notqqqq';
+  return user.role === 'dev';
 }
 
 const settingsSchema = z.object({
   assistantName: z.string().trim().min(1).max(40).optional(),
+  assistantAvatarData: z.string().max(5_500_000).optional(),
   gender: z.enum(['male', 'female', 'neutral']).optional(),
   persona: z.enum(['friendly', 'professional', 'playful', 'mentor', 'concise', 'enthusiastic']).optional(),
   tone: z.enum(['formal', 'balanced', 'casual']).optional(),
@@ -53,6 +65,7 @@ const settingsSchema = z.object({
 function publicSettings(record: Awaited<ReturnType<typeof getAiSettings>>) {
   return {
     assistantName: record.assistant_name,
+    assistantAvatarData: record.assistant_avatar_data,
     gender: record.gender,
     persona: record.persona,
     tone: record.tone,
@@ -69,13 +82,30 @@ const generateSchema = z.object({
   language: z.enum(['en', 'ru', 'uk']).optional()
 });
 
+const translateSchema = z.object({
+  text: z.string().min(1).max(8_000),
+  // Free-form language name so any language can be chosen (e.g. "German",
+  // "Japanese"). The client sends the human-readable name.
+  target: z.string().trim().min(2).max(40)
+});
+
+const avatarActionSchema = z.object({
+  action: z.enum(['none', 'set_from_attachment', 'restore_previous', 'reset_default']),
+  attachmentIndex: z.number().int().min(0).max(9).optional(),
+  reason: z.string().max(300).optional()
+}) satisfies z.ZodType<AvatarAction>;
+
 const sendSchema = z.object({
-  content: z.string().min(1).max(16_000),
+  content: z.string().max(16_000).default(''),
   // Client clock context: local time string and 12h/24h (AM/PM) preference.
   localDateTime: z.string().max(120).optional(),
   timeFormat: z.enum(['12h', '24h']).optional(),
   // Music playlist lives in the browser, so the client sends track names.
-  musicTracks: z.array(z.object({ name: z.string().max(300) })).max(200).optional()
+  musicTracks: z.array(z.object({ name: z.string().max(300) })).max(200).optional(),
+  image: chatImageSchema.optional(),
+  mediaItems: chatMediaItemsSchema.optional()
+}).refine((value) => value.content.trim().length > 0 || Boolean(value.image) || Boolean(value.mediaItems?.length), {
+  message: 'Message content or attachments are required'
 });
 
 function decode(userId: string, record: { iv: string; tag: string; ciphertext: string }): StoredChat {
@@ -87,9 +117,60 @@ function titleFromContent(content: string) {
   return trimmed.length > 48 ? `${trimmed.slice(0, 48)}…` : trimmed || 'New chat';
 }
 
+function formatAttachmentSummary(message: ChatMessage) {
+  const items = message.mediaItems?.length ? message.mediaItems : message.imageData ? [{ dataUrl: message.imageData, name: message.imageName ?? null, spoiler: Boolean(message.imageSpoiler) }] : [];
+  if (items.length === 0) return '';
+  const labels = items.map((item, index) => `${index + 1}. ${item.name?.trim() || 'attachment'}`);
+  return `\n[Attachments: ${labels.join('; ')}]`;
+}
+
+function shouldSetAvatarFromContent(content: string) {
+  const text = content.trim().toLowerCase();
+  return (
+    /\b(set|use|make|put|change|update)\b.*\b(avatar|profile picture|pfp)\b/.test(text)
+    || /\b(avatar|profile picture|pfp)\b.*\b(set|use|make|put|change|update)\b/.test(text)
+    || /\b(аватар(ку|ом)?|аву)\b/.test(text)
+  );
+}
+
+function shouldSetAssistantAvatarFromContent(content: string) {
+  const text = content.trim().toLowerCase();
+  return (
+    /\b(set|use|make|put|change|update)\b.*\b(your|ur|yourself|assistant|ai|bot)\b.*\b(avatar|profile picture|pfp)\b/.test(text)
+    || /\b(avatar|profile picture|pfp)\b.*\b(set|use|make|put|change|update)\b.*\b(your|ur|yourself|assistant|ai|bot)\b/.test(text)
+    || /(?:\u043f\u043e\u0441\u0442\u0430\u0432\u044c|\u0441\u0434\u0435\u043b\u0430\u0439|\u043f\u043e\u043c\u0435\u043d\u044f\u0439|\u0438\u0437\u043c\u0435\u043d\u0438|\u043e\u0431\u043d\u043e\u0432\u0438).*(?:\u0441\u0435\u0431\u0435|\u0442\u0435\u0431\u0435|\u0441\u0432\u043e\u0439|\u0441\u0432\u043e\u044e|\u0442\u0432\u043e\u0439|\u0442\u0432\u043e\u044e).*(?:\u0430\u0432\u0430\u0442\u0430\u0440|\u0430\u0432\u0430\u0442\u0430\u0440\u043a|\u0430\u0432\u0443)/u.test(text)
+    || /(?:\u0430\u0432\u0430\u0442\u0430\u0440|\u0430\u0432\u0430\u0442\u0430\u0440\u043a|\u0430\u0432\u0443).*(?:\u0441\u0435\u0431\u0435|\u0442\u0435\u0431\u0435|\u0441\u0432\u043e\u0439|\u0441\u0432\u043e\u044e|\u0442\u0432\u043e\u0439|\u0442\u0432\u043e\u044e)/u.test(text)
+  );
+}
+
+function avatarUpdatedReply(language: string) {
+  if (language === 'ru') return '\u0413\u043e\u0442\u043e\u0432\u043e, \u043f\u043e\u0441\u0442\u0430\u0432\u0438\u043b \u044d\u0442\u0443 \u043a\u0430\u0440\u0442\u0438\u043d\u043a\u0443 \u0441\u0435\u0431\u0435 \u043d\u0430 \u0430\u0432\u0430\u0442\u0430\u0440.';
+  if (language === 'uk') return '\u0413\u043e\u0442\u043e\u0432\u043e, \u043f\u043e\u0441\u0442\u0430\u0432\u0438\u0432 \u0446\u0435 \u0437\u043e\u0431\u0440\u0430\u0436\u0435\u043d\u043d\u044f \u0441\u043e\u0431\u0456 \u043d\u0430 \u0430\u0432\u0430\u0442\u0430\u0440.';
+  return 'Done, I set this image as my avatar.';
+}
+
+function parseJsonObject(text: string) {
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start < 0 || end <= start) return null;
+  try {
+    return JSON.parse(text.slice(start, end + 1)) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+function avatarHistoryWithCurrent(currentAvatar: string, history: string[]) {
+  const next = currentAvatar ? [currentAvatar, ...history] : [...history];
+  return Array.from(new Set(next.filter(Boolean))).slice(0, 8);
+}
+
 async function callGroq(
   systemPrompt: string,
-  messages: Array<{ role: string; content: string }>
+  messages: Array<{ role: string; content: string }>,
+  // Optional model override. Defaults to the main AI Chat model; the translate
+  // route passes the dedicated translation model instead.
+  options: { model?: string; temperature?: number } = {}
 ) {
   if (!config.groqApiKey) {
     throw new HttpError(503, 'AI is not configured on this server', 'AI_NOT_CONFIGURED');
@@ -102,9 +183,9 @@ async function callGroq(
       Authorization: `Bearer ${config.groqApiKey}`
     },
     body: JSON.stringify({
-      model: config.groqModel,
+      model: options.model ?? config.groqModel,
       messages: [{ role: 'system', content: systemPrompt }, ...messages],
-      temperature: 0.7
+      temperature: options.temperature ?? 0.7
     })
   });
 
@@ -122,6 +203,49 @@ async function callGroq(
     throw new HttpError(502, 'AI provider returned an empty response', 'AI_EMPTY_RESPONSE');
   }
   return reply;
+}
+
+async function decideAvatarAction(input: {
+  content: string;
+  attachmentCount: number;
+  hasCurrentAvatar: boolean;
+  previousAvatarCount: number;
+  recentMessages: Array<{ role: 'user' | 'assistant'; content: string }>;
+  language: string;
+}): Promise<AvatarAction> {
+  const prompt = [
+    'You are an intent classifier for a chat assistant avatar feature.',
+    'Decide whether the user wants the assistant to change its own avatar.',
+    'Supported actions:',
+    '- none: no assistant-avatar change was requested.',
+    '- set_from_attachment: use one of the newly attached images as the assistant avatar.',
+    '- restore_previous: restore the previous assistant avatar from saved history.',
+    '- reset_default: remove the custom assistant avatar and use the default avatar.',
+    'Use conversation context, not exact keywords. Understand English, Russian, and Ukrainian.',
+    'Only choose set_from_attachment when the user refers to a newly attached image and at least one attachment is available.',
+    'Only choose restore_previous when the user asks to go back/restore the previous/old avatar and previousAvatarCount > 0.',
+    'Only choose reset_default when the user asks for the default/original avatar.',
+    'Output only compact JSON matching this TypeScript type:',
+    '{"action":"none"|"set_from_attachment"|"restore_previous"|"reset_default","attachmentIndex"?:number,"reason"?:string}'
+  ].join('\n');
+
+  const payload = {
+    userText: input.content,
+    attachmentCount: input.attachmentCount,
+    hasCurrentAvatar: input.hasCurrentAvatar,
+    previousAvatarCount: input.previousAvatarCount,
+    interfaceLanguage: input.language,
+    recentMessages: input.recentMessages.slice(-8)
+  };
+
+  try {
+    const raw = await callGroq(prompt, [{ role: 'user', content: JSON.stringify(payload) }], { temperature: 0.05 });
+    const parsed = avatarActionSchema.safeParse(parseJsonObject(raw));
+    return parsed.success ? parsed.data : { action: 'none', reason: 'invalid decision json' };
+  } catch (error) {
+    console.error('AI avatar action decision failed', error);
+    return { action: 'none', reason: 'decision failed' };
+  }
 }
 
 export function createAiRouter() {
@@ -197,6 +321,34 @@ export function createAiRouter() {
       // Keep it tidy: strip wrapping quotes and clamp length.
       const text = reply.replace(/^["'\s]+|["'\s]+$/g, '').slice(0, 2_000);
       res.json({ text });
+    })
+  );
+
+  // Translate a single chat message into the target language. This is a chat
+  // utility (right-click → Translate) and intentionally does NOT count against
+  // the AI quota. The translation is computed on demand and never stored: the
+  // client keeps it only for the lifetime of the open chat view.
+  router.post(
+    '/translate',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const input = translateSchema.parse(req.body);
+      const targetName = input.target;
+
+      const systemPrompt = [
+        `You are a translation engine. Translate the user's text into ${targetName}.`,
+        'Rules:',
+        '- Output ONLY the translated text, with no preamble, quotes, or notes.',
+        '- Preserve the original meaning, tone, line breaks and emoji.',
+        '- Do not translate URLs, code, @mentions or :shortcodes:.',
+        `- If the text is already in ${targetName}, return it unchanged.`
+      ].join('\n');
+
+      const text = await callGroq(systemPrompt, [{ role: 'user', content: input.text }], {
+        model: config.groqTranslateModel,
+        temperature: 0.2
+      });
+      res.json({ text: text.replace(/^["'\s]+|["'\s]+$/g, '').slice(0, 8_000) });
     })
   );
 
@@ -276,8 +428,9 @@ export function createAiRouter() {
       const settings = await getAiSettings(req.auth.userId);
 
       // Wall comments live in the database, so the server reads them directly.
-      const wall = await listDesktopWallMessages(req.auth.userId);
-      const wallComments = wall.map((item) => ({
+      // Pull a generous page so the assistant has recent wall context.
+      const wall = await listDesktopWallMessages(req.auth.userId, { limit: 50 });
+      const wallComments = wall.messages.map((item) => ({
         author: item.author.nickname,
         body: item.message.body,
         createdAt: item.message.created_at.toISOString()
@@ -308,10 +461,15 @@ export function createAiRouter() {
       });
 
       const now = new Date().toISOString();
+      const attachments = input.mediaItems?.length ? input.mediaItems : input.image ? [input.image] : [];
       const userMessage: ChatMessage = {
         id: randomUUID(),
         role: 'user',
         content: input.content,
+        imageData: input.image?.dataUrl ?? null,
+        imageName: input.image?.name ?? null,
+        imageSpoiler: input.image?.spoiler ?? false,
+        mediaItems: attachments.map((item) => ({ dataUrl: item.dataUrl, name: item.name ?? null, spoiler: Boolean(item.spoiler) })),
         createdAt: now
       };
       chat.messages.push(userMessage);
@@ -319,11 +477,58 @@ export function createAiRouter() {
         chat.title = titleFromContent(input.content);
       }
 
+      let updatedSettings: typeof settings | null = null;
+      let avatarActionResult = '';
+      const avatarDecision = await decideAvatarAction({
+        content: input.content,
+        attachmentCount: attachments.length,
+        hasCurrentAvatar: Boolean(settings.assistant_avatar_data),
+        previousAvatarCount: settings.assistant_avatar_history.length,
+        recentMessages: chat.messages.map((message) => ({ role: message.role, content: message.content })),
+        language: user.language_code
+      });
+
+      if (avatarDecision.action === 'set_from_attachment') {
+        const index = Math.min(Math.max(avatarDecision.attachmentIndex ?? 0, 0), Math.max(attachments.length - 1, 0));
+        const avatarSource = attachments[index]?.dataUrl ?? '';
+        if (avatarSource.startsWith('data:image/')) {
+          updatedSettings = await upsertAiSettings(req.auth.userId, {
+            assistantAvatarData: avatarSource,
+            assistantAvatarHistory: avatarHistoryWithCurrent(settings.assistant_avatar_data, settings.assistant_avatar_history)
+          });
+          avatarActionResult = `The app changed your assistant avatar to newly attached image #${index + 1}.`;
+        } else {
+          avatarActionResult = 'The user asked for an avatar change, but no usable newly attached image was available.';
+        }
+      } else if (avatarDecision.action === 'restore_previous') {
+        const [previousAvatar, ...remainingHistory] = settings.assistant_avatar_history;
+        if (previousAvatar) {
+          updatedSettings = await upsertAiSettings(req.auth.userId, {
+            assistantAvatarData: previousAvatar,
+            assistantAvatarHistory: avatarHistoryWithCurrent(settings.assistant_avatar_data, remainingHistory)
+          });
+          avatarActionResult = 'The app restored the previous assistant avatar from saved history.';
+        } else {
+          avatarActionResult = 'The user asked to restore a previous assistant avatar, but there is no saved previous avatar.';
+        }
+      } else if (avatarDecision.action === 'reset_default') {
+        updatedSettings = await upsertAiSettings(req.auth.userId, {
+          assistantAvatarData: '',
+          assistantAvatarHistory: avatarHistoryWithCurrent(settings.assistant_avatar_data, settings.assistant_avatar_history)
+        });
+        avatarActionResult = 'The app reset the assistant avatar to the default avatar.';
+      }
+
       const history = chat.messages
         .slice(-MAX_HISTORY)
-        .map((message) => ({ role: message.role, content: message.content }));
+        .map((message) => ({ role: message.role, content: `${message.content}${formatAttachmentSummary(message)}`.trim() }));
 
-      const reply = await callGroq(systemPrompt, history);
+      const reply = await callGroq(
+        avatarActionResult
+          ? `${systemPrompt}\n\nApp action result for this turn: ${avatarActionResult}\nReply naturally in character. Do not claim you cannot change the avatar if the app action succeeded.`
+          : systemPrompt,
+        history
+      );
       const assistantMessage: ChatMessage = {
         id: randomUUID(),
         role: 'assistant',
@@ -341,7 +546,8 @@ export function createAiRouter() {
         chat: { id: chatId, ...chat, updatedAt: updated?.updated_at ?? new Date() },
         userMessage,
         assistantMessage,
-        quota
+        quota,
+        ...(updatedSettings ? { settings: publicSettings(updatedSettings) } : {})
       });
     })
   );

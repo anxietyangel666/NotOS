@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import type { Server } from 'socket.io';
 import { z } from 'zod';
+import { chatImageSchema, chatMediaItemsSchema } from './media.js';
 import { pool } from '../../db/pool.js';
 import {
   createGroup,
@@ -11,14 +12,25 @@ import {
   addGroupMember,
   removeGroupMember,
   listGroupMembers,
+  listGroupMemberIds,
   isGroupMember,
   getGroupByInviteCode,
-  regenerateInviteCode,
+  getGroupInviteByCode,
+  listGroupInvites,
+  createGroupInvite,
+  deleteGroupInvite,
+  incrementGroupInviteUse,
   listGroupConversationPreviews,
   listGroupMessages,
+  listGroupPinnedMessages,
+  listGroupMediaMessages,
+  markGroupMessagesViewed,
   createGroupMessage,
   updateGroupMessage,
   setGroupMessagePin,
+  toggleGroupMessageReaction,
+  toPublicGroupMessagesWithReactions,
+  toPublicGroupMessageEnriched,
   toPublicGroup,
   toPublicGroupMessage,
   toPublicGroupRole,
@@ -28,17 +40,23 @@ import {
   createGroupRole,
   deleteGroupRole,
   updateGroupRole,
+  updateGroupEveryonePermissions,
   setGroupDefaultRole,
   listGroupChannels,
+  getGroupChannelById,
   createGroupChannel,
+  createGroupFeed,
   deleteGroupChannel,
   updateGroupChannel,
   reorderGroupChannels,
   listGroupFolders,
   createGroupFolder,
   updateGroupFolder,
-  deleteGroupFolder
+  deleteGroupFolder,
+  listChannelPermissionOverrides,
+  replaceChannelPermissionOverrides
 } from '../../db/groups.js';
+import type { GroupMessageRecord, PublicGroupMessage } from '../../db/groups.js';
 import {
   listCustomCategories,
   createCustomCategory,
@@ -48,6 +66,8 @@ import {
   updateCustomOption,
   deleteCustomOption,
   toggleCustomOption,
+  attachRole,
+  detachRole,
   getSelectedOptionIds,
   getMemberRoleIds,
   getChannelRoleGates,
@@ -56,10 +76,11 @@ import {
   needsOnboarding,
   markOnboardingComplete
 } from '../../db/customization.js';
-import { findUserById, toPublicUser } from '../../db/users.js';
+import { findUserById, toPublicUser, toPublicUserLite } from '../../db/users.js';
 import { asyncHandler } from '../../http/async-handler.js';
 import { HttpError } from '../../http/errors.js';
 import { type AuthenticatedRequest, requireAuth } from '../../middleware/require-auth.js';
+import { extractMentionTokens, mentionedUserIdsFromBody, mentionToken } from './mentions.js';
 
 const createGroupSchema = z.object({
   name: z.string().trim().min(1).max(100),
@@ -88,20 +109,72 @@ const updateGroupSchema = z.object({
 });
 
 // Owner-tier permission set, granted to the group creator and the Owner role.
-const OWNER_PERMISSIONS = ['ManageRoles', 'DeleteAnyMessage', 'ManageChannels', 'ManageInvites', 'KickMembers'];
+const OWNER_PERMISSIONS = [
+  'ManageRoles', 'DeleteAnyMessage', 'ManageChannels', 'ManageInvites', 'KickMembers',
+  'MentionEveryone', 'ViewChannel', 'ManageChannel', 'ManagePermissions', 'ManageWebhooks',
+  'CreateInvite', 'SendMessages', 'AttachFiles', 'AddReactions', 'UseExternalEmojis',
+  'ManageMessages', 'PinMessages', 'BypassSlowmode', 'ReadMessageHistory',
+  'SendVoiceMessages', 'SendVideoCircles', 'CreatePolls'
+];
+const FEED_PUBLISH_PERMISSIONS = ['ManageRoles', 'DeleteAnyMessage', 'ManageChannels', 'ManageInvites', 'KickMembers', 'ManageMessages'];
+
+const CUSTOM_EMOJI_TOKEN_RE = /<ce:[^:>]+:(?:https?:\/\/|data:image\/(?:png|gif|jpe?g|webp);base64,)[^\s<>]+>/i;
+
+function isVoiceMessageMedia(media: { dataUrl: string; name?: string | null } | null | undefined) {
+  return Boolean(media && (media.dataUrl.startsWith('data:audio/') || media.name?.startsWith('voice-message-')));
+}
+
+function isVideoCircleMedia(media: { dataUrl: string; name?: string | null } | null | undefined) {
+  return Boolean(media && (media.dataUrl.startsWith('data:video/') || media.name?.startsWith('video-circle-')));
+}
 
 async function getMemberPermissions(groupId: string, userId: string) {
-  const member = (await listGroupMembers(groupId)).find((m) => m.user_id === userId);
+  const result = await pool.query<{
+    owner_id: string;
+    everyone_permissions: string[];
+    role: string;
+    role_id: string | null;
+    role_ids: string[] | null;
+  }>(
+    `
+      SELECT
+        g.owner_id,
+        g.everyone_permissions,
+        gm.role,
+        gm.role_id,
+        extra_roles.role_ids
+      FROM group_members gm
+      JOIN groups g ON g.id = gm.group_id
+      LEFT JOIN LATERAL (
+        SELECT array_agg(DISTINCT role_id) AS role_ids
+        FROM group_member_roles
+        WHERE group_id = gm.group_id
+          AND user_id = gm.user_id
+      ) extra_roles ON TRUE
+      WHERE gm.group_id = $1
+        AND gm.user_id = $2
+      LIMIT 1
+    `,
+    [groupId, userId]
+  );
+  const member = result.rows[0];
   if (!member) return null;
   // The group creator is always an owner/admin, even if they hold no role or a
   // non-admin custom role.
-  const group = await getGroupById(groupId);
-  if (group?.owner_id === userId) return { isOwner: true, permissions: OWNER_PERMISSIONS };
+  if (member.owner_id === userId) return { isOwner: true, permissions: OWNER_PERMISSIONS };
   if (member.role === 'Owner') return { isOwner: true, permissions: OWNER_PERMISSIONS };
-  if (!member.role_id) return { isOwner: false, permissions: [] };
-  const roleRow = (await pool.query('SELECT gr.is_owner, gr.permissions FROM group_roles gr WHERE gr.id = $1', [member.role_id])).rows[0];
-  if (!roleRow) return { isOwner: false, permissions: [] };
-  return { isOwner: roleRow.is_owner, permissions: roleRow.permissions ?? [] };
+  const basePermissions = new Set<string>(member.everyone_permissions ?? []);
+  const roleIds = Array.from(new Set((member.role_ids?.length ? member.role_ids : member.role_id ? [member.role_id] : []).filter(Boolean)));
+  if (roleIds.length === 0) return { isOwner: false, permissions: [...basePermissions] };
+  const roleRows = await pool.query<{ is_owner: boolean; permissions: string[] }>(
+    'SELECT gr.is_owner, gr.permissions FROM group_roles gr WHERE gr.group_id = $1 AND gr.id = ANY($2::uuid[])',
+    [groupId, roleIds]
+  );
+  const permissions = new Set<string>(basePermissions);
+  for (const row of roleRows.rows) {
+    for (const permission of row.permissions ?? []) permissions.add(permission);
+  }
+  return { isOwner: roleRows.rows.some((row) => row.is_owner), permissions: [...permissions] };
 }
 
 // Shared mapper so every endpoint returns members with the same shape,
@@ -109,8 +182,11 @@ async function getMemberPermissions(groupId: string, userId: string) {
 function mapMember(m: Awaited<ReturnType<typeof listGroupMembers>>[number]) {
   // The query's `m.role` is the group role; pass the global account role to
   // toPublicUser so account-level badges (e.g. the 'dev' badge) still render.
+  // Lite user: the member list only needs identity, avatar and name/nameplate
+  // styling. Dropping the heavy wallpaper/pinned base64 keeps a big group's
+  // member payload small. The full profile is fetched when a card is opened.
   return {
-    user: toPublicUser({ ...m, role: m.account_role ?? m.role }),
+    user: toPublicUserLite({ ...m, role: m.account_role ?? m.role }),
     role: m.role,
     roleId: m.role_id,
     roleIds: m.role_ids ?? [],
@@ -118,20 +194,68 @@ function mapMember(m: Awaited<ReturnType<typeof listGroupMembers>>[number]) {
   };
 }
 
+async function mapInvite(invite: Awaited<ReturnType<typeof listGroupInvites>>[number]) {
+  const creator = await findUserById(invite.creator_id);
+  return {
+    id: invite.id,
+    groupId: invite.group_id,
+    channelId: invite.channel_id,
+    code: invite.code,
+    creator: creator ? toPublicUserLite(creator) : null,
+    usesCount: invite.uses_count,
+    createdAt: invite.created_at.toISOString()
+  };
+}
+
+function mapChannelPermissionOverride(row: Awaited<ReturnType<typeof listChannelPermissionOverrides>>[number]) {
+  return {
+    channelId: row.channel_id,
+    roleId: row.target_id,
+    permission: row.permission,
+    value: row.value
+  };
+}
+
+function toCompactGroup(group: Parameters<typeof toPublicGroup>[0]) {
+  return toPublicGroup(group);
+}
+
 // Returns channels visible to a member: public channels plus role-gated ones
 // the member can access. Staff (owner / ManageChannels) always see everything
 // so they can manage hidden channels.
-async function visibleChannels(groupId: string, userId: string) {
-  const [channels, gates, perms] = await Promise.all([
+export async function visibleChannels(groupId: string, userId: string) {
+  const [channels, gates, perms, permissionRows] = await Promise.all([
     listGroupChannels(groupId),
     getChannelRoleGates(groupId),
-    getMemberPermissions(groupId, userId)
+    getMemberPermissions(groupId, userId),
+    pool.query<{ channel_id: string; target_id: string; value: 'allow' | 'deny' }>(
+      `
+        SELECT gcpo.channel_id, gcpo.target_id, gcpo.value
+        FROM group_channel_permission_overrides gcpo
+        JOIN group_channels gc ON gc.id = gcpo.channel_id
+        WHERE gc.group_id = $1 AND gcpo.permission = 'ViewChannel'
+      `,
+      [groupId]
+    )
   ]);
   const isStaff = Boolean(perms?.isOwner || perms?.permissions?.includes('ManageChannels'));
   const memberRoles = isStaff ? null : await getMemberRoleIds(groupId, userId);
+  const viewOverrides = new Map<string, { allow: Set<string>; deny: Set<string> }>();
+  for (const row of permissionRows.rows) {
+    const entry = viewOverrides.get(row.channel_id) ?? { allow: new Set<string>(), deny: new Set<string>() };
+    entry[row.value].add(row.target_id);
+    viewOverrides.set(row.channel_id, entry);
+  }
 
   return channels
     .filter((channel) => {
+      const override = viewOverrides.get(channel.id);
+      if (!isStaff && override) {
+        for (const roleId of override.deny) if (roleId !== '@everyone' && memberRoles!.has(roleId)) return false;
+        for (const roleId of override.allow) if (roleId !== '@everyone' && memberRoles!.has(roleId)) return true;
+        if (override.deny.has('@everyone')) return false;
+        if (override.allow.size > 0 && !override.allow.has('@everyone')) return false;
+      }
       const required = gates.get(channel.id);
       if (!required || required.size === 0) return true;
       if (isStaff) return true;
@@ -139,6 +263,36 @@ async function visibleChannels(groupId: string, userId: string) {
       return false;
     })
     .map((channel) => toPublicGroupChannel(channel, Array.from(gates.get(channel.id) ?? [])));
+}
+
+export async function visibleGroupConversationPreviews(userId: string) {
+  const groups = await getUserGroups(userId);
+  const channelIds: string[] = [];
+  for (const group of groups) {
+    const visible = await visibleChannels(group.id, userId);
+    for (const channel of visible) {
+      if (channel.type === 'text' || channel.type === 'feed') channelIds.push(channel.id);
+    }
+  }
+  return listGroupConversationPreviews(userId, channelIds);
+}
+
+async function visibleMemberIdsForChannel(groupId: string, channelId: string) {
+  const memberIds = await listGroupMemberIds(groupId);
+  const checks = await Promise.all(memberIds.map(async (userId) => {
+    const visible = await visibleChannels(groupId, userId);
+    return visible.some((channel) => channel.id === channelId) ? userId : null;
+  }));
+  return checks.filter((userId): userId is string => Boolean(userId));
+}
+
+async function validateGroupReplyTarget(groupId: string, channelId: string, replyTo: string | undefined) {
+  if (!replyTo) return;
+  const result = await pool.query<{ id: string }>(
+    `SELECT id FROM group_messages WHERE id = $1 AND group_id = $2 AND deleted_at IS NULL`,
+    [replyTo, groupId]
+  );
+  if (!result.rows[0]) throw new HttpError(400, 'Invalid reply target', 'INVALID_REPLY_TARGET');
 }
 
 // Returns folders visible to a member, honouring required_role_id on hidden
@@ -162,24 +316,127 @@ async function visibleFolders(groupId: string, userId: string) {
     .map(toPublicGroupFolder);
 }
 
+function channelPermissionAlias(permission: string) {
+  if (permission === 'ManageChannel') return ['ManageChannels'];
+  if (permission === 'ManagePermissions') return ['ManageRoles', 'ManageChannels'];
+  if (permission === 'CreateInvite') return ['ManageInvites'];
+  if (permission === 'ManageMessages') return ['DeleteAnyMessage'];
+  return [];
+}
+
+async function getChannelPermissionSet(groupId: string, channelId: string, userId: string) {
+  const [memberPerms, roleIds, overrides] = await Promise.all([
+    getMemberPermissions(groupId, userId),
+    getMemberRoleIds(groupId, userId),
+    listChannelPermissionOverrides(channelId)
+  ]);
+  if (!memberPerms) return null;
+  if (memberPerms.isOwner) return { isOwner: true, permissions: new Set(OWNER_PERMISSIONS) };
+
+  const permissions = new Set<string>();
+  for (const permission of memberPerms.permissions ?? []) permissions.add(permission);
+
+  for (const override of overrides) {
+    if (override.target_id !== '@everyone') continue;
+    if (override.value === 'allow') permissions.add(override.permission);
+    else permissions.delete(override.permission);
+  }
+
+  const roleAllow = new Set<string>();
+  const roleDeny = new Set<string>();
+  for (const override of overrides) {
+    if (override.target_id === '@everyone' || !roleIds.has(override.target_id)) continue;
+    if (override.value === 'allow') roleAllow.add(override.permission);
+    else roleDeny.add(override.permission);
+  }
+  for (const permission of roleAllow) {
+    if (!roleDeny.has(permission)) permissions.add(permission);
+  }
+  for (const permission of roleDeny) permissions.delete(permission);
+
+  return { isOwner: false, permissions };
+}
+
+function hasChannelPermission(
+  effective: Awaited<ReturnType<typeof getChannelPermissionSet>>,
+  permission: string
+) {
+  if (!effective) return false;
+  if (effective.isOwner) return true;
+  if (effective.permissions.has(permission)) return true;
+  return channelPermissionAlias(permission).some((alias) => effective.permissions.has(alias));
+}
+
+async function requireChannelPermission(groupId: string, channelId: string, userId: string, permission: string, code: string) {
+  const channel = await getGroupChannelById(channelId);
+  if (!channel || channel.group_id !== groupId) throw new HttpError(404, 'Channel not found', 'CHANNEL_NOT_FOUND');
+  if (permission === 'ViewChannel') {
+    const visible = await visibleChannels(groupId, userId);
+    if (!visible.some((item) => item.id === channelId)) throw new HttpError(403, 'Missing channel permission', code);
+  }
+  const effective = await getChannelPermissionSet(groupId, channelId, userId);
+  if (!hasChannelPermission(effective, permission)) throw new HttpError(403, 'Missing channel permission', code);
+  return { channel, effective };
+}
+
 const groupMessageSchema = z.object({
   body: z.preprocess((value) => (typeof value === 'string' ? value : ''), z.string().trim().max(2000)),
-  channelId: z.string().uuid().optional(),
-  image: z.preprocess((value) => (value === null ? undefined : value), z.object({
-    dataUrl: z.string().startsWith('data:image/').max(24_000_000),
-    name: z.string().trim().max(240).optional(),
-    spoiler: z.boolean().optional()
-  }).optional())
-}).refine((value) => value.body.length > 0 || Boolean(value.image), {
+  channelId: z.string().uuid(),
+  image: z.preprocess((value) => (value === null ? undefined : value), chatImageSchema.optional()),
+  mediaItems: z.preprocess((value) => (value === null ? undefined : value), chatMediaItemsSchema.optional()),
+  replyTo: z.string().uuid().optional(),
+  senderGroupId: z.string().uuid().optional()
+}).refine((value) => value.body.length > 0 || Boolean(value.image) || Boolean(value.mediaItems?.length), {
   message: 'Message body or image is required'
 });
 
 const editGroupMessageSchema = z.object({
-  body: z.string().trim().min(1).max(2000)
+  body: z.preprocess((value) => (typeof value === 'string' ? value : ''), z.string().trim().max(2000)),
+  mediaItems: z.preprocess((value) => (value === null ? undefined : value), chatMediaItemsSchema.optional())
+}).refine((value) => value.body.length > 0 || Boolean(value.mediaItems?.length), {
+  message: 'Message body or media is required'
+});
+
+// A reaction emoji is either a short unicode emoji or a custom-emoji token
+// (e.g. ":name~https://.../emoji.png:"), so cap the length generously.
+const reactionSchema = z.object({
+  emoji: z.string().trim().min(1).max(4096)
 });
 
 export function createGroupRouter(io: Server) {
   const router = Router();
+
+  async function feedLinkedMessageRows(groupId: string, canonicalMessageId: string) {
+    const result = await pool.query<GroupMessageRecord>(
+      `
+        SELECT gm.*,
+          (
+            SELECT COUNT(*)::int
+            FROM group_message_views gmv
+            WHERE gmv.message_id = COALESCE(gm.feed_source_id, gm.id)
+          ) AS view_count
+        FROM group_messages gm
+        WHERE gm.group_id = $1
+          AND (gm.id = $2 OR gm.feed_source_id = $2)
+        ORDER BY gm.created_at ASC
+      `,
+      [groupId, canonicalMessageId]
+    );
+    return result.rows;
+  }
+
+  async function emitGroupMessageToVisibleMembers(eventName: 'messenger:groupMessageUpdated' | 'messenger:groupMessageDeleted', message: PublicGroupMessage) {
+    if (!message.channelId) return;
+    const memberIds = await visibleMemberIdsForChannel(message.groupId, message.channelId);
+    for (const id of memberIds) io.to(id).emit(eventName, { message });
+  }
+
+  async function emitFeedLinkedMessages(eventName: 'messenger:groupMessageUpdated' | 'messenger:groupMessageDeleted', groupId: string, canonicalMessageId: string) {
+    const rows = await feedLinkedMessageRows(groupId, canonicalMessageId);
+    const messages = await toPublicGroupMessagesWithReactions(rows);
+    for (const message of messages) await emitGroupMessageToVisibleMembers(eventName, message);
+    return messages;
+  }
 
   router.get(
     '/groups',
@@ -205,10 +462,10 @@ export function createGroupRouter(io: Server) {
     '/groups/conversations',
     requireAuth,
     asyncHandler<AuthenticatedRequest>(async (req, res) => {
-      const raw = await listGroupConversationPreviews(req.auth.userId);
+      const raw = await visibleGroupConversationPreviews(req.auth.userId);
       res.json({
         conversations: raw.map((p) => ({
-          group: toPublicGroup(p.group),
+          group: toCompactGroup(p.group),
           message: toPublicGroupMessage(p.message),
           unreadCount: p.unreadCount
         }))
@@ -227,6 +484,39 @@ export function createGroupRouter(io: Server) {
       if (!(await isGroupMember(groupId, req.auth.userId))) throw new HttpError(403, 'Not a member', 'NOT_GROUP_MEMBER');
 
       res.json({ group: toPublicGroup(group) });
+    })
+  );
+
+  router.get(
+    '/groups/:groupId/public-profile',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      const preview = await pool.query(
+        `
+          SELECT
+            groups.*,
+            COUNT(group_members.user_id)::int AS member_count,
+            EXISTS (
+              SELECT 1
+              FROM group_members self_member
+              WHERE self_member.group_id = groups.id AND self_member.user_id = $2
+            ) AS is_member
+          FROM groups
+          LEFT JOIN group_members ON group_members.group_id = groups.id
+          WHERE groups.id = $1
+          GROUP BY groups.id
+          LIMIT 1
+        `,
+        [groupId, req.auth.userId]
+      );
+      const group = preview.rows[0];
+      if (!group) throw new HttpError(404, 'Group not found', 'GROUP_NOT_FOUND');
+      res.json({
+        group: toCompactGroup(group),
+        memberCount: Number(group.member_count ?? 0),
+        isMember: Boolean(group.is_member)
+      });
     })
   );
 
@@ -278,6 +568,66 @@ export function createGroupRouter(io: Server) {
 
       const members = await listGroupMembers(groupId);
       res.json({ members: members.map(mapMember) });
+    })
+  );
+
+  router.get(
+    '/groups/:groupId/bootstrap',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      const [
+        group,
+        channels,
+        channelGates,
+        roles,
+        members,
+        folders,
+        categories,
+        selectedOptionIds,
+        onboardingRequired
+      ] = await Promise.all([
+        getGroupById(groupId),
+        listGroupChannels(groupId),
+        getChannelRoleGates(groupId),
+        listGroupRoles(groupId),
+        listGroupMembers(groupId),
+        listGroupFolders(groupId),
+        listCustomCategories(groupId),
+        getSelectedOptionIds(groupId, req.auth.userId),
+        needsOnboarding(groupId, req.auth.userId)
+      ]);
+
+      if (!group) throw new HttpError(404, 'Group not found', 'GROUP_NOT_FOUND');
+      const self = members.find((member) => member.user_id === req.auth.userId);
+      if (!self) throw new HttpError(403, 'Not a member', 'NOT_GROUP_MEMBER');
+
+      const selfRoleIds = new Set<string>(self.role_ids ?? []);
+      const selfRoles = roles.filter((role) => selfRoleIds.has(role.id));
+      const selfIsOwner = group.owner_id === req.auth.userId || self.role === 'Owner' || selfRoles.some((role) => role.is_owner);
+      const selfPermissions = new Set<string>();
+      for (const role of selfRoles) {
+        for (const permission of role.permissions ?? []) selfPermissions.add(permission);
+      }
+      const canManageChannels = selfIsOwner || selfPermissions.has('ManageChannels');
+      const visibleChannelRows = channels.filter((channel) => {
+        const required = channelGates.get(channel.id);
+        if (!required || required.size === 0 || canManageChannels) return true;
+        for (const roleId of required) if (selfRoleIds.has(roleId)) return true;
+        return false;
+      });
+      const visibleFolderRows = folders.filter((folder) => {
+        if (!folder.required_role_id || canManageChannels) return true;
+        return selfRoleIds.has(folder.required_role_id);
+      });
+
+      res.json({
+        channels: visibleChannelRows.map((channel) => toPublicGroupChannel(channel, Array.from(channelGates.get(channel.id) ?? []))),
+        roles: roles.map(toPublicGroupRole),
+        members: members.map(mapMember),
+        folders: visibleFolderRows.map(toPublicGroupFolder),
+        customization: { categories, selectedOptionIds, onboardingRequired }
+      });
     })
   );
 
@@ -334,41 +684,120 @@ export function createGroupRouter(io: Server) {
     asyncHandler<AuthenticatedRequest>(async (req, res) => {
       const groupId = z.string().uuid().parse(req.params.groupId);
       const targetUserId = z.string().uuid().parse(req.params.userId);
-      const input = z.object({ roleId: z.string().uuid().nullable() }).parse(req.body);
+      const input = z.object({
+        roleId: z.string().uuid().nullable().optional(),
+        addRoleId: z.string().uuid().optional(),
+        removeRoleId: z.string().uuid().optional()
+      }).parse(req.body);
 
-      const requester = (await listGroupMembers(groupId)).find((m) => m.user_id === req.auth.userId);
-      const perms = await getMemberPermissions(groupId, req.auth.userId);
+      const [perms, targetIsMember] = await Promise.all([
+        getMemberPermissions(groupId, req.auth.userId),
+        isGroupMember(groupId, targetUserId)
+      ]);
+      if (!perms || !targetIsMember) throw new HttpError(404, 'Member not found', 'GROUP_MEMBER_NOT_FOUND');
       const canManageRoles = perms?.isOwner || perms?.permissions?.includes('ManageRoles');
       if (!canManageRoles) throw new HttpError(403, 'Not allowed to manage roles', 'ROLE_FORBIDDEN');
 
-      if (input.roleId) {
-        const role = await pool.query('SELECT is_owner FROM group_roles WHERE id = $1 AND group_id = $2', [input.roleId, groupId]);
+      const roleIdToValidate = input.roleId ?? input.addRoleId ?? input.removeRoleId ?? null;
+      if (roleIdToValidate) {
+        const role = await pool.query('SELECT is_owner FROM group_roles WHERE id = $1 AND group_id = $2', [roleIdToValidate, groupId]);
         if (!role.rows[0]) throw new HttpError(404, 'Role not found', 'ROLE_NOT_FOUND');
-        if (role.rows[0].is_owner) throw new HttpError(403, 'Cannot assign owner role', 'ROLE_ASSIGN_OWNER');
+        if (role.rows[0].is_owner) throw new HttpError(403, 'Cannot manage owner role', 'ROLE_ASSIGN_OWNER');
+      }
 
-        const roleName = await pool.query('SELECT name FROM group_roles WHERE id = $1', [input.roleId]);
-        await pool.query(
-          'UPDATE group_members SET role_id = $1, role = $2 WHERE group_id = $3 AND user_id = $4',
-          [input.roleId, roleName.rows[0].name, groupId, targetUserId]
-        );
-      } else {
-        await pool.query(
-          "UPDATE group_members SET role_id = NULL, role = 'member' WHERE group_id = $1 AND user_id = $2",
-          [groupId, targetUserId]
-        );
+      if (input.roleId !== undefined) {
+        if (input.roleId) {
+          const roleName = await pool.query('SELECT name FROM group_roles WHERE id = $1', [input.roleId]);
+          await pool.query(
+            'UPDATE group_members SET role_id = $1, role = $2 WHERE group_id = $3 AND user_id = $4',
+            [input.roleId, roleName.rows[0].name, groupId, targetUserId]
+          );
+        } else {
+          await pool.query(
+            "UPDATE group_members SET role_id = NULL, role = 'member' WHERE group_id = $1 AND user_id = $2",
+            [groupId, targetUserId]
+          );
+        }
+      } else if (input.addRoleId) {
+        await attachRole(groupId, targetUserId, input.addRoleId);
+      } else if (input.removeRoleId) {
+        await detachRole(groupId, targetUserId, input.removeRoleId);
       }
 
       const members = await listGroupMembers(groupId);
       const membersList = members.map(mapMember);
 
-      await Promise.all(members.map((m) => io.to(m.user_id).emit('messenger:groupMemberRoleChanged', {
+      members.forEach((m) => io.to(m.user_id).emit('messenger:groupMemberRoleChanged', {
         groupId,
         userId: targetUserId,
-        roleId: input.roleId,
+        roleId: input.roleId ?? input.addRoleId ?? input.removeRoleId ?? null,
+        members: membersList
+      }));
+
+      res.json({ members: membersList });
+    })
+  );
+
+  router.patch(
+    '/groups/:groupId/members/roles',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      const input = z.object({
+        userIds: z.array(z.string().uuid()).min(1).max(100),
+        addRoleId: z.string().uuid().optional(),
+        removeRoleId: z.string().uuid().optional()
+      }).refine((value) => Boolean(value.addRoleId) !== Boolean(value.removeRoleId), {
+        message: 'Provide exactly one role action'
+      }).parse(req.body);
+
+      const uniqueUserIds = [...new Set(input.userIds)];
+      const [perms, currentMembers] = await Promise.all([
+        getMemberPermissions(groupId, req.auth.userId),
+        listGroupMembers(groupId)
+      ]);
+      const canManageRoles = perms?.isOwner || perms?.permissions?.includes('ManageRoles');
+      if (!canManageRoles) throw new HttpError(403, 'Not allowed to manage roles', 'ROLE_FORBIDDEN');
+
+      const currentMemberIds = new Set(currentMembers.map((member) => member.user_id));
+      if (uniqueUserIds.some((userId) => !currentMemberIds.has(userId))) {
+        throw new HttpError(404, 'Member not found', 'GROUP_MEMBER_NOT_FOUND');
+      }
+
+      const roleId = input.addRoleId ?? input.removeRoleId!;
+      const role = await pool.query('SELECT is_owner FROM group_roles WHERE id = $1 AND group_id = $2', [roleId, groupId]);
+      if (!role.rows[0]) throw new HttpError(404, 'Role not found', 'ROLE_NOT_FOUND');
+      if (role.rows[0].is_owner) throw new HttpError(403, 'Cannot manage owner role', 'ROLE_ASSIGN_OWNER');
+
+      await Promise.all(uniqueUserIds.map((userId) => (
+        input.addRoleId ? attachRole(groupId, userId, input.addRoleId) : detachRole(groupId, userId, input.removeRoleId!)
+      )));
+
+      const members = await listGroupMembers(groupId);
+      const membersList = members.map(mapMember);
+      const memberIds = await listGroupMemberIds(groupId);
+      await Promise.all(memberIds.map((userId) => io.to(userId).emit('messenger:groupMemberRoleChanged', {
+        groupId,
+        userIds: uniqueUserIds,
+        roleId,
         members: membersList
       })));
 
       res.json({ members: membersList });
+    })
+  );
+
+  router.get(
+    '/groups/:groupId/invites',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      const channelId = req.query.channelId === undefined ? undefined : z.string().uuid().nullable().parse(req.query.channelId || null);
+      const perms = await getMemberPermissions(groupId, req.auth.userId);
+      const canManageInvites = perms?.isOwner || perms?.permissions?.includes('ManageInvites');
+      if (!canManageInvites) throw new HttpError(403, 'Not allowed to manage invites', 'INVITE_FORBIDDEN');
+      const invites = await listGroupInvites(groupId, channelId);
+      res.json({ invites: await Promise.all(invites.map(mapInvite)) });
     })
   );
 
@@ -377,12 +806,32 @@ export function createGroupRouter(io: Server) {
     requireAuth,
     asyncHandler<AuthenticatedRequest>(async (req, res) => {
       const groupId = z.string().uuid().parse(req.params.groupId);
+      const input = z.object({ channelId: z.string().uuid().nullable().optional() }).parse(req.body ?? {});
+      const perms = await getMemberPermissions(groupId, req.auth.userId);
+      const canManageInvites = perms?.isOwner || perms?.permissions?.includes('ManageInvites');
+      if (input.channelId) {
+        const { effective } = await requireChannelPermission(groupId, input.channelId, req.auth.userId, 'CreateInvite', 'INVITE_FORBIDDEN');
+        if (!canManageInvites && !hasChannelPermission(effective, 'CreateInvite')) throw new HttpError(403, 'Not allowed to manage invites', 'INVITE_FORBIDDEN');
+      } else if (!canManageInvites) {
+        throw new HttpError(403, 'Not allowed to manage invites', 'INVITE_FORBIDDEN');
+      }
+      const invite = await createGroupInvite(groupId, req.auth.userId, input.channelId ?? null);
+      res.json({ inviteCode: invite.code, invite: await mapInvite(invite) });
+    })
+  );
+
+  router.delete(
+    '/groups/:groupId/invites/:inviteId',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      const inviteId = z.string().uuid().parse(req.params.inviteId);
       const perms = await getMemberPermissions(groupId, req.auth.userId);
       const canManageInvites = perms?.isOwner || perms?.permissions?.includes('ManageInvites');
       if (!canManageInvites) throw new HttpError(403, 'Not allowed to manage invites', 'INVITE_FORBIDDEN');
-      const updated = await regenerateInviteCode(groupId);
-      if (!updated) throw new HttpError(403, 'Could not regenerate invite', 'INVITE_GEN_FAILED');
-      res.json({ inviteCode: updated.invite_code });
+      const deleted = await deleteGroupInvite(groupId, inviteId);
+      if (!deleted) throw new HttpError(404, 'Invite not found', 'INVITE_NOT_FOUND');
+      res.json({ success: true });
     })
   );
 
@@ -391,10 +840,21 @@ export function createGroupRouter(io: Server) {
     requireAuth,
     asyncHandler<AuthenticatedRequest>(async (req, res) => {
       const inviteCode = z.string().parse(req.params.inviteCode);
-      const group = await getGroupByInviteCode(inviteCode);
+      const preview = await pool.query(
+        `
+          SELECT groups.*, COUNT(group_members.user_id)::int AS member_count
+          FROM groups
+          LEFT JOIN group_invites ON group_invites.group_id = groups.id AND group_invites.code = $1
+          LEFT JOIN group_members ON group_members.group_id = groups.id
+          WHERE groups.invite_code = $1 OR group_invites.code = $1
+          GROUP BY groups.id
+          LIMIT 1
+        `,
+        [inviteCode]
+      );
+      const group = preview.rows[0];
       if (!group) throw new HttpError(404, 'Invite link is invalid or expired', 'INVITE_INVALID');
-      const memberCount = (await pool.query('SELECT COUNT(*) FROM group_members WHERE group_id = $1', [group.id])).rows[0].count;
-      res.json({ group: toPublicGroup(group), memberCount: Number(memberCount) });
+      res.json({ group: toCompactGroup(group), memberCount: Number(group.member_count ?? 0) });
     })
   );
 
@@ -404,10 +864,12 @@ export function createGroupRouter(io: Server) {
     asyncHandler<AuthenticatedRequest>(async (req, res) => {
       const inviteCode = z.string().parse(req.params.inviteCode);
       const group = await getGroupByInviteCode(inviteCode);
+      const trackedInvite = await getGroupInviteByCode(inviteCode);
 
       if (!group) throw new HttpError(404, 'Invite link is invalid or expired', 'INVITE_INVALID');
 
       await addGroupMember(group.id, req.auth.userId);
+      if (trackedInvite) await incrementGroupInviteUse(inviteCode);
       io.to(req.auth.userId).emit('messenger:groupInvited', { group: toPublicGroup(group) });
 
       const members = await listGroupMembers(group.id);
@@ -422,6 +884,31 @@ export function createGroupRouter(io: Server) {
   );
 
   // ── Channels ──
+
+  router.post(
+    '/groups/:groupId/join',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      const group = await getGroupById(groupId);
+      if (!group) throw new HttpError(404, 'Group not found', 'GROUP_NOT_FOUND');
+
+      const wasMember = await isGroupMember(group.id, req.auth.userId);
+      await addGroupMember(group.id, req.auth.userId);
+      if (!wasMember) io.to(req.auth.userId).emit('messenger:groupInvited', { group: toPublicGroup(group) });
+
+      const members = await listGroupMembers(group.id);
+      if (!wasMember) {
+        const publicUser = toPublicUser(await findUserById(req.auth.userId));
+        await Promise.all(members.map(async (m) => io.to(m.user_id).emit('messenger:groupMemberJoined', {
+          groupId: group.id,
+          user: publicUser
+        })));
+      }
+
+      res.json({ group: toPublicGroup(group), memberCount: members.length, isMember: true });
+    })
+  );
 
   router.get(
     '/groups/:groupId/channels',
@@ -439,13 +926,24 @@ export function createGroupRouter(io: Server) {
     requireAuth,
     asyncHandler<AuthenticatedRequest>(async (req, res) => {
       const groupId = z.string().uuid().parse(req.params.groupId);
-      const input = z.object({ name: z.string().trim().min(1).max(50), type: z.enum(['text', 'voice']).optional() }).parse(req.body);
+      const input = z.object({ name: z.string().trim().min(1).max(50), type: z.enum(['text', 'voice', 'feed']).optional() }).parse(req.body);
       if (!(await isGroupMember(groupId, req.auth.userId))) throw new HttpError(403, 'Not a member', 'NOT_GROUP_MEMBER');
       const perms = await getMemberPermissions(groupId, req.auth.userId);
       const canManageChannels = perms?.isOwner || perms?.permissions?.includes('ManageChannels');
       if (!canManageChannels) throw new HttpError(403, 'Not allowed to manage channels', 'CHANNEL_CREATE_FORBIDDEN');
-      const channel = toPublicGroupChannel(await createGroupChannel(groupId, input.name, input.type ?? 'text'));
       const members = await listGroupMembers(groupId);
+      if (input.type === 'feed') {
+        const created = await createGroupFeed(groupId, input.name);
+        const folder = toPublicGroupFolder(created.folder);
+        const channels = [toPublicGroupChannel(created.feed), toPublicGroupChannel(created.chat)];
+        await Promise.all(members.flatMap((m) => [
+          io.to(m.user_id).emit('messenger:groupFolderCreated', { folder }),
+          ...channels.map((channel) => io.to(m.user_id).emit('messenger:groupChannelCreated', { channel }))
+        ]));
+        res.json({ channel: channels[0], channels, folder });
+        return;
+      }
+      const channel = toPublicGroupChannel(await createGroupChannel(groupId, input.name, input.type ?? 'text'));
       await Promise.all(members.map((m) => io.to(m.user_id).emit('messenger:groupChannelCreated', { channel })));
       res.json({ channel });
     })
@@ -458,9 +956,7 @@ export function createGroupRouter(io: Server) {
       const groupId = z.string().uuid().parse(req.params.groupId);
       const channelId = z.string().uuid().parse(req.params.channelId);
       if (!(await isGroupMember(groupId, req.auth.userId))) throw new HttpError(403, 'Not a member', 'NOT_GROUP_MEMBER');
-      const perms = await getMemberPermissions(groupId, req.auth.userId);
-      const canManageChannels = perms?.isOwner || perms?.permissions?.includes('ManageChannels');
-      if (!canManageChannels) throw new HttpError(403, 'Not allowed to manage channels', 'CHANNEL_DELETE_FORBIDDEN');
+      await requireChannelPermission(groupId, channelId, req.auth.userId, 'ManageChannel', 'CHANNEL_DELETE_FORBIDDEN');
       const deleted = await deleteGroupChannel(channelId, groupId);
       if (!deleted) throw new HttpError(403, 'Cannot delete general channel', 'CHANNEL_DELETE_FORBIDDEN');
       const members = await listGroupMembers(groupId);
@@ -479,12 +975,14 @@ export function createGroupRouter(io: Server) {
         name: z.string().trim().min(1).max(50).optional(),
         position: z.number().int().optional(),
         folderId: z.string().uuid().nullable().optional(),
-        userLimit: z.number().int().min(1).max(99).nullable().optional()
+        userLimit: z.number().int().min(1).max(99).nullable().optional(),
+        topic: z.string().trim().max(1024).optional(),
+        slowmodeSeconds: z.number().int().min(0).max(21600).optional(),
+        nsfw: z.boolean().optional(),
+        bitrate: z.number().int().min(8000).max(384000).optional()
       }).parse(req.body);
       if (!(await isGroupMember(groupId, req.auth.userId))) throw new HttpError(403, 'Not a member', 'NOT_GROUP_MEMBER');
-      const perms = await getMemberPermissions(groupId, req.auth.userId);
-      const canManageChannels = perms?.isOwner || perms?.permissions?.includes('ManageChannels');
-      if (!canManageChannels) throw new HttpError(403, 'Not allowed to manage channels', 'CHANNEL_UPDATE_FORBIDDEN');
+      await requireChannelPermission(groupId, channelId, req.auth.userId, 'ManageChannel', 'CHANNEL_UPDATE_FORBIDDEN');
       const updated = await updateGroupChannel(channelId, groupId, input);
       if (!updated) throw new HttpError(404, 'Channel not found', 'CHANNEL_NOT_FOUND');
       const channel = toPublicGroupChannel(updated);
@@ -645,6 +1143,23 @@ export function createGroupRouter(io: Server) {
       const members = await listGroupMembers(groupId);
       await Promise.all(members.map((m) => io.to(m.user_id).emit('messenger:groupRolesChanged', { groupId })));
       res.json({ role });
+    })
+  );
+
+  router.patch(
+    '/groups/:groupId/roles/everyone',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      const input = z.object({ permissions: z.array(z.string()) }).parse(req.body);
+      const perms = await getMemberPermissions(groupId, req.auth.userId);
+      const canManageRoles = perms?.isOwner || perms?.permissions?.includes('ManageRoles');
+      if (!canManageRoles) throw new HttpError(403, 'Not allowed to manage roles', 'ROLE_FORBIDDEN');
+      const group = await updateGroupEveryonePermissions(groupId, input.permissions);
+      if (!group) throw new HttpError(404, 'Group not found', 'GROUP_NOT_FOUND');
+      const members = await listGroupMembers(groupId);
+      await Promise.all(members.map((m) => io.to(m.user_id).emit('messenger:groupRolesChanged', { groupId })));
+      res.json({ group: toPublicGroup(group) });
     })
   );
 
@@ -857,6 +1372,57 @@ export function createGroupRouter(io: Server) {
   // Set which roles gate visibility of a channel (used to wire channels into
   // hidden customization folders, or any role-based private channel).
   router.put(
+    '/groups/:groupId/channels/:channelId/permissions',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      const channelId = z.string().uuid().parse(req.params.channelId);
+      const input = z.object({
+        overrides: z.array(z.object({
+          roleId: z.union([z.string().uuid(), z.literal('@everyone')]),
+          permission: z.string().min(1).max(80),
+          value: z.enum(['allow', 'deny'])
+        })).max(500)
+      }).parse(req.body);
+
+      await requireChannelPermission(groupId, channelId, req.auth.userId, 'ManagePermissions', 'CHANNEL_PERMISSION_FORBIDDEN');
+
+      const [channel, roles] = await Promise.all([
+        listGroupChannels(groupId).then((items) => items.find((item) => item.id === channelId) ?? null),
+        listGroupRoles(groupId)
+      ]);
+      if (!channel) throw new HttpError(404, 'Channel not found', 'CHANNEL_NOT_FOUND');
+      const roleIds = new Set(roles.map((role) => role.id));
+      const overrides = input.overrides.filter((override) => override.roleId === '@everyone' || roleIds.has(override.roleId));
+      await replaceChannelPermissionOverrides(channelId, overrides);
+
+      const viewAllowRoleIds = overrides
+        .filter((override) => override.roleId !== '@everyone' && override.permission === 'ViewChannel' && override.value === 'allow')
+        .map((override) => override.roleId);
+      await setChannelRoleGates(channelId, viewAllowRoleIds);
+
+      const members = await listGroupMembers(groupId);
+      await Promise.all(members.map((m) => io.to(m.user_id).emit('messenger:groupChannelsReordered', { groupId, channels: [] })));
+      const saved = await listChannelPermissionOverrides(channelId);
+      res.json({ overrides: saved.map(mapChannelPermissionOverride) });
+    })
+  );
+
+  router.get(
+    '/groups/:groupId/channels/:channelId/permissions',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      const channelId = z.string().uuid().parse(req.params.channelId);
+      await requireChannelPermission(groupId, channelId, req.auth.userId, 'ManagePermissions', 'CHANNEL_PERMISSION_FORBIDDEN');
+      const channel = (await listGroupChannels(groupId)).find((item) => item.id === channelId);
+      if (!channel) throw new HttpError(404, 'Channel not found', 'CHANNEL_NOT_FOUND');
+      const overrides = await listChannelPermissionOverrides(channelId);
+      res.json({ overrides: overrides.map(mapChannelPermissionOverride) });
+    })
+  );
+
+  router.put(
     '/groups/:groupId/channels/:channelId/roles',
     requireAuth,
     asyncHandler<AuthenticatedRequest>(async (req, res) => {
@@ -927,9 +1493,67 @@ export function createGroupRouter(io: Server) {
     requireAuth,
     asyncHandler<AuthenticatedRequest>(async (req, res) => {
       const groupId = z.string().uuid().parse(req.params.groupId);
-      const channelId = req.query.channelId ? z.string().uuid().parse(req.query.channelId) : undefined;
-      const messages = await listGroupMessages(groupId, req.auth.userId, channelId);
-      res.json({ messages: messages.map(toPublicGroupMessage) });
+      const channelId = z.string().uuid().parse(req.query.channelId);
+      // `before` is an optional message-id cursor for loading older pages on
+      // scroll-up. `limit` lets the client tune the page size within bounds.
+      const query = z
+        .object({
+          before: z.string().uuid().optional(),
+          limit: z.coerce.number().int().min(1).max(100).optional()
+        })
+        .parse(req.query);
+      await requireChannelPermission(groupId, channelId, req.auth.userId, 'ViewChannel', 'CHANNEL_VIEW_FORBIDDEN');
+      await requireChannelPermission(groupId, channelId, req.auth.userId, 'ReadMessageHistory', 'CHANNEL_HISTORY_FORBIDDEN');
+      const { messages, hasMore } = await listGroupMessages(groupId, req.auth.userId, channelId, {
+        before: query.before,
+        limit: query.limit
+      });
+      const newlyViewedIds = new Set(await markGroupMessagesViewed(
+        messages.filter((message) => !message.deleted_at).map((message) => message.feed_source_id ?? message.id),
+        req.auth.userId
+      ));
+      const messagesWithCurrentViewCounts = messages.map((message) => (
+        newlyViewedIds.has(message.feed_source_id ?? message.id)
+          ? { ...message, view_count: Number(message.view_count ?? 0) + 1 }
+          : message
+      ));
+      res.json({ messages: await toPublicGroupMessagesWithReactions(messagesWithCurrentViewCounts), hasMore });
+    })
+  );
+
+  router.get(
+    '/groups/:groupId/messages/pinned',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      const query = z
+        .object({
+          channelId: z.string().uuid(),
+          limit: z.coerce.number().int().min(1).max(100).optional()
+        })
+        .parse(req.query);
+      await requireChannelPermission(groupId, query.channelId, req.auth.userId, 'ViewChannel', 'CHANNEL_VIEW_FORBIDDEN');
+      await requireChannelPermission(groupId, query.channelId, req.auth.userId, 'ReadMessageHistory', 'CHANNEL_HISTORY_FORBIDDEN');
+      const messages = await listGroupPinnedMessages(groupId, req.auth.userId, query.channelId, query.limit);
+      res.json({ messages: await toPublicGroupMessagesWithReactions(messages) });
+    })
+  );
+
+  router.get(
+    '/groups/:groupId/messages/media',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      const query = z
+        .object({
+          channelId: z.string().uuid(),
+          limit: z.coerce.number().int().min(1).max(500).optional()
+        })
+        .parse(req.query);
+      await requireChannelPermission(groupId, query.channelId, req.auth.userId, 'ViewChannel', 'CHANNEL_VIEW_FORBIDDEN');
+      await requireChannelPermission(groupId, query.channelId, req.auth.userId, 'ReadMessageHistory', 'CHANNEL_HISTORY_FORBIDDEN');
+      const messages = await listGroupMediaMessages(groupId, req.auth.userId, query.channelId, query.limit);
+      res.json({ messages: await toPublicGroupMessagesWithReactions(messages) });
     })
   );
 
@@ -943,14 +1567,156 @@ export function createGroupRouter(io: Server) {
       const group = await getGroupById(groupId);
       if (!group) throw new HttpError(404, 'Group not found', 'GROUP_NOT_FOUND');
       if (!(await isGroupMember(groupId, req.auth.userId))) throw new HttpError(403, 'Not a member', 'NOT_GROUP_MEMBER');
+      let senderGroup: { id: string; name: string; avatarData: string } | null = null;
+      if (input.senderGroupId) {
+        if (input.senderGroupId !== groupId) throw new HttpError(403, 'Cannot send as this group', 'GROUP_IDENTITY_FORBIDDEN');
+        const perms = await getMemberPermissions(groupId, req.auth.userId);
+        const canUseGroupIdentity = Boolean(
+          perms?.isOwner ||
+          perms?.permissions?.some((permission) => FEED_PUBLISH_PERMISSIONS.includes(permission))
+        );
+        if (!canUseGroupIdentity) throw new HttpError(403, 'Cannot send as this group', 'GROUP_IDENTITY_FORBIDDEN');
+        senderGroup = { id: group.id, name: group.name, avatarData: group.avatar_data };
+      }
+      let senderCanMentionEveryoneInChannel = false;
+      const { channel, effective } = await requireChannelPermission(groupId, input.channelId, req.auth.userId, 'SendMessages', 'GROUP_SEND_FORBIDDEN');
+      await requireChannelPermission(groupId, input.channelId, req.auth.userId, 'ViewChannel', 'CHANNEL_VIEW_FORBIDDEN');
+      if (channel.type !== 'text' && channel.type !== 'feed') throw new HttpError(403, 'Cannot send text messages in this channel', 'GROUP_SEND_FORBIDDEN');
+      if (channel.type === 'feed') {
+        const perms = await getMemberPermissions(groupId, req.auth.userId);
+        const canPublishFeed = Boolean(perms?.isOwner || perms?.permissions?.some((permission) => FEED_PUBLISH_PERMISSIONS.includes(permission)));
+        if (!canPublishFeed) throw new HttpError(403, 'Only group admins can publish feed posts', 'FEED_PUBLISH_FORBIDDEN');
+        senderGroup = { id: group.id, name: group.name, avatarData: group.avatar_data };
+      }
+      const isVoiceMessage = isVoiceMessageMedia(input.image);
+      const isVideoCircleMessage = isVideoCircleMedia(input.image);
+      if (input.image && isVoiceMessage && !hasChannelPermission(effective, 'SendVoiceMessages')) {
+        throw new HttpError(403, 'Missing voice message permission', 'SEND_VOICE_MESSAGES_FORBIDDEN');
+      }
+      if (input.image && isVideoCircleMessage && !hasChannelPermission(effective, 'SendVideoCircles')) {
+        throw new HttpError(403, 'Missing video circle permission', 'SEND_VIDEO_CIRCLES_FORBIDDEN');
+      }
+      if (input.image && !isVoiceMessage && !isVideoCircleMessage && !hasChannelPermission(effective, 'AttachFiles')) throw new HttpError(403, 'Missing attachment permission', 'ATTACH_FILES_FORBIDDEN');
+      if (input.mediaItems?.length && !hasChannelPermission(effective, 'AttachFiles')) throw new HttpError(403, 'Missing attachment permission', 'ATTACH_FILES_FORBIDDEN');
+      if (CUSTOM_EMOJI_TOKEN_RE.test(input.body) && !hasChannelPermission(effective, 'UseExternalEmojis')) {
+        throw new HttpError(403, 'Missing external emoji permission', 'EXTERNAL_EMOJI_FORBIDDEN');
+      }
+      senderCanMentionEveryoneInChannel = hasChannelPermission(effective, 'MentionEveryone');
+      if (extractMentionTokens(input.body).has('everyone') && !senderCanMentionEveryoneInChannel) {
+        throw new HttpError(403, 'Missing mention everyone permission', 'MENTION_EVERYONE_FORBIDDEN');
+      }
+      await validateGroupReplyTarget(groupId, input.channelId, input.replyTo);
+      const slowmodeSeconds = channel.slowmode_seconds ?? 0;
+      if (slowmodeSeconds > 0 && !hasChannelPermission(effective, 'BypassSlowmode')) {
+        const last = await pool.query<{ created_at: Date }>(
+          `
+            SELECT created_at
+            FROM group_messages
+            WHERE group_id = $1
+              AND sender_id = $2
+              AND channel_id = $3
+              AND deleted_at IS NULL
+            ORDER BY created_at DESC
+            LIMIT 1
+          `,
+          [groupId, req.auth.userId, input.channelId]
+        );
+        const lastCreated = last.rows[0]?.created_at?.getTime();
+        if (lastCreated) {
+          const retryAfterMs = lastCreated + slowmodeSeconds * 1000 - Date.now();
+          if (retryAfterMs > 0) {
+            res.status(429).json({
+              code: 'SLOWMODE_ACTIVE',
+              message: 'Slowmode is active',
+              retryAfterMs,
+              retryAfterSeconds: Math.ceil(retryAfterMs / 1000)
+            });
+            return;
+          }
+        }
+      }
 
-      const message = await createGroupMessage(req.auth.userId, groupId, input.channelId ?? null, input.body, input.image);
+      const message = await createGroupMessage(req.auth.userId, groupId, input.channelId, input.body, input.image, input.replyTo, senderGroup, input.mediaItems);
       if (!message) throw new HttpError(403, 'Cannot send message', 'GROUP_SEND_FORBIDDEN');
 
-      const publicMessage = toPublicGroupMessage(message);
+      const publicMessage = input.replyTo ? await toPublicGroupMessageEnriched(message) : toPublicGroupMessage(message);
 
+      const memberIds = await visibleMemberIdsForChannel(groupId, input.channelId);
+      for (const id of memberIds) io.to(id).emit('messenger:groupMessage', { message: publicMessage });
+      let feedChatChannelId = channel.feed_chat_channel_id;
+      if (channel.type === 'feed' && !feedChatChannelId) {
+        const chatChannel = await pool.query<{ id: string }>(
+          'SELECT id FROM group_channels WHERE group_id = $1 AND feed_parent_channel_id = $2 ORDER BY position ASC, created_at ASC LIMIT 1',
+          [groupId, channel.id]
+        );
+        feedChatChannelId = chatChannel.rows[0]?.id ?? null;
+      }
+      if (channel.type === 'feed' && feedChatChannelId) {
+        const mirror = await createGroupMessage(
+          req.auth.userId,
+          groupId,
+          feedChatChannelId,
+          input.body,
+          input.image,
+          null,
+          senderGroup,
+          input.mediaItems,
+          { sourceId: message.id, mirror: true }
+        );
+        if (mirror) {
+          const publicMirror = toPublicGroupMessage(mirror);
+          const chatMemberIds = await visibleMemberIdsForChannel(groupId, feedChatChannelId);
+          for (const id of chatMemberIds) io.to(id).emit('messenger:groupMessage', { message: publicMirror });
+        }
+      }
+      const mentionTokens = extractMentionTokens(input.body);
+      if (mentionTokens.size === 0) {
+        res.json({ message: publicMessage });
+        return;
+      }
       const members = await listGroupMembers(groupId);
-      await Promise.all(members.map((m) => io.to(m.user_id).emit('messenger:groupMessage', { message: publicMessage })));
+      const mentionedIdSet = new Set(mentionedUserIdsFromBody(
+        input.body,
+        members.map((member) => ({ id: member.user_id, nickname: member.nickname })),
+        req.auth.userId
+      ));
+      const roles = await listGroupRoles(groupId);
+      const roleById = new Map(roles.map((role) => [role.id, role]));
+      const mentionedRoles = roles.filter((role) => (role.is_owner || role.permissions?.includes('Mentionable')) && mentionTokens.has(mentionToken(role.name)));
+      for (const role of mentionedRoles) {
+        for (const member of members) {
+          if (member.user_id !== req.auth.userId && (member.role_ids ?? []).includes(role.id)) mentionedIdSet.add(member.user_id);
+        }
+      }
+
+      if (mentionTokens.has('everyone')) {
+        const senderMember = members.find((member) => member.user_id === req.auth.userId);
+        const senderRoleIds = senderMember?.role_ids ?? [];
+        const senderRoles = senderRoleIds.map((id) => roleById.get(id)).filter(Boolean) as Awaited<ReturnType<typeof listGroupRoles>>;
+        const senderCanMentionEveryone = senderCanMentionEveryoneInChannel || group.owner_id === req.auth.userId || senderRoles.some((role) => role.is_owner || role.permissions?.includes('MentionEveryone'));
+        if (senderCanMentionEveryone) {
+          for (const member of members) {
+            if (member.user_id === req.auth.userId) continue;
+            mentionedIdSet.add(member.user_id);
+          }
+        }
+      }
+      const mentionedIds = [...mentionedIdSet];
+      if (mentionedIds.length > 0) {
+        const sender = await findUserById(req.auth.userId);
+        const publicGroup = toPublicGroup(group);
+        const publicSender = sender ? toPublicUserLite(sender) : null;
+        if (publicSender) {
+          for (const id of mentionedIds) {
+            io.to(id).emit('messenger:mention', {
+              kind: 'group',
+              message: publicMessage,
+              sender: publicSender,
+              group: publicGroup
+            });
+          }
+        }
+      }
 
       res.json({ message: publicMessage });
     })
@@ -962,14 +1728,41 @@ export function createGroupRouter(io: Server) {
     asyncHandler<AuthenticatedRequest>(async (req, res) => {
       const messageId = z.string().uuid().parse(req.params.messageId);
       const input = editGroupMessageSchema.parse(req.body);
-      const updated = await updateGroupMessage(messageId, req.auth.userId, input.body);
+      const existing = await pool.query<{ group_id: string; channel_id: string | null }>('SELECT group_id, channel_id FROM group_messages WHERE id = $1 AND deleted_at IS NULL', [messageId]);
+      const existingMessage = existing.rows[0];
+      if (!existingMessage?.channel_id) throw new HttpError(404, 'Message not found', 'GROUP_MESSAGE_NOT_FOUND');
+      await requireChannelPermission(existingMessage.group_id, existingMessage.channel_id, req.auth.userId, 'ViewChannel', 'CHANNEL_VIEW_FORBIDDEN');
+      const updated = await updateGroupMessage(messageId, req.auth.userId, input.body, input.mediaItems);
 
       if (!updated) throw new HttpError(403, 'Message can no longer be edited', 'GROUP_MESSAGE_EDIT_FORBIDDEN');
 
-      const message = toPublicGroupMessage(updated);
-
-      const members = await listGroupMembers(updated.group_id);
-      await Promise.all(members.map((m) => io.to(m.user_id).emit('messenger:groupMessageUpdated', { message })));
+      const canonicalMessageId = updated.feed_source_id ?? updated.id;
+      await pool.query(
+        `
+          UPDATE group_messages
+          SET body = $1,
+              image_data = $2,
+              image_name = $3,
+              image_spoiler = $4,
+              media_items = $5::jsonb,
+              edited_at = $6
+          WHERE group_id = $7
+            AND (id = $8 OR feed_source_id = $8)
+            AND deleted_at IS NULL
+        `,
+        [
+          updated.body,
+          updated.image_data,
+          updated.image_name,
+          updated.image_spoiler,
+          updated.media_items ? JSON.stringify(updated.media_items) : null,
+          updated.edited_at,
+          updated.group_id,
+          canonicalMessageId
+        ]
+      );
+      const messages = await emitFeedLinkedMessages('messenger:groupMessageUpdated', updated.group_id, canonicalMessageId);
+      const message = messages.find((item) => item.id === messageId) ?? messages.find((item) => item.id === canonicalMessageId) ?? await toPublicGroupMessageEnriched(updated);
 
       res.json({ message });
     })
@@ -983,26 +1776,37 @@ export function createGroupRouter(io: Server) {
       const message = await pool.query('SELECT * FROM group_messages WHERE id = $1 AND deleted_at IS NULL', [messageId]);
       if (!message.rows[0]) throw new HttpError(404, 'Message not found', 'GROUP_MESSAGE_NOT_FOUND');
       const groupMessage = message.rows[0];
+      if (!groupMessage.channel_id) throw new HttpError(404, 'Message not found', 'GROUP_MESSAGE_NOT_FOUND');
 
       let canDelete = groupMessage.sender_id === req.auth.userId;
 
       if (!canDelete) {
         const perms = await getMemberPermissions(groupMessage.group_id, req.auth.userId);
         if (perms?.isOwner || perms?.permissions?.includes('DeleteAnyMessage')) canDelete = true;
+        await requireChannelPermission(groupMessage.group_id, groupMessage.channel_id, req.auth.userId, 'ViewChannel', 'CHANNEL_VIEW_FORBIDDEN');
+        const effective = await getChannelPermissionSet(groupMessage.group_id, groupMessage.channel_id, req.auth.userId);
+        if (hasChannelPermission(effective, 'ManageMessages')) canDelete = true;
       }
 
       if (!canDelete) throw new HttpError(403, 'Cannot delete this message', 'GROUP_MESSAGE_DELETE_FORBIDDEN');
 
+      const canonicalMessageId = groupMessage.feed_source_id ?? groupMessage.id;
       await pool.query(
-        'UPDATE group_messages SET body = \'\', image_data = NULL, image_name = NULL, image_spoiler = FALSE, deleted_at = NOW() WHERE id = $1',
-        [messageId]
+        `
+          UPDATE group_messages
+          SET body = '',
+              image_data = NULL,
+              image_name = NULL,
+              image_spoiler = FALSE,
+              media_items = NULL,
+              deleted_at = NOW()
+          WHERE group_id = $1
+            AND (id = $2 OR feed_source_id = $2)
+        `,
+        [groupMessage.group_id, canonicalMessageId]
       );
-      const deleted = await pool.query('SELECT * FROM group_messages WHERE id = $1', [messageId]);
-
-      const publicMessage = toPublicGroupMessage({ ...deleted.rows[0] });
-
-      const members = await listGroupMembers(deleted.rows[0].group_id);
-      await Promise.all(members.map((m) => io.to(m.user_id).emit('messenger:groupMessageDeleted', { message: publicMessage })));
+      const messages = await emitFeedLinkedMessages('messenger:groupMessageDeleted', groupMessage.group_id, canonicalMessageId);
+      const publicMessage = messages.find((item) => item.id === messageId) ?? messages[0] ?? toPublicGroupMessage(groupMessage);
 
       res.json({ message: publicMessage });
     })
@@ -1018,18 +1822,53 @@ export function createGroupRouter(io: Server) {
       const existing = await pool.query('SELECT * FROM group_messages WHERE id = $1 AND deleted_at IS NULL', [messageId]);
       if (!existing.rows[0]) throw new HttpError(404, 'Message not found', 'GROUP_MESSAGE_NOT_FOUND');
       const groupMessage = existing.rows[0];
+      if (!groupMessage.channel_id) throw new HttpError(404, 'Message not found', 'GROUP_MESSAGE_NOT_FOUND');
 
       if (!(await isGroupMember(groupMessage.group_id, req.auth.userId))) {
         throw new HttpError(403, 'Not a member', 'NOT_GROUP_MEMBER');
       }
+      await requireChannelPermission(groupMessage.group_id, groupMessage.channel_id, req.auth.userId, 'ViewChannel', 'CHANNEL_VIEW_FORBIDDEN');
+      await requireChannelPermission(groupMessage.group_id, groupMessage.channel_id, req.auth.userId, 'PinMessages', 'GROUP_MESSAGE_PIN_FORBIDDEN');
 
       const pinned = !groupMessage.pinned_at;
       const updated = await setGroupMessagePin(messageId, pinned);
       if (!updated) throw new HttpError(404, 'Message not found', 'GROUP_MESSAGE_NOT_FOUND');
 
-      const message = toPublicGroupMessage(updated);
-      const members = await listGroupMembers(updated.group_id);
-      await Promise.all(members.map((m) => io.to(m.user_id).emit('messenger:groupMessageUpdated', { message })));
+      const message = await toPublicGroupMessageEnriched(updated);
+      const memberIds = await visibleMemberIdsForChannel(updated.group_id, groupMessage.channel_id);
+      for (const id of memberIds) io.to(id).emit('messenger:groupMessageUpdated', { message });
+
+      res.json({ message });
+    })
+  );
+
+  // Toggle an emoji reaction on a group message. Any member may react; reacting
+  // again with the same emoji removes the reaction (Discord-style).
+  router.post(
+    '/groups/messages/:messageId/reactions/toggle',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const messageId = z.string().uuid().parse(req.params.messageId);
+      const { emoji } = reactionSchema.parse(req.body);
+
+      const existing = await pool.query('SELECT * FROM group_messages WHERE id = $1 AND deleted_at IS NULL', [messageId]);
+      if (!existing.rows[0]) throw new HttpError(404, 'Message not found', 'GROUP_MESSAGE_NOT_FOUND');
+      const groupMessage = existing.rows[0];
+      if (!groupMessage.channel_id) throw new HttpError(404, 'Message not found', 'GROUP_MESSAGE_NOT_FOUND');
+
+      if (!(await isGroupMember(groupMessage.group_id, req.auth.userId))) {
+        throw new HttpError(403, 'Not a member', 'NOT_GROUP_MEMBER');
+      }
+      await requireChannelPermission(groupMessage.group_id, groupMessage.channel_id, req.auth.userId, 'ViewChannel', 'CHANNEL_VIEW_FORBIDDEN');
+      await requireChannelPermission(groupMessage.group_id, groupMessage.channel_id, req.auth.userId, 'AddReactions', 'GROUP_REACTION_FORBIDDEN');
+      if (CUSTOM_EMOJI_TOKEN_RE.test(emoji)) {
+        await requireChannelPermission(groupMessage.group_id, groupMessage.channel_id, req.auth.userId, 'UseExternalEmojis', 'EXTERNAL_EMOJI_FORBIDDEN');
+      }
+
+      const canonicalMessageId = groupMessage.feed_source_id ?? groupMessage.id;
+      await toggleGroupMessageReaction(canonicalMessageId, req.auth.userId, emoji);
+      const messages = await emitFeedLinkedMessages('messenger:groupMessageUpdated', groupMessage.group_id, canonicalMessageId);
+      const message = messages.find((item) => item.id === messageId) ?? messages.find((item) => item.id === canonicalMessageId) ?? await toPublicGroupMessageEnriched(groupMessage);
 
       res.json({ message });
     })

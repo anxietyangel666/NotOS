@@ -1,6 +1,6 @@
 import type { Server, Socket } from 'socket.io';
 import { randomUUID } from 'node:crypto';
-import { getGroupChannelById, isGroupMember, listGroupMembers } from '../db/groups.js';
+import { getGroupChannelById, isGroupMember, listGroupMemberIds, listGroupMembers } from '../db/groups.js';
 import { findUserById, toPublicUser, type PublicUser } from '../db/users.js';
 import { pool } from '../db/pool.js';
 
@@ -47,8 +47,7 @@ async function getGroupMemberIds(groupId: string): Promise<string[]> {
   const cached = groupMembersCache.get(groupId);
   const now = Date.now();
   if (cached && now - cached.at < GROUP_MEMBERS_TTL_MS) return cached.ids;
-  const members = await listGroupMembers(groupId);
-  const ids = members.map((m) => m.user_id);
+  const ids = await listGroupMemberIds(groupId);
   groupMembersCache.set(groupId, { ids, at: now });
   return ids;
 }
@@ -133,7 +132,7 @@ export function registerVoiceHandlers(io: Server, socket: Socket, userId: string
     if (groupId) broadcastParticipants(io, groupId, channelId);
   }
 
-  socket.on('voice:join', async (payload: { channelId?: unknown }) => {
+  socket.on('voice:join', async (payload: { channelId?: unknown; muted?: unknown }) => {
     if (typeof payload?.channelId !== 'string') return;
     const channelId = payload.channelId;
     const channel = await getGroupChannelById(channelId);
@@ -175,12 +174,13 @@ export function registerVoiceHandlers(io: Server, socket: Socket, userId: string
     void socket.join(`voice:${channelId}`);
 
     let participant = room.get(userId);
+    const initialMuted = typeof payload.muted === 'boolean' ? payload.muted : false;
     if (!participant) {
       participant = {
         userId,
         user,
         sockets: new Set(),
-        muted: false,
+        muted: initialMuted,
         screen: false,
         talking: false,
         joinedAt: Date.now()
@@ -192,6 +192,7 @@ export function registerVoiceHandlers(io: Server, socket: Socket, userId: string
     }
     participant.sockets.add(socket.id);
     participant.user = user;
+    if (typeof payload.muted === 'boolean') participant.muted = payload.muted;
 
     // Send the joining socket the current peer list it should connect to.
     const existingPeers = publicParticipants(channelId).filter((p) => p.userId !== userId);

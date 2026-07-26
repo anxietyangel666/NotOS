@@ -1,0 +1,43 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: notoc-db
+    environment:
+      POSTGRES_DB: notoc
+      POSTGRES_USER: notoc
+      POSTGRES_PASSWORD: notoc
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U notoc -d notoc"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  server:
+    build:
+      context: ./apps/server
+    container_name: notoc-server
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      CLIENT_ORIGINS: http://localhost:5173,http://127.0.0.1:5173,file://,null
+      DATABASE_URL: postgresql://notoc:notoc@db:5432/notoc
+      JWT_SECRET: change-me-development-jwt-secret
+      AUTH_FILE_SECRET: change-me-development-auth-file-secret
+      BCRYPT_ROUNDS: 10
+      GROQ_TRANSLATE_MODEL: llama-3.1-8b-instant
+      SPOTIFY_CLIENT_ID: ${SPOTIFY_CLIENT_ID:-}
+      SPOTIFY_CLIENT_SECRET: ${SPOTIFY_CLIENT_SECRET:-}
+      SPOTIFY_REDIRECT_URI: ${SPOTIFY_REDIRECT_URI:-http://localhost:4000/api/connections/spotify/callback}
+      RIOT_API_KEY: ${RIOT_API_KEY:-}
+    ports:
+      - "4000:4000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  postgres-data:

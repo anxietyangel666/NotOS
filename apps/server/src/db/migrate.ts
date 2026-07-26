@@ -6,6 +6,9 @@ export async function migrate() {
       id UUID PRIMARY KEY,
       nickname TEXT NOT NULL,
       nickname_normalized TEXT UNIQUE NOT NULL,
+      login TEXT,
+      login_normalized TEXT UNIQUE,
+      email TEXT,
       role TEXT NOT NULL DEFAULT 'user',
       avatar_data TEXT NOT NULL,
       wallpaper TEXT NOT NULL DEFAULT '',
@@ -18,6 +21,7 @@ export async function migrate() {
       hide_desktop_icons BOOLEAN NOT NULL DEFAULT FALSE,
       desktop_sort TEXT NOT NULL DEFAULT 'custom',
       auth_secret_hash TEXT NOT NULL,
+      password_hash TEXT,
       recovery_key_hash TEXT NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -29,9 +33,18 @@ export async function migrate() {
     ALTER TABLE users
       ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'user';
 
-    UPDATE users
-      SET role = 'dev', updated_at = NOW()
-      WHERE nickname_normalized = 'notqqqq' AND role <> 'dev';
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS login TEXT;
+
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS login_normalized TEXT;
+
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS email TEXT;
+
+    CREATE UNIQUE INDEX IF NOT EXISTS users_login_normalized_idx
+      ON users (login_normalized)
+      WHERE login_normalized IS NOT NULL;
 
     ALTER TABLE users
       ADD COLUMN IF NOT EXISTS language_code TEXT NOT NULL DEFAULT 'en';
@@ -78,6 +91,12 @@ export async function migrate() {
     ALTER TABLE users
       ADD COLUMN IF NOT EXISTS nameplate JSONB;
 
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS allow_group_identity_messages BOOLEAN NOT NULL DEFAULT TRUE;
+
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS password_hash TEXT;
+
     CREATE TABLE IF NOT EXISTS virtual_storage (
       user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
       iv TEXT NOT NULL,
@@ -109,14 +128,32 @@ export async function migrate() {
     CREATE INDEX IF NOT EXISTS friend_requests_recipient_id_idx
       ON friend_requests (recipient_id);
 
+    -- Directed blocks: blocker_id has blocked blocked_id. A block prevents the
+    -- blocked user from messaging or calling the blocker, and hides the
+    -- conversation for the blocker.
+    CREATE TABLE IF NOT EXISTS blocked_users (
+      blocker_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      blocked_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (blocker_id, blocked_id),
+      CHECK (blocker_id <> blocked_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS blocked_users_blocked_id_idx
+      ON blocked_users (blocked_id);
+
     CREATE TABLE IF NOT EXISTS messages (
       id UUID PRIMARY KEY,
       sender_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       recipient_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      sender_group_id UUID,
+      sender_group_name TEXT,
+      sender_group_avatar_data TEXT,
       body TEXT NOT NULL,
       image_data TEXT,
       image_name TEXT,
       image_spoiler BOOLEAN NOT NULL DEFAULT FALSE,
+      media_items JSONB,
       edited_at TIMESTAMPTZ,
       deleted_at TIMESTAMPTZ,
       read_at TIMESTAMPTZ,
@@ -133,6 +170,9 @@ export async function migrate() {
       ADD COLUMN IF NOT EXISTS image_spoiler BOOLEAN NOT NULL DEFAULT FALSE;
 
     ALTER TABLE messages
+      ADD COLUMN IF NOT EXISTS media_items JSONB;
+
+    ALTER TABLE messages
       ADD COLUMN IF NOT EXISTS edited_at TIMESTAMPTZ;
 
     ALTER TABLE messages
@@ -144,12 +184,65 @@ export async function migrate() {
     ALTER TABLE messages
       ADD COLUMN IF NOT EXISTS pinned_at TIMESTAMPTZ;
 
+    ALTER TABLE messages
+      ADD COLUMN IF NOT EXISTS sender_group_id UUID;
+
+    ALTER TABLE messages
+      ADD COLUMN IF NOT EXISTS sender_group_name TEXT;
+
+    ALTER TABLE messages
+      ADD COLUMN IF NOT EXISTS sender_group_avatar_data TEXT;
+
+    -- Direct-message reply: references the message this one replies to (the
+    -- referenced message may later be deleted, hence ON DELETE SET NULL).
+    ALTER TABLE messages
+      ADD COLUMN IF NOT EXISTS reply_to UUID;
+
+    -- Emoji reactions on direct messages. One row per (message, user, emoji).
+    CREATE TABLE IF NOT EXISTS message_reactions (
+      message_id UUID NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+      user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      emoji TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (message_id, user_id, emoji)
+    );
+
+    CREATE INDEX IF NOT EXISTS message_reactions_message_idx
+      ON message_reactions (message_id);
+
+    CREATE TABLE IF NOT EXISTS message_hidden_for (
+      message_id UUID NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+      user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      hidden_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (message_id, user_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS message_hidden_for_user_idx
+      ON message_hidden_for (user_id, hidden_at DESC);
+
     CREATE INDEX IF NOT EXISTS messages_conversation_idx
       ON messages (sender_id, recipient_id, created_at);
+    CREATE INDEX IF NOT EXISTS messages_conversation_page_idx
+      ON messages (
+        LEAST(sender_id, recipient_id),
+        GREATEST(sender_id, recipient_id),
+        created_at DESC,
+        id DESC
+      );
 
     CREATE INDEX IF NOT EXISTS messages_unread_idx
       ON messages (recipient_id, sender_id)
       WHERE read_at IS NULL AND deleted_at IS NULL;
+
+    CREATE TABLE IF NOT EXISTS conversation_settings (
+      user_a UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      user_b UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      background_data TEXT NOT NULL DEFAULT '',
+      updated_by UUID REFERENCES users(id) ON DELETE SET NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (user_a, user_b),
+      CHECK (user_a < user_b)
+    );
 
     CREATE TABLE IF NOT EXISTS desktop_wall_messages (
       id UUID PRIMARY KEY,
@@ -161,6 +254,8 @@ export async function migrate() {
 
     CREATE INDEX IF NOT EXISTS desktop_wall_owner_created_idx
       ON desktop_wall_messages (owner_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS desktop_wall_owner_page_idx
+      ON desktop_wall_messages (owner_id, created_at DESC, id DESC);
 
     CREATE TABLE IF NOT EXISTS groups (
       id UUID PRIMARY KEY,
@@ -183,9 +278,38 @@ export async function migrate() {
     -- falls back to the lowest non-owner role (legacy behaviour).
     ALTER TABLE groups
       ADD COLUMN IF NOT EXISTS default_role_id UUID;
+    ALTER TABLE groups
+      ADD COLUMN IF NOT EXISTS everyone_permissions JSONB NOT NULL DEFAULT '[]'::jsonb;
+    ALTER TABLE groups
+      ADD COLUMN IF NOT EXISTS everyone_permissions_seeded BOOLEAN NOT NULL DEFAULT FALSE;
+
+    UPDATE groups
+      SET everyone_permissions = (
+        SELECT jsonb_agg(DISTINCT permission)
+        FROM jsonb_array_elements_text(
+          everyone_permissions || '["ViewChannel","SendMessages","AttachFiles","AddReactions","UseExternalEmojis","ReadMessageHistory","SendVoiceMessages","SendVideoCircles","CreatePolls"]'::jsonb
+        ) AS defaults(permission)
+      ),
+      everyone_permissions_seeded = TRUE
+      WHERE everyone_permissions_seeded = FALSE;
+
+    ALTER TABLE groups
+      ALTER COLUMN everyone_permissions_seeded SET DEFAULT TRUE;
 
     CREATE INDEX IF NOT EXISTS groups_owner_idx
       ON groups (owner_id);
+
+    CREATE TABLE IF NOT EXISTS group_invites (
+      id UUID PRIMARY KEY,
+      group_id UUID NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+      code TEXT UNIQUE NOT NULL,
+      creator_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      uses_count INT NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS group_invites_group_created_idx
+      ON group_invites (group_id, created_at DESC);
 
     CREATE TABLE IF NOT EXISTS group_members (
       group_id UUID NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
@@ -206,6 +330,7 @@ export async function migrate() {
       image_data TEXT,
       image_name TEXT,
       image_spoiler BOOLEAN NOT NULL DEFAULT FALSE,
+      media_items JSONB,
       edited_at TIMESTAMPTZ,
       deleted_at TIMESTAMPTZ,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -213,7 +338,8 @@ export async function migrate() {
 
     CREATE INDEX IF NOT EXISTS group_messages_group_idx
       ON group_messages (group_id, created_at);
-
+    CREATE INDEX IF NOT EXISTS group_messages_group_page_idx
+      ON group_messages (group_id, created_at DESC, id DESC);
     ALTER TABLE group_members
       ADD COLUMN IF NOT EXISTS role_id UUID;
 
@@ -240,10 +366,56 @@ export async function migrate() {
     CREATE INDEX IF NOT EXISTS group_channels_group_idx
       ON group_channels (group_id);
 
+    ALTER TABLE group_invites
+      ADD COLUMN IF NOT EXISTS channel_id UUID REFERENCES group_channels(id) ON DELETE CASCADE;
+    CREATE INDEX IF NOT EXISTS group_invites_group_channel_created_idx
+      ON group_invites (group_id, channel_id, created_at DESC);
+
     ALTER TABLE group_messages
       ADD COLUMN IF NOT EXISTS channel_id UUID REFERENCES group_channels(id) ON DELETE SET NULL;
+    CREATE INDEX IF NOT EXISTS group_messages_channel_page_idx
+      ON group_messages (group_id, channel_id, created_at DESC, id DESC);
     ALTER TABLE group_messages
       ADD COLUMN IF NOT EXISTS pinned_at TIMESTAMPTZ;
+    ALTER TABLE group_messages
+      ADD COLUMN IF NOT EXISTS sender_group_id UUID;
+    ALTER TABLE group_messages
+      ADD COLUMN IF NOT EXISTS sender_group_name TEXT;
+    ALTER TABLE group_messages
+      ADD COLUMN IF NOT EXISTS sender_group_avatar_data TEXT;
+    -- Group reply: references the message this one replies to.
+    ALTER TABLE group_messages
+      ADD COLUMN IF NOT EXISTS reply_to UUID;
+    ALTER TABLE group_messages
+      ADD COLUMN IF NOT EXISTS media_items JSONB;
+    ALTER TABLE group_messages
+      ADD COLUMN IF NOT EXISTS feed_source_id UUID REFERENCES group_messages(id) ON DELETE SET NULL;
+    ALTER TABLE group_messages
+      ADD COLUMN IF NOT EXISTS feed_mirror BOOLEAN NOT NULL DEFAULT FALSE;
+
+    CREATE TABLE IF NOT EXISTS group_message_views (
+      message_id UUID NOT NULL REFERENCES group_messages(id) ON DELETE CASCADE,
+      user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (message_id, user_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS group_message_views_message_idx
+      ON group_message_views (message_id);
+
+    -- Emoji reactions on group messages (Discord-style). One row per
+    -- (message, user, emoji). The emoji is either a unicode emoji or a custom
+    -- emoji token (e.g. ":name~url:") so both render inline in the chat.
+    CREATE TABLE IF NOT EXISTS group_message_reactions (
+      message_id UUID NOT NULL REFERENCES group_messages(id) ON DELETE CASCADE,
+      user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      emoji TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (message_id, user_id, emoji)
+    );
+
+    CREATE INDEX IF NOT EXISTS group_message_reactions_message_idx
+      ON group_message_reactions (message_id);
 
     ALTER TABLE group_roles
       ADD COLUMN IF NOT EXISTS permissions JSONB NOT NULL DEFAULT '[]'::jsonb;
@@ -259,6 +431,18 @@ export async function migrate() {
       ADD COLUMN IF NOT EXISTS type TEXT NOT NULL DEFAULT 'text';
     ALTER TABLE group_channels
       ADD COLUMN IF NOT EXISTS user_limit INT;
+    ALTER TABLE group_channels
+      ADD COLUMN IF NOT EXISTS topic TEXT NOT NULL DEFAULT '';
+    ALTER TABLE group_channels
+      ADD COLUMN IF NOT EXISTS slowmode_seconds INT NOT NULL DEFAULT 0;
+    ALTER TABLE group_channels
+      ADD COLUMN IF NOT EXISTS nsfw BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE group_channels
+      ADD COLUMN IF NOT EXISTS bitrate INT NOT NULL DEFAULT 64000;
+    ALTER TABLE group_channels
+      ADD COLUMN IF NOT EXISTS feed_chat_channel_id UUID REFERENCES group_channels(id) ON DELETE SET NULL;
+    ALTER TABLE group_channels
+      ADD COLUMN IF NOT EXISTS feed_parent_channel_id UUID REFERENCES group_channels(id) ON DELETE SET NULL;
 
     CREATE TABLE IF NOT EXISTS group_folders (
       id UUID PRIMARY KEY,
@@ -324,6 +508,29 @@ export async function migrate() {
       PRIMARY KEY (channel_id, role_id)
     );
 
+    CREATE TABLE IF NOT EXISTS group_channel_permission_overrides (
+      channel_id UUID NOT NULL REFERENCES group_channels(id) ON DELETE CASCADE,
+      role_id UUID REFERENCES group_roles(id) ON DELETE CASCADE,
+      target_id TEXT NOT NULL,
+      permission TEXT NOT NULL,
+      value TEXT NOT NULL CHECK (value IN ('allow', 'deny')),
+      PRIMARY KEY (channel_id, target_id, permission)
+    );
+
+    ALTER TABLE group_channel_permission_overrides
+      ADD COLUMN IF NOT EXISTS target_id TEXT;
+    UPDATE group_channel_permission_overrides
+      SET target_id = COALESCE(target_id, role_id::text)
+      WHERE target_id IS NULL;
+    ALTER TABLE group_channel_permission_overrides
+      DROP CONSTRAINT IF EXISTS group_channel_permission_overrides_pkey;
+    ALTER TABLE group_channel_permission_overrides
+      ALTER COLUMN role_id DROP NOT NULL;
+    ALTER TABLE group_channel_permission_overrides
+      ALTER COLUMN target_id SET NOT NULL;
+    ALTER TABLE group_channel_permission_overrides
+      ADD PRIMARY KEY (channel_id, target_id, permission);
+
     -- Same role-gated visibility for folders (used by hidden channel folders).
     ALTER TABLE group_folders
       ADD COLUMN IF NOT EXISTS required_role_id UUID;
@@ -370,6 +577,8 @@ export async function migrate() {
     CREATE TABLE IF NOT EXISTS ai_settings (
       user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
       assistant_name TEXT NOT NULL DEFAULT 'NotAI',
+      assistant_avatar_data TEXT NOT NULL DEFAULT '',
+      assistant_avatar_history JSONB NOT NULL DEFAULT '[]'::jsonb,
       gender TEXT NOT NULL DEFAULT 'neutral',
       persona TEXT NOT NULL DEFAULT 'friendly',
       tone TEXT NOT NULL DEFAULT 'balanced',
@@ -382,6 +591,12 @@ export async function migrate() {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
+    ALTER TABLE ai_settings
+      ADD COLUMN IF NOT EXISTS assistant_avatar_data TEXT NOT NULL DEFAULT '';
+
+    ALTER TABLE ai_settings
+      ADD COLUMN IF NOT EXISTS assistant_avatar_history JSONB NOT NULL DEFAULT '[]'::jsonb;
+
     -- AI quota: tracks the per-day request usage so regular users stay within
     -- the daily cost budget. Resets are derived from period_start (UTC day).
     CREATE TABLE IF NOT EXISTS ai_quota (
@@ -390,5 +605,22 @@ export async function migrate() {
       period_start TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+
+    CREATE TABLE IF NOT EXISTS user_connections (
+      user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      provider TEXT NOT NULL,
+      provider_user_id TEXT NOT NULL DEFAULT '',
+      display_name TEXT NOT NULL DEFAULT '',
+      access_token TEXT,
+      refresh_token TEXT,
+      token_expires_at TIMESTAMPTZ,
+      metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (user_id, provider)
+    );
+
+    CREATE INDEX IF NOT EXISTS user_connections_provider_idx
+      ON user_connections (provider, provider_user_id);
   `);
 }

@@ -1,10 +1,15 @@
 import type { Server } from 'socket.io';
 import { verifyAccessToken } from '../modules/auth/token.js';
 import { findUserById } from '../db/users.js';
-import { createMessage, toPublicMessage } from '../db/messenger.js';
+import { createMessage, toPublicMessage, blockExistsBetween } from '../db/messenger.js';
+import { isGroupMember, listGroupMemberIds } from '../db/groups.js';
 import { registerVoiceHandlers } from './voice-rooms.js';
+import { registerWatchHandlers } from './watch-rooms.js';
+
+type PresenceStatus = 'online' | 'idle' | 'dnd' | 'invisible';
 
 const activeUsers = new Map<string, number>();
+const presenceStatuses = new Map<string, PresenceStatus>();
 const desktopWatchers = new Map<string, Set<string>>();
 const desktopScreens = new Map<string, { width: number; height: number }>();
 const pinnedPositions = new Map<string, { x: number; y: number; width: number; height: number }>();
@@ -14,6 +19,16 @@ const pinnedPositions = new Map<string, { x: number; y: number; width: number; h
 // current layout without waiting for the next move event.
 type PinnedCardState = { id: string; x: number; y: number; width: number; height: number };
 const pinnedCards = new Map<string, PinnedCardState[]>();
+
+type EmojiBurstState = {
+  x: number;
+  y: number;
+  messageId?: string;
+  emojiIndex?: number;
+  payload:
+    | { type: 'image'; src: string; label: string }
+    | { type: 'text'; value: string };
+};
 
 function sanitizePinnedCards(value: unknown): PinnedCardState[] | null {
   if (!Array.isArray(value)) return null;
@@ -33,6 +48,52 @@ function sanitizePinnedCards(value: unknown): PinnedCardState[] | null {
     });
   }
   return cards;
+}
+
+function sanitizeEmojiBurst(value: unknown): EmojiBurstState | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const item = value as Record<string, unknown>;
+  if (typeof item.x !== 'number' || typeof item.y !== 'number') return null;
+  if (!Number.isFinite(item.x) || !Number.isFinite(item.y)) return null;
+  if (item.x < -2000 || item.x > 12000 || item.y < -2000 || item.y > 12000) return null;
+
+  const rawPayload = item.payload;
+  if (typeof rawPayload !== 'object' || rawPayload === null) return null;
+  const payload = rawPayload as Record<string, unknown>;
+
+  if (payload.type === 'image') {
+    if (typeof payload.src !== 'string' || typeof payload.label !== 'string') return null;
+    if (payload.src.length < 1 || payload.src.length > 8192 || payload.label.length > 120) return null;
+    if (!/^https?:\/\//i.test(payload.src) && !payload.src.startsWith('data:image/')) return null;
+    const burst: EmojiBurstState = {
+      x: Math.round(item.x),
+      y: Math.round(item.y),
+      payload: {
+        type: 'image',
+        src: payload.src,
+        label: payload.label
+      }
+    };
+    if (typeof item.messageId === 'string' && item.messageId.length <= 80) burst.messageId = item.messageId;
+    if (typeof item.emojiIndex === 'number' && Number.isInteger(item.emojiIndex) && item.emojiIndex >= 0 && item.emojiIndex <= 200) burst.emojiIndex = item.emojiIndex;
+    return burst;
+  }
+
+  if (payload.type === 'text') {
+    if (typeof payload.value !== 'string') return null;
+    const value = payload.value.slice(0, 24);
+    if (!value.trim()) return null;
+    const burst: EmojiBurstState = {
+      x: Math.round(item.x),
+      y: Math.round(item.y),
+      payload: { type: 'text', value }
+    };
+    if (typeof item.messageId === 'string' && item.messageId.length <= 80) burst.messageId = item.messageId;
+    if (typeof item.emojiIndex === 'number' && Number.isInteger(item.emojiIndex) && item.emojiIndex >= 0 && item.emojiIndex <= 200) burst.emojiIndex = item.emojiIndex;
+    return burst;
+  }
+
+  return null;
 }
 
 type CallState = {
@@ -65,21 +126,50 @@ function callDurationSeconds(call: CallState) {
   return Math.max(0, Math.round((Date.now() - call.startedAt) / 1000));
 }
 
+function isVisibleOnline(userId: string) {
+  return (activeUsers.get(userId) ?? 0) > 0 && presenceStatuses.get(userId) !== 'invisible';
+}
+
+function visibleOnlineUserIds() {
+  return Array.from(activeUsers.keys()).filter(isVisibleOnline);
+}
+
+function presenceSnapshotPayload() {
+  const onlineUserIds = visibleOnlineUserIds();
+  const statuses = Object.fromEntries(
+    onlineUserIds.map((userId) => [userId, presenceStatuses.get(userId) ?? 'online'])
+  );
+  return { onlineUserIds, statuses };
+}
+
 function setUserOnline(io: Server, userId: string) {
   const count = activeUsers.get(userId) ?? 0;
   activeUsers.set(userId, count + 1);
-  if (count === 0) io.emit('presence:changed', { userId, online: true });
+  if (count === 0 && isVisibleOnline(userId)) io.emit('presence:changed', { userId, online: true, status: presenceStatuses.get(userId) ?? 'online' });
 }
 
 function setUserOffline(io: Server, userId: string) {
   const count = activeUsers.get(userId) ?? 0;
+  const wasVisible = isVisibleOnline(userId);
   if (count <= 1) {
     activeUsers.delete(userId);
-    io.emit('presence:changed', { userId, online: false });
+    presenceStatuses.delete(userId);
+    if (wasVisible) io.emit('presence:changed', { userId, online: false });
     return;
   }
 
   activeUsers.set(userId, count - 1);
+}
+
+function isPresenceStatus(value: unknown): value is PresenceStatus {
+  return value === 'online' || value === 'idle' || value === 'dnd' || value === 'invisible';
+}
+
+function setPresenceStatus(io: Server, userId: string, status: PresenceStatus) {
+  const wasVisible = isVisibleOnline(userId);
+  presenceStatuses.set(userId, status);
+  const nowVisible = isVisibleOnline(userId);
+  io.emit('presence:changed', { userId, online: nowVisible, status: nowVisible ? status : undefined });
 }
 
 function emitWatcherCount(io: Server, ownerId: string) {
@@ -119,6 +209,8 @@ export function setupRealtime(io: Server) {
     const userId = socket.data.userId as string;
     const watching = new Set<string>();
     let nickname = '';
+    const initialPresenceStatus = socket.handshake.auth?.presenceStatus;
+    if (isPresenceStatus(initialPresenceStatus)) presenceStatuses.set(userId, initialPresenceStatus);
     void findUserById(userId).then((record) => {
       if (record) nickname = record.nickname;
     });
@@ -127,14 +219,46 @@ export function setupRealtime(io: Server) {
     socket.join(userId);
     socket.join(`desktop:${userId}`);
     socket.emit('system:ready', { serverTime: new Date().toISOString() });
-    socket.emit('presence:snapshot', { onlineUserIds: Array.from(activeUsers.keys()) });
 
     // Multi-party group voice channels (WebRTC mesh + ephemeral chat).
     registerVoiceHandlers(io, socket, userId);
 
+    // Watch Together — synchronized media rooms with public lobby + chat.
+    registerWatchHandlers(io, socket, userId);
+
     socket.on('messenger:typing', (payload: { recipientId?: unknown; typing?: unknown }) => {
       if (typeof payload.recipientId !== 'string' || typeof payload.typing !== 'boolean') return;
       io.to(payload.recipientId).emit('messenger:typing', { userId, typing: payload.typing });
+    });
+
+    socket.on('presence:setStatus', (payload: { status?: unknown }) => {
+      if (!isPresenceStatus(payload.status)) return;
+      setPresenceStatus(io, userId, payload.status);
+    });
+
+    socket.on('presence:getSnapshot', () => {
+      socket.emit('presence:snapshot', presenceSnapshotPayload());
+    });
+
+    socket.on('emoji:burst', (payload: unknown) => {
+      const burst = sanitizeEmojiBurst(payload);
+      if (!burst) return;
+      socket.broadcast.emit('emoji:burst', burst);
+    });
+
+    socket.on('group:typing', async (payload: { groupId?: unknown; channelId?: unknown; typing?: unknown }) => {
+      if (typeof payload.groupId !== 'string' || typeof payload.typing !== 'boolean') return;
+      const groupId = payload.groupId;
+      const channelId = typeof payload.channelId === 'string' ? payload.channelId : null;
+      try {
+        if (!(await isGroupMember(groupId, userId))) return;
+        const memberIds = await listGroupMemberIds(groupId);
+        for (const id of memberIds) {
+          if (id !== userId) io.to(id).emit('group:typing', { groupId, channelId, userId, typing: payload.typing });
+        }
+      } catch {
+        // Typing indicators are ephemeral; ignore DB/socket fan-out failures.
+      }
     });
 
     socket.on('desktop:watch', (payload: { ownerId?: unknown }) => {
@@ -227,7 +351,7 @@ export function setupRealtime(io: Server) {
         .catch(() => undefined);
     }
 
-    socket.on('call:invite', (payload: { calleeId?: unknown }) => {
+    socket.on('call:invite', async (payload: { calleeId?: unknown }) => {
       if (typeof payload?.calleeId !== 'string' || payload.calleeId === userId) return;
       const calleeId = payload.calleeId;
       // Reject if either side is already busy.
@@ -235,7 +359,12 @@ export function setupRealtime(io: Server) {
         socket.emit('call:busy', { calleeId });
         return;
       }
-      const online = (activeUsers.get(calleeId) ?? 0) > 0;
+      // A block in either direction forbids calling.
+      if (await blockExistsBetween(userId, calleeId)) {
+        socket.emit('call:unavailable', { calleeId });
+        return;
+      }
+      const online = isVisibleOnline(calleeId);
       if (!online) {
         socket.emit('call:unavailable', { calleeId });
         return;

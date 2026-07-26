@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import type { Server } from 'socket.io';
 import { z } from 'zod';
-import { findUserById, searchUsersByNickname, toPublicUser, updateUserSettings } from '../../db/users.js';
+import { findUserById, searchUsersByNickname, toPublicUser, toPublicUserLite, updateUserSettings } from '../../db/users.js';
 import { asyncHandler } from '../../http/async-handler.js';
 import { HttpError } from '../../http/errors.js';
 import { type AuthenticatedRequest, requireAuth } from '../../middleware/require-auth.js';
@@ -89,6 +89,7 @@ const updateUserSchema = z
     hideDesktopIcons: z.boolean().optional(),
     desktopSort: z.enum(['custom', 'name', 'type', 'size', 'date']).optional(),
     status: z.string().trim().max(200).optional(),
+    allowGroupIdentityMessages: z.boolean().optional(),
     pinnedImageData: z.string().max(80_000_000).optional(),
     pinnedCards: z
       .array(
@@ -164,7 +165,7 @@ export function createUserRouter(io: Server) {
     asyncHandler<AuthenticatedRequest>(async (req, res) => {
       const nickname = z.string().trim().max(24).parse(req.query.nickname ?? '');
       const users = await searchUsersByNickname(nickname, req.auth.userId);
-      res.json({ users: users.map(toPublicUser) });
+      res.json({ users: users.map(toPublicUserLite) });
     })
   );
 
