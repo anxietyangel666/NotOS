@@ -22580,7 +22580,8 @@ div.settings-music-row {
   align-items: flex-start;
   grid-template-columns: minmax(0, 1fr);
   width: 100%;
-  max-width: min(620px, 100%);
+  max-width: min(580px, 100%);
+  margin-inline: auto;
   padding: 8px 16px;
 }
 
@@ -22625,6 +22626,13 @@ div.settings-music-row {
   font-weight: 700;
 }
 
+.feed-post-head time {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 .message-bubble.feed-post .message-text,
 .message-bubble.feed-post .message-image,
 .message-bubble.feed-post .message-media-album,
@@ -22665,30 +22673,38 @@ div.settings-music-row {
 
 .feed-post-footer {
   display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
+  align-items: center;
+  justify-content: flex-end;
   gap: 12px;
-  padding: 10px 12px 12px;
-}
-
-.feed-comment-button {
-  border: 0;
-  background: transparent;
-  color: var(--accent, #2AABEE);
-  font-weight: 650;
-  cursor: pointer;
-  padding: 0;
+  padding: 8px 12px 10px;
 }
 
 .feed-post-stats {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 2px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   color: var(--muted);
   font-size: 12px;
   white-space: nowrap;
 }
+
+.feed-comment-bar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px;
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-radius: 0 0 14px 14px;
+  background: transparent;
+  color: var(--blue);
+  font-size: 13.5px;
+  font-weight: 650;
+  cursor: pointer;
+}
+.feed-comment-bar:hover { background: var(--bg-soft); }
 .watch-msg-link { color: var(--accent, #2AABEE); word-break: break-all; text-decoration: none; }
 .watch-msg-link:hover { text-decoration: underline; }
 

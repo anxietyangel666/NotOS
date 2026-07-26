@@ -3556,6 +3556,7 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
                     <div className="feed-post-head">
                       <img src={group.avatarData} alt="" />
                       <strong>{group.name}</strong>
+                      <time>{formatShortDate(message.createdAt)}, {formatTime(message.createdAt)}</time>
                     </div>
                   ) : null}
                   {!message.deletedAt && message.replyTo ? (
@@ -3775,19 +3776,22 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
                     </button>
                   ) : null}
                   {!message.deletedAt && isFeedPost ? (
-                    <div className="feed-post-footer">
+                    <>
+                      <div className="feed-post-footer">
+                        <span className="feed-post-stats" title={`${message.viewCount ?? 0}`}>
+                          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg>
+                          {message.viewCount ?? 0}
+                        </span>
+                      </div>
                       {activeChannelObj?.type === 'feed' ? (
-                      <button type="button" className="feed-comment-button" onClick={() => openThreadView(message)}>
-                        {(message.threadCount ?? 0) > 0
-                          ? `${language === 'ru' ? 'Комментарии' : language === 'uk' ? 'Коментарі' : 'Comments'} (${message.threadCount})`
-                          : (language === 'ru' ? 'Оставить комментарий' : language === 'uk' ? 'Залишити коментар' : 'Leave a comment')}
-                      </button>
-                      ) : <span />}
-                      <span className="feed-post-stats">
-                        <span>{message.viewCount ?? 0} {language === 'ru' ? 'просмотров' : 'views'}</span>
-                        <span>{formatShortDate(message.createdAt)} {formatTime(message.createdAt)}</span>
-                      </span>
-                    </div>
+                        <button type="button" className="feed-comment-bar" onClick={() => openThreadView(message)}>
+                          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                          {(message.threadCount ?? 0) > 0
+                            ? `${t(language, 'feedComments')} (${message.threadCount})`
+                            : t(language, 'feedLeaveComment')}
+                        </button>
+                      ) : null}
+                    </>
                   ) : null}
                 </div>
                 {!message.deletedAt ? (
@@ -3967,9 +3971,11 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
             ) : null}
             <EmojiInlineInput ref={inputRef} className="emoji-inline-input messenger-input" value={draft}
               placeholder={!canSendInActiveChannel
-                ? (language === 'ru' ? 'Нет прав писать в этот канал' : 'You cannot send messages here')
+                ? (activeChannelObj?.type === 'feed'
+                  ? t(language, 'feedAdminsOnly')
+                  : (language === 'ru' ? 'Нет прав писать в этот канал' : 'You cannot send messages here'))
                 : activeChannelObj?.type === 'feed'
-                  ? (language === 'ru' ? 'Опубликовать пост' : 'Publish a post')
+                  ? t(language, 'feedWritePost')
                   : `# ${activeChannelName}`}
               disabled={!canSendInActiveChannel || activeNsfwBlocked || activeSlowmodeRemainingMs > 0}
               mentionUsers={members.map((member) => member.user)}

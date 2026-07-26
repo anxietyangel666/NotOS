@@ -962,6 +962,10 @@ const translations = {
     coinTails: 'Tails',
     gamePickChose: 'The pick is',
     gamePickOf: 'out of {count} members',
+    feedComments: 'Comments',
+    feedLeaveComment: 'Leave a comment',
+    feedAdminsOnly: 'Only admins can post here',
+    feedWritePost: 'Write a post...',
   },
   ru: {
     appName: 'NotOS',
@@ -1752,6 +1756,10 @@ const translations = {
     coinTails: 'Решка',
     gamePickChose: 'Выбор пал на',
     gamePickOf: 'из {count} участников',
+    feedComments: 'Комментарии',
+    feedLeaveComment: 'Оставить комментарий',
+    feedAdminsOnly: 'Публиковать могут только администраторы',
+    feedWritePost: 'Написать пост...',
   },
   uk: {
     appName: 'NotOS',
@@ -2542,6 +2550,10 @@ const translations = {
     coinTails: 'Решка',
     gamePickChose: 'Вибір впав на',
     gamePickOf: 'з {count} учасників',
+    feedComments: 'Коментарі',
+    feedLeaveComment: 'Залишити коментар',
+    feedAdminsOnly: 'Публікувати можуть лише адміністратори',
+    feedWritePost: 'Написати пост...',
   }
 } as const;
 
