@@ -211,6 +211,15 @@ export async function migrate() {
     -- until a sweeper clears scheduled_at and delivers it.
     ALTER TABLE messages
       ADD COLUMN IF NOT EXISTS scheduled_at TIMESTAMPTZ;
+
+    -- "Send when they are online": parked with a sentinel scheduled_at far in
+    -- the future so every scheduled_at IS NULL filter already hides it and the
+    -- time-based sweeper never releases it. Presence release clears both.
+    ALTER TABLE messages
+      ADD COLUMN IF NOT EXISTS awaiting_online BOOLEAN NOT NULL DEFAULT FALSE;
+    CREATE INDEX IF NOT EXISTS messages_awaiting_online_idx
+      ON messages (recipient_id)
+      WHERE awaiting_online = TRUE AND deleted_at IS NULL;
     CREATE INDEX IF NOT EXISTS messages_scheduled_idx
       ON messages (scheduled_at)
       WHERE scheduled_at IS NOT NULL AND deleted_at IS NULL;

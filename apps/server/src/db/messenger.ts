@@ -22,6 +22,7 @@ export type MessageRecord = {
   link_preview: { url: string; title: string; description: string; imageUrl: string; siteName: string } | null;
   expires_at: Date | null;
   scheduled_at: Date | null;
+  awaiting_online: boolean;
   view_once: boolean;
   view_once_seen_at: Date | null;
   created_at: Date;
@@ -72,6 +73,7 @@ export type PublicMessage = {
   linkPreview: { url: string; title: string; description: string; imageUrl: string; siteName: string } | null;
   expiresAt: string | null;
   scheduledAt: string | null;
+  awaitingOnline: boolean;
   viewOnce: boolean;
   viewOnceSeenAt: string | null;
 };
@@ -152,6 +154,7 @@ export function toPublicMessage(message: MessageRecord, reactions: MessageReacti
     linkPreview: message.deleted_at ? null : message.link_preview ?? null,
     expiresAt: message.expires_at?.toISOString() ?? null,
     scheduledAt: message.scheduled_at?.toISOString() ?? null,
+    awaitingOnline: Boolean(message.awaiting_online),
     viewOnce: Boolean(message.view_once),
     viewOnceSeenAt: message.view_once_seen_at?.toISOString() ?? null
   };
@@ -828,17 +831,21 @@ export async function createMessage(
   senderGroup?: { id: string; name: string; avatarData: string } | null,
   mediaItems?: Array<{ dataUrl: string; name?: string | null; spoiler?: boolean }>,
   expiresInSeconds?: number | null,
-  options?: { scheduledAt?: Date | null; viewOnce?: boolean }
+  options?: { scheduledAt?: Date | null; viewOnce?: boolean; awaitingOnline?: boolean }
 ) {
+  // Parked "send when online" messages use a sentinel far-future timestamp so
+  // every `scheduled_at IS NULL` filter hides them and the time sweeper never
+  // fires; presence release is what clears it.
+  const scheduledAt = options?.awaitingOnline ? AWAITING_ONLINE_SENTINEL : options?.scheduledAt ?? null;
   const items = (mediaItems && mediaItems.length > 0 ? mediaItems : image ? [image] : [])
     .map((item) => ({ dataUrl: item.dataUrl, name: item.name ?? null, spoiler: Boolean(item.spoiler) }));
   const first = items[0];
   const result = await pool.query<MessageRecord>(
     `
-      INSERT INTO messages (id, sender_id, recipient_id, sender_group_id, sender_group_name, sender_group_avatar_data, body, image_data, image_name, image_spoiler, media_items, reply_to, expires_at, scheduled_at, view_once)
+      INSERT INTO messages (id, sender_id, recipient_id, sender_group_id, sender_group_name, sender_group_avatar_data, body, image_data, image_name, image_spoiler, media_items, reply_to, expires_at, scheduled_at, view_once, awaiting_online)
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12,
         CASE WHEN $13::int IS NULL OR $13::int <= 0 THEN NULL ELSE NOW() + make_interval(secs => $13::int) END,
-        $14, $15)
+        $14, $15, $16)
       RETURNING *
     `,
     [
@@ -855,12 +862,33 @@ export async function createMessage(
       items.length > 0 ? JSON.stringify(items) : null,
       replyTo ?? null,
       expiresInSeconds ?? null,
-      options?.scheduledAt ?? null,
-      Boolean(options?.viewOnce)
+      scheduledAt,
+      Boolean(options?.viewOnce),
+      Boolean(options?.awaitingOnline)
     ]
   );
 
   return result.rows[0];
+}
+
+// Sentinel used to park "send when online" messages; far enough in the future
+// that the time-based sweeper never picks them up.
+const AWAITING_ONLINE_SENTINEL = new Date('9999-12-31T00:00:00.000Z');
+
+// Releases everything queued for a recipient who just came online.
+export async function releaseAwaitingOnlineMessages(recipientId: string): Promise<MessageRecord[]> {
+  const result = await pool.query<MessageRecord>(
+    `
+      UPDATE messages
+      SET awaiting_online = FALSE, scheduled_at = NULL, created_at = NOW()
+      WHERE recipient_id = $1
+        AND awaiting_online = TRUE
+        AND deleted_at IS NULL
+      RETURNING *
+    `,
+    [recipientId]
+  );
+  return result.rows;
 }
 
 // ── Global search across every conversation of a user ──────────────────────

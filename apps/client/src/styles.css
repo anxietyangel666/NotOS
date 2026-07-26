@@ -8614,12 +8614,12 @@ div.settings-music-row {
 }
 
 .messenger-conversations-panel {
-  display: grid;
-  /* nav, section title, AI chat, Saved Messages, search box, then the list
-     takes the remaining space. Keep the row count in sync with the children
-     of the panel — an extra child would otherwise land in the 1fr row and
-     stretch instead of the conversation list. */
-  grid-template-rows: auto auto auto auto auto minmax(0, 1fr);
+  /* Flex column rather than a fixed grid template: the header rows (nav,
+     title, AI chat, Saved Messages, search, filters) size to content and the
+     conversation list absorbs whatever is left. Adding another header element
+     no longer shifts something into a stretching row. */
+  display: flex;
+  flex-direction: column;
   min-height: 0;
   height: 100%;
   overflow: hidden;
@@ -8695,6 +8695,8 @@ div.settings-music-row {
 .messenger-conversation-list {
   display: grid;
   align-content: start;
+  /* Takes the remaining height of the flex-column panel above. */
+  flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
@@ -23168,6 +23170,7 @@ div.settings-music-row {
 .dm-list-filters,
 .dm-global-search-kinds {
   display: flex;
+  flex: 0 0 auto;
   gap: 6px;
   padding: 8px 12px;
   border-bottom: 1px solid var(--line);

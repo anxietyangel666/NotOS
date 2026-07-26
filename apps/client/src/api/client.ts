@@ -399,7 +399,7 @@ export const api = {
       slowRequestMs: 1500
     });
   },
-  sendMessage(token: string, recipientId: string, body: string, image?: { dataUrl: string; name?: string; spoiler?: boolean }, replyTo?: string, senderGroupId?: string | null, mediaItems?: Array<{ dataUrl: string; name?: string | null; spoiler?: boolean }>, options?: { scheduledAt?: string; viewOnce?: boolean }) {
+  sendMessage(token: string, recipientId: string, body: string, image?: { dataUrl: string; name?: string; spoiler?: boolean }, replyTo?: string, senderGroupId?: string | null, mediaItems?: Array<{ dataUrl: string; name?: string | null; spoiler?: boolean }>, options?: { scheduledAt?: string; viewOnce?: boolean; sendWhenOnline?: boolean }) {
     const mediaUpload = Boolean(image?.dataUrl.startsWith('data:audio/') || image?.dataUrl.startsWith('data:video/'));
     return request<{ message: MessengerMessage }>('/api/messenger/messages', {
       method: 'POST',
@@ -408,7 +408,8 @@ export const api = {
         recipientId, body, image, mediaItems, replyTo,
         senderGroupId: senderGroupId || undefined,
         scheduledAt: options?.scheduledAt,
-        viewOnce: options?.viewOnce || undefined
+        viewOnce: options?.viewOnce || undefined,
+        sendWhenOnline: options?.sendWhenOnline || undefined
       },
       label: mediaUpload ? 'messenger.sendMedia' : undefined,
       slowRequestMs: mediaUpload ? 3000 : undefined

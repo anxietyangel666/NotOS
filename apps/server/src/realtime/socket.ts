@@ -1,7 +1,7 @@
 import type { Server } from 'socket.io';
 import { verifyAccessToken } from '../modules/auth/token.js';
 import { findUserById } from '../db/users.js';
-import { createMessage, toPublicMessage, blockExistsBetween } from '../db/messenger.js';
+import { createMessage, toPublicMessage, toPublicMessageEnriched, blockExistsBetween, releaseAwaitingOnlineMessages } from '../db/messenger.js';
 import { isGroupMember, listGroupMemberIds } from '../db/groups.js';
 import { listVoiceActiveUserIds, registerVoiceHandlers } from './voice-rooms.js';
 import { listWatchActiveUserIds, registerWatchHandlers } from './watch-rooms.js';
@@ -238,6 +238,19 @@ export function setupRealtime(io: Server) {
     });
 
     setUserOnline(io, userId);
+
+    // Deliver anything the peers queued with "send when they are online".
+    void releaseAwaitingOnlineMessages(userId)
+      .then(async (records) => {
+        for (const record of records) {
+          const message = await toPublicMessageEnriched(record);
+          io.to(record.recipient_id).emit('messenger:message', { message });
+          io.to(record.sender_id).emit('messenger:message', { message });
+          io.to(record.sender_id).emit('messenger:scheduledSent', { message });
+        }
+      })
+      .catch(() => undefined);
+
     socket.join(userId);
     socket.join(`desktop:${userId}`);
     socket.emit('system:ready', { serverTime: new Date().toISOString() });

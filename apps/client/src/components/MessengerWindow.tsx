@@ -2636,7 +2636,7 @@ export function MessengerWindow({
     return uploaded;
   }
 
-  async function sendMessage(attachmentOverride?: PendingChatImage, sendOptions?: { scheduledAt?: string }) {
+  async function sendMessage(attachmentOverride?: PendingChatImage, sendOptions?: { scheduledAt?: string; sendWhenOnline?: boolean }) {
     if (!selectedUser) return;
     const recordingOverride = Boolean(attachmentOverride && (isVoiceAttachment(attachmentOverride.dataUrl, attachmentOverride.name) || isVideoCircleAttachment(attachmentOverride.dataUrl, attachmentOverride.name)));
     const batchImages = attachmentOverride ? [attachmentOverride] : pendingImages;
@@ -2716,12 +2716,16 @@ export function MessengerWindow({
         token, selectedUser.id, body,
         uploadedImage && !mediaItems ? { dataUrl: uploadedImage.dataUrl, name: uploadedImage.name, spoiler: uploadedImage.spoiler } : undefined,
         replyTo, activeSenderGroup?.id ?? null, mediaItems,
-        { scheduledAt: sendOptions?.scheduledAt, viewOnce: viewOnceArmed && Boolean(uploadedImage) }
+        {
+          scheduledAt: sendOptions?.scheduledAt,
+          viewOnce: viewOnceArmed && Boolean(uploadedImage),
+          sendWhenOnline: sendOptions?.sendWhenOnline
+        }
       );
       setViewOnceArmed(false);
-      // A scheduled message is not part of the visible thread yet: drop the
-      // optimistic bubble and let the "Scheduled" bar track it instead.
-      if (sendOptions?.scheduledAt) {
+      // A scheduled / parked message is not part of the visible thread yet:
+      // drop the optimistic bubble and let the "Scheduled" bar track it.
+      if (sendOptions?.scheduledAt || sendOptions?.sendWhenOnline) {
         setMessages((current) => current.filter((message) => message.clientKey !== clientKey));
         setScheduledMessages((current) => [...current, payload.message]
           .sort((a, b) => new Date(a.scheduledAt ?? 0).getTime() - new Date(b.scheduledAt ?? 0).getTime()));
@@ -4685,6 +4689,39 @@ export function MessengerWindow({
                       <MenuTranslateIcon />
                     </button>
                   ) : null}
+                  {selectedUser && !editingMessage && (messageDraft.trim() || pendingImages.length > 0) ? (
+                    <>
+                      <div className="context-menu-remind">
+                        <span className="context-menu-remind-label">{language === 'ru' ? 'Отправить позже' : 'Send later'}</span>
+                        <div className="context-menu-remind-options">
+                          {([[3600, '1h'], [10800, '3h'], [86400, '24h']] as const).map(([seconds, label]) => (
+                            <button
+                              key={seconds}
+                              type="button"
+                              onClick={() => {
+                                setComposerMenu(null);
+                                void sendMessage(undefined, { scheduledAt: new Date(Date.now() + seconds * 1000).toISOString() });
+                              }}
+                            >
+                              {label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        className="context-menu-action"
+                        onClick={() => {
+                          setComposerMenu(null);
+                          void sendMessage(undefined, { sendWhenOnline: true });
+                        }}
+                      >
+                        <span className="context-menu-action-text">
+                          {language === 'ru' ? 'Отправить, когда будет в сети' : language === 'uk' ? 'Надіслати, коли буде онлайн' : 'Send when they are online'}
+                        </span>
+                      </button>
+                    </>
+                  ) : null}
                 </div>,
                 document.body
               ) : null}
@@ -4770,7 +4807,13 @@ export function MessengerWindow({
                     </span>
                     {scheduledMessages.filter((m) => m.recipientId === selectedUser.id).map((message) => (
                       <div key={message.id} className="scheduled-message-row">
-                        <time>{message.scheduledAt ? formatMessageDate(message.scheduledAt, language) + ' ' + formatMessageTime(message.scheduledAt, language) : ''}</time>
+                        <time>
+                          {message.awaitingOnline
+                            ? (language === 'ru' ? 'когда будет в сети' : language === 'uk' ? 'коли буде онлайн' : 'when online')
+                            : message.scheduledAt
+                              ? `${formatMessageDate(message.scheduledAt, language)} ${formatMessageTime(message.scheduledAt, language)}`
+                              : ''}
+                        </time>
                         <span className="scheduled-message-body">{message.body || '📷'}</span>
                         <button
                           type="button"

@@ -167,6 +167,8 @@ export type MessengerMessage = {
   linkPreview?: LinkPreview | null;
   // Set while the message is waiting for its scheduled delivery time.
   scheduledAt?: string | null;
+  // Parked until the recipient comes online.
+  awaitingOnline?: boolean;
   // Attachment that self-destructs once the recipient opens it.
   viewOnce?: boolean;
   viewOnceSeenAt?: string | null;

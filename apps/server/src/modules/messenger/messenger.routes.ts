@@ -90,6 +90,8 @@ const messageSchema = z.object({
   senderGroupId: z.string().uuid().optional(),
   // Deliver later instead of now (ISO timestamp, up to 30 days ahead).
   scheduledAt: z.string().datetime().optional(),
+  // Hold the message until the recipient is online.
+  sendWhenOnline: z.boolean().optional(),
   // Attachment self-destructs once the recipient opens it.
   viewOnce: z.boolean().optional()
 }).refine((value) => value.body.length > 0 || Boolean(value.image) || Boolean(value.mediaItems?.length), {
@@ -861,14 +863,16 @@ export function createMessengerRouter(io: Server) {
         scheduledAt = parsed;
       }
 
+      const awaitingOnline = Boolean(input.sendWhenOnline) && !isSelfMessage && !scheduledAt;
+
       const created = await createMessage(
         req.auth.userId, input.recipientId, input.body, input.image, input.replyTo,
         senderGroup, input.mediaItems, messageTtlSeconds,
-        { scheduledAt, viewOnce: Boolean(input.viewOnce) }
+        { scheduledAt, viewOnce: Boolean(input.viewOnce), awaitingOnline }
       );
 
-      // A scheduled message is only echoed back to its author's own list.
-      if (scheduledAt) {
+      // A scheduled / parked message is only echoed back to its author's list.
+      if (scheduledAt || awaitingOnline) {
         const scheduled = toPublicMessage(created);
         io.to(req.auth.userId).emit('messenger:scheduledCreated', { message: scheduled });
         res.json({ message: scheduled });
