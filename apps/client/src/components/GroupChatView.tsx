@@ -3645,9 +3645,17 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
                       <img src={group.avatarData} alt="" />
                       <span className="feed-post-head-names">
                         <strong>{group.name}</strong>
-                        {channels.find((c) => c.id === message.channelId)?.signPosts ? (
-                          <span className="feed-post-author">{knownSenders.get(message.senderId)?.nickname ?? ''}</span>
-                        ) : null}
+                        {(() => {
+                          // Mirror copies live in the chat channel, so the
+                          // sign-posts flag comes from the parent feed channel.
+                          const ownChannel = channels.find((c) => c.id === message.channelId);
+                          const signSource = message.feedMirror
+                            ? channels.find((c) => c.id === ownChannel?.feedParentChannelId) ?? ownChannel
+                            : ownChannel;
+                          return signSource?.signPosts ? (
+                            <span className="feed-post-author">{knownSenders.get(message.senderId)?.nickname ?? ''}</span>
+                          ) : null;
+                        })()}
                       </span>
                       <time>{formatShortDate(message.createdAt)}, {formatTime(message.createdAt)}</time>
                     </div>

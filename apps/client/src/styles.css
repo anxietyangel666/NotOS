@@ -23881,7 +23881,20 @@ button.feed-post-stats:not(:disabled):hover { color: var(--text); }
   gap: 12px;
 }
 .feed-tools-select { max-width: 220px; }
-.feed-tools-sign { margin-top: 10px; }
+.feed-tools-sign {
+  display: flex;
+  flex-direction: row-reverse;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  cursor: pointer;
+}
+.feed-tools-sign input { flex: none; }
+.feed-tools-sign span { flex: 1; }
 .feed-tools-stats {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
