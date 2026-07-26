@@ -765,7 +765,6 @@ export function MessengerWindow({
   const [autoTranslateChats, setAutoTranslateChats] = useState<Set<string>>(loadAutoTranslate);
   // Scheduled messages awaiting delivery, plus the compose-time picker state.
   const [scheduledMessages, setScheduledMessages] = useState<MessengerMessage[]>([]);
-  const [scheduleMenuOpen, setScheduleMenuOpen] = useState(false);
   const [viewOnceArmed, setViewOnceArmed] = useState(false);
   const [openedViewOnce, setOpenedViewOnce] = useState<Record<string, ChatMediaItem[]>>({});
   // Global cross-conversation search.
@@ -4828,29 +4827,6 @@ export function MessengerWindow({
                     ))}
                   </div>
                 ) : null}
-                {scheduleMenuOpen && selectedUser ? (
-                  <div className="schedule-send-menu">
-                    <span className="schedule-send-title">{language === 'ru' ? 'Отправить позже' : 'Send later'}</span>
-                    <div className="schedule-send-options">
-                      {([
-                        [3600, language === 'ru' ? 'Через час' : 'In 1 hour'],
-                        [10800, language === 'ru' ? 'Через 3 часа' : 'In 3 hours'],
-                        [86400, language === 'ru' ? 'Завтра' : 'Tomorrow']
-                      ] as const).map(([seconds, label]) => (
-                        <button
-                          key={seconds}
-                          type="button"
-                          onClick={() => {
-                            setScheduleMenuOpen(false);
-                            void sendMessage(undefined, { scheduledAt: new Date(Date.now() + seconds * 1000).toISOString() });
-                          }}
-                        >
-                          {label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
                 {messageDraft.startsWith('/') && !messageDraft.includes(' ') ? (
                   <div className="slash-command-hints">
                     {SLASH_COMMANDS.filter((command) => command.name.startsWith(messageDraft.slice(1).toLowerCase())).map((command) => (
@@ -4879,19 +4855,6 @@ export function MessengerWindow({
                       onClick={(event) => { event.stopPropagation(); setViewOnceArmed((value) => !value); }}
                     >
                       <span aria-hidden="true">1</span>
-                    </button>
-                  ) : null}
-                  {!editingMessage ? (
-                    <button
-                      className={scheduleMenuOpen ? 'emoji-toggle inline dm-schedule-toggle active' : 'emoji-toggle inline dm-schedule-toggle'}
-                      type="button"
-                      title={language === 'ru' ? 'Отправить позже' : 'Send later'}
-                      aria-label={language === 'ru' ? 'Отправить позже' : 'Send later'}
-                      disabled={!messageDraft.trim() && pendingImages.length === 0}
-                      onMouseDown={(event) => event.stopPropagation()}
-                      onClick={(event) => { event.stopPropagation(); setScheduleMenuOpen((open) => !open); }}
-                    >
-                      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
                     </button>
                   ) : null}
                   <button

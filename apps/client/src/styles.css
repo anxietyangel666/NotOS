@@ -23253,38 +23253,6 @@ div.settings-music-row {
 }
 .scheduled-message-row button:hover { color: var(--danger); }
 
-.schedule-send-menu {
-  position: absolute;
-  bottom: calc(100% - 2px);
-  left: 12px;
-  right: 12px;
-  z-index: 25;
-  padding: 8px 10px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--panel);
-  box-shadow: var(--shadow);
-}
-.schedule-send-title {
-  display: block;
-  margin-bottom: 6px;
-  color: var(--muted);
-  font-size: 12px;
-}
-.schedule-send-options { display: flex; gap: 6px; }
-.schedule-send-options button {
-  flex: 1 1 0;
-  padding: 7px 6px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: transparent;
-  color: var(--text);
-  font-size: 13px;
-  cursor: pointer;
-}
-.schedule-send-options button:hover { background: var(--bg-soft); }
-
-.dm-schedule-toggle.active,
 .dm-view-once-toggle.active { color: var(--blue); }
 .dm-view-once-toggle span {
   display: inline-flex;
