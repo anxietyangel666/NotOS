@@ -8674,11 +8674,16 @@ div.settings-music-row {
   border-bottom: 0;
 }
 
+/* Full-bleed search strip: spans the whole panel width with square corners and
+   its own separator lines, instead of a rounded pill inset from the edges. */
 .messenger-direct-message-search {
-  margin: 0 10px 8px;
-  padding: 7px 10px;
-  border: 1px solid var(--line);
-  min-height: 34px;
+  margin: 0;
+  padding: 11px 14px;
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  min-height: 42px;
   flex: 0 0 auto;
 }
 
@@ -8717,8 +8722,11 @@ div.settings-music-row {
   min-height: 64px;
 }
 
-.messenger-conversation-ai + .messenger-direct-message-search {
-  margin-top: 8px;
+/* The search strip is full-bleed and carries its own top border, so no extra
+   margin is needed after the AI / Saved Messages entries above it. */
+.messenger-conversation-ai + .messenger-direct-message-search,
+.messenger-conversation-saved + .messenger-direct-message-search {
+  margin-top: 0;
 }
 
 .messenger-conversation .unread-badge {
