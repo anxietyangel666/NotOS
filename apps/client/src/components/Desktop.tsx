@@ -51,7 +51,7 @@ import { UpdatesWindow } from './UpdatesWindow';
 import { InboxWindow } from './InboxWindow';
 import { hasPin } from '../utils/pin-lock';
 import { LATEST_UPDATE_ID, hasUnseenUpdate, markUpdatesSeen } from '../utils/updates';
-import { DesktopNotifications, type DesktopNotification } from './DesktopNotifications';
+import { DesktopNotifications, ToastQuickReply, type DesktopNotification } from './DesktopNotifications';
 import { ErrorBoundary } from './ErrorBoundary';
 import { assetUrl } from '../utils/assets';
 
@@ -612,6 +612,7 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
   const [musicDuration, setMusicDuration] = useState(0);
   const [volumeOpen, setVolumeOpen] = useState(false);
   const [notifications, setNotifications] = useState<DesktopNotification[]>([]);
+  const notificationTimersRef = useRef<Map<string, number>>(new Map());
   // Thin top progress bar shown while importing files to the desktop or a
   // folder. `null` means idle; otherwise a 0..1 fraction.
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
@@ -1124,7 +1125,20 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
   function pushNotification(notification: Omit<DesktopNotification, 'id'>) {
     const id = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     setNotifications((current) => [...current.slice(-3), { id, ...notification }]);
-    window.setTimeout(() => setNotifications((current) => current.filter((item) => item.id !== id)), 5200);
+    const timer = window.setTimeout(() => {
+      notificationTimersRef.current.delete(id);
+      setNotifications((current) => current.filter((item) => item.id !== id));
+    }, 5200);
+    notificationTimersRef.current.set(id, timer);
+  }
+
+  // A toast the user started replying in must not auto-dismiss mid-typing.
+  function holdNotification(id: string) {
+    const timer = notificationTimersRef.current.get(id);
+    if (timer) {
+      window.clearTimeout(timer);
+      notificationTimersRef.current.delete(id);
+    }
   }
 
   // "Remind me about this message" fires from the messenger over a window
@@ -1220,7 +1234,8 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
           title: t(language, 'newMessage'),
           message: `${sender.nickname}: ${callLabel ? `\u{1F4DE} ${callLabel}` : notificationMessage(payload.message, language)}`,
           avatarData: sender.avatarData,
-          onOpen: () => openMessengerChat(payload.message.senderId)
+          onOpen: () => openMessengerChat(payload.message.senderId),
+          onReply: (text) => api.sendMessage(token, payload.message.senderId, text).then(() => undefined)
         });
       });
     }
@@ -3661,6 +3676,14 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
               <div>
                 <strong>{notification.title}</strong>
                 <p>{notification.message}</p>
+                {notification.onReply ? (
+                  <ToastQuickReply
+                    language={language}
+                    onHold={() => holdNotification(notification.id)}
+                    onSend={notification.onReply}
+                    onDone={() => setNotifications((current) => current.filter((item) => item.id !== notification.id))}
+                  />
+                ) : null}
               </div>
               <button type="button" aria-label={t(language, 'close')} onClick={(event) => {
                 event.stopPropagation();

@@ -23409,3 +23409,146 @@ div.settings-music-row {
   cursor: pointer;
 }
 .scheduled-view-cancel:hover { color: var(--danger); }
+
+/* ── Polls ── */
+.poll-embed {
+  margin-top: 4px;
+  padding: 12px 14px;
+  max-width: 380px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--lighter);
+}
+.poll-embed-error, .poll-embed-loading { color: var(--muted); font-size: 13px; }
+.poll-embed-question {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 10px;
+  font-size: 14px;
+}
+.poll-embed-options { display: flex; flex-direction: column; gap: 6px; }
+.poll-embed-option {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  overflow: hidden;
+  text-align: left;
+}
+.poll-embed-option:hover { border-color: var(--blue); }
+.poll-embed-option.mine { border-color: var(--blue); }
+.poll-embed-bar {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: color-mix(in srgb, var(--blue) 16%, transparent);
+  transition: width 0.25s ease;
+  pointer-events: none;
+}
+.poll-embed-option-text { position: relative; flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.poll-embed-option-stats { position: relative; flex: none; color: var(--muted); font-size: 12px; }
+.poll-embed-option.mine .poll-embed-option-stats { color: var(--blue); font-weight: 700; }
+.poll-embed-footer { margin-top: 8px; color: var(--muted); font-size: 11.5px; }
+
+.poll-create-modal .messenger-input { width: 100%; }
+.poll-create-options { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+.poll-create-option-row { display: flex; align-items: center; gap: 6px; }
+.poll-create-remove {
+  flex: none; border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 13px;
+}
+.poll-create-remove:hover { color: var(--danger); }
+.poll-create-add {
+  margin-top: 8px;
+  padding: 6px 0;
+  border: 1px dashed var(--line-strong);
+  border-radius: 8px;
+  width: 100%;
+  background: none;
+  color: var(--blue);
+  font-size: 13px;
+  cursor: pointer;
+}
+.poll-create-add:hover { background: var(--bg-soft); }
+.poll-create-multi {
+  display: flex; align-items: center; gap: 8px; margin-top: 12px; font-size: 13px; cursor: pointer;
+}
+
+/* ── Draft label in the conversation list ── */
+.conversation-draft-label { color: var(--danger); font-weight: 600; }
+
+/* ── Quick reply inside desktop toasts ── */
+.toast-reply-toggle {
+  margin-top: 6px;
+  padding: 3px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--blue);
+  font-size: 12px;
+  cursor: pointer;
+}
+.toast-reply-toggle:hover { background: var(--bg-soft); }
+.toast-reply { display: flex; gap: 6px; margin-top: 6px; }
+.toast-reply input {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 12.5px;
+  outline: none;
+}
+.toast-reply input:focus { border-color: var(--blue); }
+.toast-reply button {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--blue);
+  color: #fff;
+  cursor: pointer;
+}
+.toast-reply button:disabled { opacity: 0.5; cursor: default; }
+
+/* ── Voice message playback speed ── */
+.voice-message-speed {
+  flex: none;
+  align-self: center;
+  min-width: 34px;
+  padding: 2px 6px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--lighter-plus);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.voice-message-speed:hover { background: var(--bg-soft); }
+
+/* "Open chat" action in the bookmarks strip */
+.scheduled-view-open {
+  margin-left: auto;
+  padding: 1px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--blue);
+  font-size: 11px;
+  cursor: pointer;
+}
+.scheduled-view-open:hover { background: var(--bg-soft); }
+.scheduled-view-open + .scheduled-view-cancel { margin-left: 6px; }

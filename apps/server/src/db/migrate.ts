@@ -236,6 +236,35 @@ export async function migrate() {
       ON messages (recipient_id, created_at DESC)
       WHERE deleted_at IS NULL;
 
+    -- Polls: the chat message carries a [poll:<id>] marker; votes are one row
+    -- per (poll, user, option). context locates the poll for access checks and
+    -- socket fan-out ({type:'dm',a,b} or {type:'group',groupId,channelId}).
+    CREATE TABLE IF NOT EXISTS polls (
+      id UUID PRIMARY KEY,
+      creator_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      question TEXT NOT NULL,
+      options JSONB NOT NULL,
+      multi BOOLEAN NOT NULL DEFAULT FALSE,
+      context JSONB NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS poll_votes (
+      poll_id UUID NOT NULL REFERENCES polls(id) ON DELETE CASCADE,
+      user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      option_index INT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (poll_id, user_id, option_index)
+    );
+
+    -- Private per-user bookmarks on DM messages.
+    CREATE TABLE IF NOT EXISTS message_bookmarks (
+      user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      message_id UUID NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (user_id, message_id)
+    );
+
     -- "Remind me about this message" entries, delivered by the same sweeper.
     CREATE TABLE IF NOT EXISTS message_reminders (
       id UUID PRIMARY KEY,

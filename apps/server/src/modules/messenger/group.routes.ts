@@ -3,6 +3,7 @@ import type { Server } from 'socket.io';
 import { z } from 'zod';
 import { chatImageSchema, chatMediaItemsSchema } from './media.js';
 import { getLinkPreviewForBody } from './link-preview.js';
+import { createPoll, pollMarker, toPublicPoll } from './polls.js';
 import { callGroq } from '../ai/groq.js';
 import { transcribeAudioDataUrl } from '../ai/transcribe.js';
 import { consumeAiQuota } from '../../db/ai-quota.js';
@@ -1893,6 +1894,36 @@ export function createGroupRouter(io: Server) {
       const message = messages.find((item) => item.id === messageId) ?? messages.find((item) => item.id === canonicalMessageId) ?? await toPublicGroupMessageEnriched(groupMessage);
 
       res.json({ message });
+    })
+  );
+
+  // Group poll: requires the CreatePolls channel permission, then posts a
+  // [poll:<id>] marker message into the channel.
+  router.post(
+    '/groups/:groupId/channels/:channelId/polls',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      const channelId = z.string().uuid().parse(req.params.channelId);
+      const input = z.object({
+        question: z.string().trim().min(1).max(300),
+        options: z.array(z.string().trim().min(1).max(100)).min(2).max(10),
+        multi: z.boolean().optional()
+      }).parse(req.body ?? {});
+
+      await requireChannelPermission(groupId, channelId, req.auth.userId, 'ViewChannel', 'CHANNEL_VIEW_FORBIDDEN');
+      await requireChannelPermission(groupId, channelId, req.auth.userId, 'SendMessages', 'GROUP_SEND_FORBIDDEN');
+      await requireChannelPermission(groupId, channelId, req.auth.userId, 'CreatePolls', 'CREATE_POLLS_FORBIDDEN');
+
+      const poll = await createPoll(req.auth.userId, input.question, input.options, Boolean(input.multi), {
+        type: 'group', groupId, channelId
+      });
+      const message = await createGroupMessage(req.auth.userId, groupId, channelId, pollMarker(poll.id));
+      if (!message) throw new HttpError(403, 'Cannot send message', 'GROUP_SEND_FORBIDDEN');
+      const publicMessage = toPublicGroupMessage(message);
+      const memberIds = await visibleMemberIdsForChannel(groupId, channelId);
+      for (const id of memberIds) io.to(id).emit('messenger:groupMessage', { message: publicMessage });
+      res.json({ message: publicMessage, poll: await toPublicPoll(poll) });
     })
   );
 

@@ -32,6 +32,8 @@ import { buildGroupInviteLink, extractGroupInviteChannelId, extractGroupInviteCo
 import { extractWatchInvite } from '../utils/watch-invite-link';
 import { WatchInviteEmbed } from './WatchInviteEmbed';
 import { LinkPreviewCard } from './LinkPreviewCard';
+import { PollEmbed, extractPollId } from './PollEmbed';
+import { PollCreateModal } from './PollCreateModal';
 import { applySlashCommand, SLASH_COMMANDS } from '../utils/slash-commands';
 import { copyImageToClipboard, MediaLightbox, type MediaLightboxItem } from './MediaLightbox';
 
@@ -154,6 +156,7 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
   const [threadViewDraft, setThreadViewDraft] = useState('');
   const [threadViewSending, setThreadViewSending] = useState(false);
   const threadViewRootRef = useRef<string | null>(null);
+  const [pollModalOpen, setPollModalOpen] = useState(false);
   const [groupMembersHidden, setGroupMembersHidden] = useState(false);
   const [messageMenu, setMessageMenu] = useState<{ x: number; y: number; message: GroupMessage; imageSrc?: string } | null>(null);
   const [channelMenu, setChannelMenu] = useState<{ x: number; y: number; kind: 'channel' | 'folder'; id: string; name: string } | null>(null);
@@ -784,6 +787,7 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
   const canSendVoiceMessagesInActiveChannel = useMemo(() => isOwner || activeChannelPermissionSet.has('SendVoiceMessages'), [isOwner, activeChannelPermissionSet]);
   const canSendVideoCirclesInActiveChannel = useMemo(() => isOwner || activeChannelPermissionSet.has('SendVideoCircles'), [isOwner, activeChannelPermissionSet]);
   const canReactInActiveChannel = useMemo(() => isOwner || activeChannelPermissionSet.has('AddReactions'), [isOwner, activeChannelPermissionSet]);
+  const canCreatePollsInActiveChannel = useMemo(() => isOwner || activeChannelPermissionSet.has('CreatePolls'), [isOwner, activeChannelPermissionSet]);
   const canUseExternalEmojisInActiveChannel = useMemo(() => isOwner || activeChannelPermissionSet.has('UseExternalEmojis'), [isOwner, activeChannelPermissionSet]);
   const canPinInActiveChannel = useMemo(() => isOwner || activeChannelPermissionSet.has('PinMessages'), [isOwner, activeChannelPermissionSet]);
   const canManageMessagesInActiveChannel = useMemo(() => isOwner || activeChannelPermissionSet.has('ManageMessages') || canDeleteAny, [isOwner, activeChannelPermissionSet, canDeleteAny]);
@@ -3626,7 +3630,9 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
                           </button>
                         );
                       })() : null}
-                      {message.body && forwarded ? (
+                      {extractPollId(message.body) ? (
+                        <PollEmbed token={token} language={language} pollId={extractPollId(message.body)!} currentUserId={currentUser.id} />
+                      ) : message.body && forwarded ? (
                         (() => {
                           const fwd = forwarded;
                           const forwardDeleted = Boolean(fwd.sourceId && (deletedForwardSourceIds.has(fwd.sourceId) || externalDeletedForwardSourceIds?.has(fwd.sourceId)));
@@ -4013,8 +4019,34 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
                 <MenuTranslateIcon />
               </button>
             ) : null}
+            {activeChannel && activeChannelObj?.type === 'text' && canCreatePollsInActiveChannel ? (
+              <>
+                <hr className="context-menu-divider" />
+                <button
+                  type="button"
+                  className="context-menu-action"
+                  onClick={() => {
+                    setComposerMenu(null);
+                    setPollModalOpen(true);
+                  }}
+                >
+                  <span className="context-menu-action-text">{t(language, 'createPoll')}</span>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true"><path d="M6 20V10M12 20V4M18 20v-7"/></svg>
+                </button>
+              </>
+            ) : null}
           </div>,
           document.body
+        ) : null}
+        {pollModalOpen && activeChannel ? (
+          <PollCreateModal
+            language={language}
+            onClose={() => setPollModalOpen(false)}
+            onCreate={async (poll) => {
+              if (!activeChannel) return;
+              await api.createGroupPoll(token, group.id, activeChannel, poll);
+            }}
+          />
         ) : null}
 
         {pendingImages.length > 0 ? (

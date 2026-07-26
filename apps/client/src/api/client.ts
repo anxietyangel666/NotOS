@@ -31,6 +31,7 @@ import type {
   NamePlate,
   PinnedCard,
   PublicAudioTrack,
+  PublicPoll,
   PublicUser,
   RecoverResponse,
   RegisterResponse,
@@ -574,6 +575,35 @@ export const api = {
   // Load one page of a channel. Pass `before` (a message id) to fetch the page
   // of older messages for scroll-up pagination. `hasMore` indicates that an
   // even older page still exists.
+  createPoll(token: string, recipientId: string, poll: { question: string; options: string[]; multi: boolean }) {
+    return request<{ message: MessengerMessage; poll: PublicPoll }>('/api/messenger/polls', {
+      token, method: 'POST', body: { recipientId, ...poll }
+    });
+  },
+  createGroupPoll(token: string, groupId: string, channelId: string, poll: { question: string; options: string[]; multi: boolean }) {
+    return request<{ message: GroupMessage; poll: PublicPoll }>(
+      `/api/messenger/groups/${encodeURIComponent(groupId)}/channels/${encodeURIComponent(channelId)}/polls`,
+      { token, method: 'POST', body: poll }
+    );
+  },
+  getPoll(token: string, pollId: string) {
+    return request<{ poll: PublicPoll }>(`/api/messenger/polls/${encodeURIComponent(pollId)}`, { token });
+  },
+  votePoll(token: string, pollId: string, optionIndexes: number[]) {
+    return request<{ poll: PublicPoll }>(`/api/messenger/polls/${encodeURIComponent(pollId)}/vote`, {
+      token, method: 'POST', body: { optionIndexes }
+    });
+  },
+  getBookmarks(token: string) {
+    return request<{ bookmarks: Array<{ message: MessengerMessage; user: PublicUser | null; bookmarkedAt: string }> }>(
+      '/api/messenger/bookmarks', { token }
+    );
+  },
+  toggleBookmark(token: string, messageId: string) {
+    return request<{ bookmarked: boolean }>(`/api/messenger/messages/${encodeURIComponent(messageId)}/bookmark`, {
+      token, method: 'POST', body: {}
+    });
+  },
   searchAllMessages(token: string, query: string, kind: 'all' | 'media' | 'links' = 'all') {
     const params = new URLSearchParams({ q: query });
     if (kind !== 'all') params.set('kind', kind);

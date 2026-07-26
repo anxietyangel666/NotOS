@@ -68,6 +68,8 @@ import { type AuthenticatedRequest, requireAuth } from '../../middleware/require
 import { mentionedUserIdsFromBody } from './mentions.js';
 import { saveChatImageDataUrl } from './upload-storage.js';
 import { getLinkPreviewForBody } from './link-preview.js';
+import { createPoll, findPoll, pollMarker, setPollVotes, toPublicPoll, type PollContext } from './polls.js';
+import { isGroupMember, listGroupMemberIds } from '../../db/groups.js';
 import { transcribeAudioDataUrl } from '../ai/transcribe.js';
 import { consumeAiQuota } from '../../db/ai-quota.js';
 import { config } from '../../config.js';
@@ -602,6 +604,84 @@ export function createMessengerRouter(io: Server) {
     })
   );
 
+  // ── Polls ──────────────────────────────────────────────────────────────────
+  // DM poll: creates the poll and posts a [poll:<id>] marker message.
+  router.post(
+    '/polls',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const input = z.object({
+        recipientId: z.string().uuid(),
+        question: z.string().trim().min(1).max(300),
+        options: z.array(z.string().trim().min(1).max(100)).min(2).max(10),
+        multi: z.boolean().optional()
+      }).parse(req.body ?? {});
+
+      if (input.recipientId === req.auth.userId) {
+        throw new HttpError(400, 'Cannot create a poll with yourself', 'INVALID_RECIPIENT');
+      }
+      if (!(await userExistsById(input.recipientId))) throw new HttpError(404, 'User not found', 'USER_NOT_FOUND');
+      if (await blockExistsBetween(req.auth.userId, input.recipientId)) {
+        throw new HttpError(403, 'You cannot message this user', 'USER_BLOCKED');
+      }
+
+      const context: PollContext = { type: 'dm', a: req.auth.userId, b: input.recipientId };
+      const poll = await createPoll(req.auth.userId, input.question, input.options, Boolean(input.multi), context);
+      const created = await createMessage(req.auth.userId, input.recipientId, pollMarker(poll.id));
+      const message = toPublicMessage(created);
+      io.to(req.auth.userId).emit('messenger:message', { message });
+      io.to(input.recipientId).emit('messenger:message', { message });
+      res.json({ message, poll: await toPublicPoll(poll) });
+    })
+  );
+
+  async function requirePollAccess(pollId: string, userId: string) {
+    const poll = await findPoll(pollId);
+    if (!poll) throw new HttpError(404, 'Poll not found', 'POLL_NOT_FOUND');
+    if (poll.context.type === 'dm') {
+      if (poll.context.a !== userId && poll.context.b !== userId) {
+        throw new HttpError(403, 'Not a participant of this poll', 'POLL_FORBIDDEN');
+      }
+    } else if (!(await isGroupMember(poll.context.groupId, userId))) {
+      throw new HttpError(403, 'Not a participant of this poll', 'POLL_FORBIDDEN');
+    }
+    return poll;
+  }
+
+  async function emitPollUpdated(poll: Awaited<ReturnType<typeof requirePollAccess>>) {
+    const payload = { poll: await toPublicPoll(poll) };
+    if (poll.context.type === 'dm') {
+      io.to(poll.context.a).emit('messenger:pollUpdated', payload);
+      io.to(poll.context.b).emit('messenger:pollUpdated', payload);
+      return;
+    }
+    const memberIds = await listGroupMemberIds(poll.context.groupId);
+    for (const id of memberIds) io.to(id).emit('messenger:pollUpdated', payload);
+  }
+
+  router.get(
+    '/polls/:pollId',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const pollId = z.string().uuid().parse(req.params.pollId);
+      const poll = await requirePollAccess(pollId, req.auth.userId);
+      res.json({ poll: await toPublicPoll(poll) });
+    })
+  );
+
+  router.post(
+    '/polls/:pollId/vote',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const pollId = z.string().uuid().parse(req.params.pollId);
+      const input = z.object({ optionIndexes: z.array(z.number().int()).max(10) }).parse(req.body ?? {});
+      const poll = await requirePollAccess(pollId, req.auth.userId);
+      await setPollVotes(poll, req.auth.userId, input.optionIndexes);
+      await emitPollUpdated(poll);
+      res.json({ poll: await toPublicPoll(poll) });
+    })
+  );
+
   // ── Global search across every conversation ────────────────────────────────
   router.get(
     '/search',
@@ -654,6 +734,71 @@ export function createMessengerRouter(io: Server) {
       const cancelled = await cancelScheduledMessage(messageId, req.auth.userId);
       if (!cancelled) throw new HttpError(404, 'Scheduled message not found', 'SCHEDULED_NOT_FOUND');
       res.json({ message: toPublicMessage(cancelled) });
+    })
+  );
+
+  // ── Message bookmarks ──────────────────────────────────────────────────────
+  // Private per-user collection of starred DM messages.
+  router.get(
+    '/bookmarks',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const rows = await pool.query<MessageRecord & { bookmarked_at: Date }>(
+        `
+          SELECT m.*, b.created_at AS bookmarked_at
+          FROM message_bookmarks b
+          JOIN messages m ON m.id = b.message_id
+          WHERE b.user_id = $1 AND m.deleted_at IS NULL AND m.scheduled_at IS NULL
+          ORDER BY b.created_at DESC
+          LIMIT 200
+        `,
+        [req.auth.userId]
+      );
+      const otherIds = [...new Set(rows.rows.map((row) => (row.sender_id === req.auth.userId ? row.recipient_id : row.sender_id)))];
+      const users = otherIds.length
+        ? await pool.query<Parameters<typeof toPublicUserLite>[0]>(
+          `SELECT ${liteUserColumns()} FROM users WHERE id = ANY($1::uuid[])`,
+          [otherIds]
+        )
+        : { rows: [] as Array<Parameters<typeof toPublicUserLite>[0]> };
+      const userById = new Map(users.rows.map((user) => [user.id, toPublicUserLite(user)]));
+      res.json({
+        bookmarks: rows.rows.map((row) => ({
+          message: toPublicMessage(row),
+          user: userById.get(row.sender_id === req.auth.userId ? row.recipient_id : row.sender_id) ?? null,
+          bookmarkedAt: row.bookmarked_at.toISOString()
+        }))
+      });
+    })
+  );
+
+  router.post(
+    '/messages/:messageId/bookmark',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const messageId = z.string().uuid().parse(req.params.messageId);
+      const existing = await pool.query<{ sender_id: string; recipient_id: string }>(
+        'SELECT sender_id, recipient_id FROM messages WHERE id = $1 AND deleted_at IS NULL',
+        [messageId]
+      );
+      const row = existing.rows[0];
+      if (!row) throw new HttpError(404, 'Message not found', 'MESSAGE_NOT_FOUND');
+      if (row.sender_id !== req.auth.userId && row.recipient_id !== req.auth.userId) {
+        throw new HttpError(403, 'Cannot bookmark this message', 'BOOKMARK_FORBIDDEN');
+      }
+      const removed = await pool.query(
+        'DELETE FROM message_bookmarks WHERE user_id = $1 AND message_id = $2',
+        [req.auth.userId, messageId]
+      );
+      if ((removed.rowCount ?? 0) > 0) {
+        res.json({ bookmarked: false });
+        return;
+      }
+      await pool.query(
+        'INSERT INTO message_bookmarks (user_id, message_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+        [req.auth.userId, messageId]
+      );
+      res.json({ bookmarked: true });
     })
   );
 

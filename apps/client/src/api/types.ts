@@ -179,6 +179,17 @@ export type MessengerMessage = {
   pending?: boolean;
 };
 
+// A poll linked from a [poll:<id>] marker message.
+export type PublicPoll = {
+  id: string;
+  creatorId: string;
+  question: string;
+  multi: boolean;
+  options: Array<{ text: string; voterIds: string[] }>;
+  totalVoters: number;
+  createdAt: string;
+};
+
 // OpenGraph preview of the first URL in a message body, attached by the server
 // shortly after the message is sent.
 export type LinkPreview = {

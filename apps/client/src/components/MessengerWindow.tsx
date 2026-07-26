@@ -17,6 +17,8 @@ import { RailFolders, type RailItem } from './RailFolders';
 import { InviteEmbed } from './InviteEmbed';
 import { UserEmbed } from './UserEmbed';
 import { LinkPreviewCard } from './LinkPreviewCard';
+import { PollEmbed, extractPollId } from './PollEmbed';
+import { PollCreateModal } from './PollCreateModal';
 import { applySlashCommand, SLASH_COMMANDS } from '../utils/slash-commands';
 import { UserName } from './UserName';
 import { extractProfileUserId } from '../utils/profile-link';
@@ -246,6 +248,21 @@ function loadArchived(): Set<string> {
 
 function saveArchived(archived: Set<string>) {
   try { localStorage.setItem(ARCHIVED_KEY, JSON.stringify([...archived])); } catch { }
+}
+
+// Per-conversation composer drafts, so an unfinished message survives chat
+// switches and shows up in the conversation list.
+const DM_DRAFTS_KEY = 'notoc.messenger.drafts';
+
+function loadDmDrafts(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(DM_DRAFTS_KEY);
+    return raw ? (JSON.parse(raw) as Record<string, string>) : {};
+  } catch { return {}; }
+}
+
+function saveDmDrafts(drafts: Record<string, string>) {
+  try { localStorage.setItem(DM_DRAFTS_KEY, JSON.stringify(drafts)); } catch { }
 }
 
 // Per-conversation "translate incoming messages automatically" toggle.
@@ -746,6 +763,11 @@ export function MessengerWindow({
   // Mirrors the leading "/command" being typed so the hint list can render
   // without putting the whole draft into state on every keystroke.
   const [composerSlashPrefix, setComposerSlashPrefix] = useState('');
+  // Per-chat drafts: the ref tracks keystrokes without re-rendering; the state
+  // copy (used by the conversation list) is refreshed on chat switches.
+  const dmDraftsRef = useRef<Record<string, string>>(loadDmDrafts());
+  const [dmDrafts, setDmDrafts] = useState<Record<string, string>>(() => ({ ...dmDraftsRef.current }));
+  const draftPersistTimerRef = useRef<number | null>(null);
   const [imageCaptionDraft, setImageCaptionDraft] = useState('');
   const [pendingImages, setPendingImages] = useState<PendingChatImage[]>([]);
   const [editingMediaItems, setEditingMediaItems] = useState<PendingChatImage[]>([]);
@@ -771,6 +793,11 @@ export function MessengerWindow({
   const [scheduleChoice, setScheduleChoice] = useState<'1h' | '3h' | 'tomorrow' | 'custom'>('1h');
   const [scheduleCustom, setScheduleCustom] = useState('');
   const [scheduledViewOpen, setScheduledViewOpen] = useState(false);
+  const [pollModalOpen, setPollModalOpen] = useState(false);
+  // Bookmarks: starred message ids plus the view state inside Saved Messages.
+  const [bookmarkedIds, setBookmarkedIds] = useState<Set<string>>(() => new Set());
+  const [bookmarksViewOpen, setBookmarksViewOpen] = useState(false);
+  const [bookmarks, setBookmarks] = useState<Array<{ message: MessengerMessage; user: PublicUser | null; bookmarkedAt: string }>>([]);
   const [openedViewOnce, setOpenedViewOnce] = useState<Record<string, ChatMediaItem[]>>({});
   // Global cross-conversation search.
   const [globalSearchOpen, setGlobalSearchOpen] = useState(false);
@@ -998,6 +1025,8 @@ export function MessengerWindow({
   useEffect(() => {
     setScheduledViewOpen(false);
     setScheduleModalOpen(false);
+    setBookmarksViewOpen(false);
+    setPollModalOpen(false);
   }, [selectedUser?.id, selectedGroup?.id, activeView]);
 
   // Load the pending scheduled messages once per session.
@@ -1006,6 +1035,43 @@ export function MessengerWindow({
       .then((payload) => setScheduledMessages(payload.messages))
       .catch(() => undefined);
   }, [token]);
+
+  // Bookmarked message ids drive the menu label; the full list is refreshed
+  // whenever the bookmarks view opens.
+  useEffect(() => {
+    api.getBookmarks(token)
+      .then((payload) => {
+        setBookmarks(payload.bookmarks);
+        setBookmarkedIds(new Set(payload.bookmarks.map((entry) => entry.message.id)));
+      })
+      .catch(() => undefined);
+  }, [token]);
+
+  useEffect(() => {
+    if (!bookmarksViewOpen) return;
+    api.getBookmarks(token)
+      .then((payload) => {
+        setBookmarks(payload.bookmarks);
+        setBookmarkedIds(new Set(payload.bookmarks.map((entry) => entry.message.id)));
+      })
+      .catch(() => undefined);
+  }, [bookmarksViewOpen, token]);
+
+  function toggleBookmark(message: MessengerMessage) {
+    api.toggleBookmark(token, message.id)
+      .then((payload) => {
+        setBookmarkedIds((current) => {
+          const next = new Set(current);
+          if (payload.bookmarked) next.add(message.id);
+          else next.delete(message.id);
+          return next;
+        });
+        if (!payload.bookmarked) {
+          setBookmarks((current) => current.filter((entry) => entry.message.id !== message.id));
+        }
+      })
+      .catch(() => undefined);
+  }
 
   // Auto-translate: whenever the open conversation has the toggle on, translate
   // any incoming message we have not translated yet. Results reuse the same
@@ -2020,6 +2086,9 @@ export function MessengerWindow({
   }, [convSearchQuery, searchMode, selectedUser?.id]);
 
   async function chooseUser(person: PublicUser) {
+    // Sync drafts for the list and restore this conversation's saved draft.
+    setDmDrafts({ ...dmDraftsRef.current });
+    replaceMessageDraft(dmDraftsRef.current[person.id] ?? '');
     selectedUserRef.current = person;
     activeViewRef.current = 'directMessages';
     setSelectedUser(person);
@@ -2306,6 +2375,7 @@ export function MessengerWindow({
   }
 
   function openDirectMessagesHome() {
+    setDmDrafts({ ...dmDraftsRef.current });
     selectedUserRef.current = null;
     activeViewRef.current = 'directMessages';
     setActiveView('directMessages');
@@ -2681,6 +2751,15 @@ export function MessengerWindow({
       else replaceMessageDraft('');
       setPendingImages([]);
     }
+    // The message left the composer, so drop the saved draft for this chat.
+    delete dmDraftsRef.current[selectedUser.id];
+    saveDmDrafts(dmDraftsRef.current);
+    setDmDrafts((current) => {
+      if (!(selectedUser.id in current)) return current;
+      const next = { ...current };
+      delete next[selectedUser.id];
+      return next;
+    });
     setImageEmojiOpen(false);
     setError('');
     const activeReplyTarget = replyTarget && messages.some((message) => message.id === replyTarget.id)
@@ -2996,6 +3075,11 @@ export function MessengerWindow({
     const slashPrefix = value.startsWith('/') && !value.includes(' ') ? value : '';
     setComposerSlashPrefix((current) => (current === slashPrefix ? current : slashPrefix));
     if (!selectedUser || editingMessage) return;
+    // Remember the draft for this conversation (debounced localStorage write).
+    if (value.trim()) dmDraftsRef.current[selectedUser.id] = value;
+    else delete dmDraftsRef.current[selectedUser.id];
+    if (draftPersistTimerRef.current) window.clearTimeout(draftPersistTimerRef.current);
+    draftPersistTimerRef.current = window.setTimeout(() => saveDmDrafts(dmDraftsRef.current), 600);
     const hasText = Boolean(value.trim());
     emitTyping(selectedUser.id, hasText);
 
@@ -3154,6 +3238,9 @@ export function MessengerWindow({
     if (message.deletedAt) return { kind: 'plain', value: t(language, 'messageDeleted') };
     const callLabel = callMessageLabel(message, currentUser.id, language);
     if (callLabel) return { kind: 'plain', value: `\u{1F4DE} ${callLabel}` };
+    if (extractPollId(message.body)) {
+      return { kind: 'plain', value: `📊 ${t(language, 'pollPreviewLabel')}` };
+    }
     const ttlMarker = parseChatTtlMarker(message.body);
     if (ttlMarker !== null) {
       return {
@@ -3873,6 +3960,17 @@ export function MessengerWindow({
                   <UserName user={conversation.user} as="strong" />
                   <small>
                     {(() => {
+                      // An unfinished draft outranks the last message preview
+                      // (unless the chat is currently open in the composer).
+                      const draft = selectedUser?.id === conversation.user.id ? '' : (dmDrafts[conversation.user.id] ?? '').trim();
+                      if (draft) {
+                        return (
+                          <>
+                            <span className="conversation-draft-label">{t(language, 'draftLabel')}</span>{' '}
+                            <MessagePreviewText text={expandCustomEmojiShortcodes(draft)} />
+                          </>
+                        );
+                      }
                       const preview = messagePreviewText(conversation.message);
                       if (isVoiceAttachment(conversation.message.imageData, conversation.message.imageName) || isVideoCircleAttachment(conversation.message.imageData, conversation.message.imageName)) {
                         return (
@@ -4066,7 +4164,90 @@ export function MessengerWindow({
                     </div>
                   );
                 })()}
-                {scheduledViewOpen ? (
+                {bookmarksViewOpen ? (
+                  <div className="messenger-thread scheduled-view">
+                    <div className="scheduled-view-head">
+                      <button type="button" className="scheduled-view-back" onClick={() => setBookmarksViewOpen(false)}>
+                        <span aria-hidden="true">←</span>
+                        {t(language, 'back')}
+                      </button>
+                      <strong>{t(language, 'bookmarks')}</strong>
+                      <span className="scheduled-view-count">{bookmarks.length}</span>
+                    </div>
+                    {bookmarks.length === 0 ? (
+                      <p className="scheduled-view-empty">{t(language, 'bookmarksEmpty')}</p>
+                    ) : null}
+                    {bookmarks.map((entry) => (
+                      <div key={entry.message.id} className="scheduled-view-row">
+                        <div className="scheduled-view-when">
+                          <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 3h12a1 1 0 0 1 1 1v17l-7-4-7 4V4a1 1 0 0 1 1-1z"/></svg>
+                          {entry.user?.nickname ?? ''} · {formatMessageDate(entry.message.createdAt, language)}
+                          {entry.user ? (
+                            <button
+                              type="button"
+                              className="scheduled-view-open"
+                              onClick={() => {
+                                setBookmarksViewOpen(false);
+                                const target = entry.user!;
+                                void chooseUser(target).then(() => jumpToMessage(entry.message.id));
+                              }}
+                            >
+                              {t(language, 'openChatAction')}
+                            </button>
+                          ) : null}
+                          <button
+                            type="button"
+                            className="scheduled-view-cancel"
+                            title={t(language, 'bookmarkRemove')}
+                            aria-label={t(language, 'bookmarkRemove')}
+                            onClick={() => toggleBookmark(entry.message)}
+                          >✕</button>
+                        </div>
+                        <article
+                          className={[
+                            'message-bubble',
+                            'message-group-start',
+                            'message-group-end',
+                            'message-avatar-active',
+                            entry.message.senderId === currentUser.id ? 'mine' : '',
+                            entry.message.imageData ? 'has-image' : ''
+                          ].filter(Boolean).join(' ')}
+                        >
+                          <img
+                            className="message-avatar"
+                            src={entry.message.senderId === currentUser.id ? currentUser.avatarData : (entry.user?.avatarData ?? '')}
+                            alt=""
+                            draggable={false}
+                          />
+                          <div className="message-body">
+                            <div className="message-meta">
+                              <strong className="message-author">
+                                {entry.message.senderId === currentUser.id ? currentUser.nickname : (entry.user?.nickname ?? '')}
+                              </strong>
+                              <time className="message-time">{formatMessageTime(entry.message.createdAt, language)}</time>
+                            </div>
+                            {entry.message.imageData ? (
+                              <button
+                                type="button"
+                                className="message-image"
+                                onClick={() => openImageViewer(entry.message.imageData ?? '', entry.message.imageName ?? t(language, 'imageMessage'))}
+                              >
+                                <img src={entry.message.imageData} alt="" loading="lazy" decoding="async" />
+                              </button>
+                            ) : null}
+                            {entry.message.body && !extractPollId(entry.message.body) ? (
+                              <p className="message-text"><MessageText text={entry.message.body} /></p>
+                            ) : null}
+                            {extractPollId(entry.message.body) ? (
+                              <p className="message-text">📊 {t(language, 'pollPreviewLabel')}</p>
+                            ) : null}
+                          </div>
+                        </article>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+                {scheduledViewOpen && !bookmarksViewOpen ? (
                   <div className="messenger-thread scheduled-view">
                     <div className="scheduled-view-head">
                       <button type="button" className="scheduled-view-back" onClick={() => setScheduledViewOpen(false)}>
@@ -4145,7 +4326,7 @@ export function MessengerWindow({
                 ) : null}
                 <div
                   ref={threadRef}
-                  className={scheduledViewOpen ? 'messenger-thread hidden-behind-scheduled' : 'messenger-thread'}
+                  className={scheduledViewOpen || bookmarksViewOpen ? 'messenger-thread hidden-behind-scheduled' : 'messenger-thread'}
                   onScroll={(event) => {
                     const target = event.currentTarget;
                     userNearThreadBottomRef.current = target.scrollHeight - target.scrollTop - target.clientHeight < 200;
@@ -4453,6 +4634,8 @@ export function MessengerWindow({
                                 <span className="call-log-copy">{callLogText}</span>
                                 <time className="message-time call-log-time">{formatMessageTime(message.createdAt, language)}</time>
                               </p>
+                            ) : extractPollId(message.body) ? (
+                              <PollEmbed token={token} language={language} pollId={extractPollId(message.body)!} currentUserId={currentUser.id} />
                             ) : message.body && forwarded ? (
                               (() => {
                                 const fwd = forwarded;
@@ -4652,6 +4835,14 @@ export function MessengerWindow({
                     <span className="context-menu-action-text">{t(language, 'reply')}</span>
                     <MenuReplyIcon />
                   </button>
+                  {!messageMenu.message.pending ? (
+                    <button type="button" className="context-menu-action" onClick={() => { toggleBookmark(messageMenu.message); setMessageMenu(null); }}>
+                      <span className="context-menu-action-text">
+                        {bookmarkedIds.has(messageMenu.message.id) ? t(language, 'bookmarkRemove') : t(language, 'bookmarkAdd')}
+                      </span>
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill={bookmarkedIds.has(messageMenu.message.id) ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" strokeLinejoin="round" aria-hidden="true"><path d="M6 3h12a1 1 0 0 1 1 1v17l-7-4-7 4V4a1 1 0 0 1 1-1z"/></svg>
+                    </button>
+                  ) : null}
                   <div className="context-menu-remind">
                     <span className="context-menu-remind-label">{t(language, 'remindMeIn')}</span>
                     <div className="context-menu-remind-options">
@@ -4780,6 +4971,22 @@ export function MessengerWindow({
                   {/* The composer keeps its text in a ref (the input is local
                       for typing performance), so read the ref rather than the
                       debounced `messageDraft` state. */}
+                  {selectedUser && !editingMessage && !isAiAssistantSelected && selectedUser.id !== currentUser.id ? (
+                    <>
+                      <hr className="context-menu-divider" />
+                      <button
+                        type="button"
+                        className="context-menu-action"
+                        onClick={() => {
+                          setComposerMenu(null);
+                          setPollModalOpen(true);
+                        }}
+                      >
+                        <span className="context-menu-action-text">{t(language, 'createPoll')}</span>
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true"><path d="M6 20V10M12 20V4M18 20v-7"/></svg>
+                      </button>
+                    </>
+                  ) : null}
                   {selectedUser && !editingMessage && (messageDraftRef.current.trim() || pendingImages.length > 0) ? (
                     <>
                       <hr className="context-menu-divider" />
@@ -4817,6 +5024,16 @@ export function MessengerWindow({
                 document.body
               ) : null}
 
+              {pollModalOpen && selectedUser ? (
+                <PollCreateModal
+                  language={language}
+                  onClose={() => setPollModalOpen(false)}
+                  onCreate={async (poll) => {
+                    if (!selectedUser) return;
+                    await api.createPoll(token, selectedUser.id, poll);
+                  }}
+                />
+              ) : null}
               {scheduleModalOpen && selectedUser ? (
                 <div className="messenger-inline-modal schedule-modal-layer" onClick={() => setScheduleModalOpen(false)}>
                   <div className="schedule-modal" onClick={(event) => event.stopPropagation()}>
@@ -5059,6 +5276,19 @@ export function MessengerWindow({
                     >
                       <EmojiToggleIcon />
                     </button>
+                    {selectedUser?.id === currentUser.id ? (
+                      <button
+                        className={bookmarksViewOpen ? 'emoji-toggle inline dm-scheduled-toggle active' : 'emoji-toggle inline dm-scheduled-toggle'}
+                        type="button"
+                        title={t(language, 'bookmarks')}
+                        aria-label={t(language, 'bookmarks')}
+                        onMouseDown={(event) => event.stopPropagation()}
+                        onClick={(event) => { event.stopPropagation(); setBookmarksViewOpen((open) => !open); }}
+                      >
+                        <svg width="17" height="17" viewBox="0 0 24 24" fill={bookmarksViewOpen ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" strokeLinejoin="round" aria-hidden="true"><path d="M6 3h12a1 1 0 0 1 1 1v17l-7-4-7 4V4a1 1 0 0 1 1-1z"/></svg>
+                        {bookmarks.length > 0 ? <span className="dm-scheduled-count">{bookmarks.length}</span> : null}
+                      </button>
+                    ) : null}
                     {scheduledForSelectedUser.length > 0 || scheduledViewOpen ? (
                     <button
                       className={scheduledViewOpen ? 'emoji-toggle inline dm-scheduled-toggle active' : 'emoji-toggle inline dm-scheduled-toggle'}

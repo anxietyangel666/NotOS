@@ -166,11 +166,32 @@ type VideoCirclePlaybackDetail = {
 let activeVideoCircle: HTMLVideoElement | null = null;
 let activeVideoCircleDetail: VideoCirclePlaybackDetail | null = null;
 
+// Sticky playback speed for voice messages (shared by every player instance
+// and persisted across sessions).
+const VOICE_SPEED_KEY = 'notoc.voice.playbackRate';
+const VOICE_SPEEDS = [1, 1.5, 2] as const;
+
+function loadVoicePlaybackRate(): number {
+  try {
+    const value = Number(localStorage.getItem(VOICE_SPEED_KEY));
+    return VOICE_SPEEDS.includes(value as (typeof VOICE_SPEEDS)[number]) ? value : 1;
+  } catch { return 1; }
+}
+
+let voicePlaybackRate = loadVoicePlaybackRate();
+
+function setVoicePlaybackRate(rate: number) {
+  voicePlaybackRate = rate;
+  try { localStorage.setItem(VOICE_SPEED_KEY, String(rate)); } catch { }
+  if (activeVoiceAudio) activeVoiceAudio.playbackRate = rate;
+}
+
 function announceVoicePlayback(detail: Omit<VoicePlaybackDetail, 'audio'>): VoicePlaybackDetail {
   if (!activeVoiceAudio || activeVoiceDetail?.src !== detail.src) {
     activeVoiceAudio?.pause();
     activeVoiceAudio = new Audio(detail.src);
     activeVoiceAudio.preload = 'metadata';
+    activeVoiceAudio.playbackRate = voicePlaybackRate;
     activeVoiceAudio.addEventListener('loadedmetadata', () => {
       const audio = activeVoiceAudio;
       if (!audio || (Number.isFinite(audio.duration) && audio.duration > 0)) return;
@@ -257,6 +278,7 @@ export function VoiceMessagePlayer({
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [transcript, setTranscript] = useState<{ state: 'idle' | 'loading' | 'done' | 'error'; text: string }>({ state: 'idle', text: '' });
+  const [speed, setSpeed] = useState(() => voicePlaybackRate);
 
   useEffect(() => {
     const syncPlayback = (event?: Event) => {
@@ -343,6 +365,19 @@ export function VoiceMessagePlayer({
         />
         <span>{formatRecordingTime(Math.floor(currentTime))} / {formatRecordingTime(Math.floor(duration))}</span>
       </div>
+      <button
+        className="voice-message-speed"
+        type="button"
+        title={`${speed}×`}
+        aria-label={`${speed}×`}
+        onClick={() => {
+          const next = VOICE_SPEEDS[(VOICE_SPEEDS.indexOf(speed as (typeof VOICE_SPEEDS)[number]) + 1) % VOICE_SPEEDS.length];
+          setVoicePlaybackRate(next);
+          setSpeed(next);
+        }}
+      >
+        {speed}×
+      </button>
       {transcribe ? (
         <button
           className="voice-message-transcribe"
