@@ -6,3 +6,11 @@ build/
 .DS_Store
 npm-debug.log*
 notoc-postgres/
+
+# Electron build artifacts (electron-builder / electron-packager output)
+apps/client/release/
+apps/client/release-*/
+
+# Runtime file uploads served from /uploads
+apps/server/uploads/
+uploads/
