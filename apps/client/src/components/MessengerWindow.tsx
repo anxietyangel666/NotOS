@@ -769,6 +769,12 @@ export function MessengerWindow({
   // Scheduled messages awaiting delivery, plus the compose-time picker state.
   const [scheduledMessages, setScheduledMessages] = useState<MessengerMessage[]>([]);
   const [viewOnceArmed, setViewOnceArmed] = useState(false);
+  // "Set timer" dialog shown over the chat, and the scheduled-messages view
+  // that replaces the thread when the notebook button is pressed.
+  const [scheduleModalOpen, setScheduleModalOpen] = useState(false);
+  const [scheduleChoice, setScheduleChoice] = useState<'1h' | '3h' | 'tomorrow' | 'custom'>('1h');
+  const [scheduleCustom, setScheduleCustom] = useState('');
+  const [scheduledViewOpen, setScheduledViewOpen] = useState(false);
   const [openedViewOnce, setOpenedViewOnce] = useState<Record<string, ChatMediaItem[]>>({});
   // Global cross-conversation search.
   const [globalSearchOpen, setGlobalSearchOpen] = useState(false);
@@ -985,6 +991,18 @@ export function MessengerWindow({
       conversation.user.nickname.toLocaleLowerCase().includes(filter)
     );
   }, [directMessageFilter, sortedConversations, archivedConversations, dmListFilter]);
+
+  const scheduledForSelectedUser = useMemo(
+    () => (selectedUser ? scheduledMessages.filter((message) => message.recipientId === selectedUser.id) : []),
+    [scheduledMessages, selectedUser]
+  );
+
+  // Leaving the conversation closes the scheduled list, so the home button and
+  // the existing back/forward navigation return to the thread on their own.
+  useEffect(() => {
+    setScheduledViewOpen(false);
+    setScheduleModalOpen(false);
+  }, [selectedUser?.id, selectedGroup?.id, activeView]);
 
   // Load the pending scheduled messages once per session.
   useEffect(() => {
@@ -4062,9 +4080,58 @@ export function MessengerWindow({
                     </div>
                   );
                 })()}
+                {scheduledViewOpen ? (
+                  <div className="messenger-thread scheduled-view">
+                    <div className="scheduled-view-head">
+                      <button type="button" className="scheduled-view-back" onClick={() => setScheduledViewOpen(false)}>
+                        <span aria-hidden="true">←</span>
+                        {t(language, 'back')}
+                      </button>
+                      <strong>{language === 'ru' ? 'Запланированные сообщения' : language === 'uk' ? 'Заплановані повідомлення' : 'Scheduled messages'}</strong>
+                      <span className="scheduled-view-count">{scheduledForSelectedUser.length}</span>
+                    </div>
+                    {scheduledForSelectedUser.length === 0 ? (
+                      <p className="scheduled-view-empty">
+                        {language === 'ru'
+                          ? 'Здесь появятся сообщения, для которых вы установили таймер.'
+                          : language === 'uk'
+                            ? 'Тут зʼявляться повідомлення з таймером.'
+                            : 'Messages you schedule will show up here.'}
+                      </p>
+                    ) : null}
+                    {scheduledForSelectedUser.map((message) => (
+                      <article key={message.id} className="scheduled-view-item">
+                        <div className="scheduled-view-when">
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+                          {message.awaitingOnline
+                            ? (language === 'ru' ? 'Когда собеседник будет в сети' : language === 'uk' ? 'Коли співрозмовник буде онлайн' : 'When they come online')
+                            : message.scheduledAt
+                              ? `${formatMessageDate(message.scheduledAt, language)}, ${formatMessageTime(message.scheduledAt, language)}`
+                              : ''}
+                        </div>
+                        <div className="scheduled-view-body">
+                          {message.body ? <MessageText text={message.body} /> : null}
+                          {message.imageData ? <img className="scheduled-view-thumb" src={message.imageData} alt="" /> : null}
+                        </div>
+                        <div className="scheduled-view-actions">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              api.cancelScheduledMessage(token, message.id)
+                                .then(() => setScheduledMessages((current) => current.filter((m) => m.id !== message.id)))
+                                .catch(() => undefined);
+                            }}
+                          >
+                            {t(language, 'cancel')}
+                          </button>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                ) : null}
                 <div
                   ref={threadRef}
-                  className="messenger-thread"
+                  className={scheduledViewOpen ? 'messenger-thread hidden-behind-scheduled' : 'messenger-thread'}
                   onScroll={(event) => {
                     const target = event.currentTarget;
                     userNearThreadBottomRef.current = target.scrollHeight - target.scrollTop - target.clientHeight < 200;
@@ -4702,24 +4769,21 @@ export function MessengerWindow({
                   {selectedUser && !editingMessage && (messageDraftRef.current.trim() || pendingImages.length > 0) ? (
                     <>
                       <hr className="context-menu-divider" />
-                      {([
-                        [3600, language === 'ru' ? 'Отправить через час' : language === 'uk' ? 'Надіслати через годину' : 'Send in 1 hour'],
-                        [10800, language === 'ru' ? 'Отправить через 3 часа' : language === 'uk' ? 'Надіслати через 3 години' : 'Send in 3 hours'],
-                        [86400, language === 'ru' ? 'Отправить завтра' : language === 'uk' ? 'Надіслати завтра' : 'Send tomorrow']
-                      ] as const).map(([seconds, label]) => (
-                        <button
-                          key={seconds}
-                          type="button"
-                          className="context-menu-action"
-                          onClick={() => {
-                            setComposerMenu(null);
-                            void sendMessage(undefined, { scheduledAt: new Date(Date.now() + seconds * 1000).toISOString() });
-                          }}
-                        >
-                          <span className="context-menu-action-text">{label}</span>
-                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
-                        </button>
-                      ))}
+                      <button
+                        type="button"
+                        className="context-menu-action"
+                        onClick={() => {
+                          setComposerMenu(null);
+                          setScheduleChoice('1h');
+                          setScheduleCustom('');
+                          setScheduleModalOpen(true);
+                        }}
+                      >
+                        <span className="context-menu-action-text">
+                          {language === 'ru' ? 'Установить таймер' : language === 'uk' ? 'Встановити таймер' : 'Set timer'}
+                        </span>
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+                      </button>
                       <button
                         type="button"
                         className="context-menu-action"
@@ -4737,6 +4801,72 @@ export function MessengerWindow({
                   ) : null}
                 </div>,
                 document.body
+              ) : null}
+
+              {scheduleModalOpen && selectedUser ? (
+                <div className="messenger-inline-modal schedule-modal-layer" onClick={() => setScheduleModalOpen(false)}>
+                  <div className="schedule-modal" onClick={(event) => event.stopPropagation()}>
+                    <h3>{language === 'ru' ? 'Когда отправить?' : language === 'uk' ? 'Коли надіслати?' : 'When to send?'}</h3>
+                    <div className="schedule-modal-options">
+                      {([
+                        ['1h', language === 'ru' ? 'Через час' : language === 'uk' ? 'Через годину' : 'In 1 hour'],
+                        ['3h', language === 'ru' ? 'Через 3 часа' : language === 'uk' ? 'Через 3 години' : 'In 3 hours'],
+                        ['tomorrow', language === 'ru' ? 'Завтра утром' : language === 'uk' ? 'Завтра вранці' : 'Tomorrow morning'],
+                        ['custom', language === 'ru' ? 'Своё время' : language === 'uk' ? 'Свій час' : 'Custom time']
+                      ] as const).map(([value, label]) => (
+                        <label key={value} className={scheduleChoice === value ? 'schedule-modal-option active' : 'schedule-modal-option'}>
+                          <input
+                            type="radio"
+                            name="schedule-choice"
+                            checked={scheduleChoice === value}
+                            onChange={() => setScheduleChoice(value)}
+                          />
+                          <span>{label}</span>
+                        </label>
+                      ))}
+                    </div>
+                    {scheduleChoice === 'custom' ? (
+                      <input
+                        type="datetime-local"
+                        className="messenger-input schedule-modal-custom"
+                        value={scheduleCustom}
+                        onChange={(event) => setScheduleCustom(event.target.value)}
+                      />
+                    ) : null}
+                    <div className="schedule-modal-actions">
+                      <button type="button" className="secondary-action" onClick={() => setScheduleModalOpen(false)}>
+                        {t(language, 'cancel')}
+                      </button>
+                      <button
+                        type="button"
+                        className="primary-action"
+                        disabled={scheduleChoice === 'custom' && !scheduleCustom}
+                        onClick={() => {
+                          let when: Date | null = null;
+                          if (scheduleChoice === '1h') when = new Date(Date.now() + 3600 * 1000);
+                          else if (scheduleChoice === '3h') when = new Date(Date.now() + 3 * 3600 * 1000);
+                          else if (scheduleChoice === 'tomorrow') {
+                            const tomorrow = new Date();
+                            tomorrow.setDate(tomorrow.getDate() + 1);
+                            tomorrow.setHours(9, 0, 0, 0);
+                            when = tomorrow;
+                          } else if (scheduleCustom) {
+                            const parsed = new Date(scheduleCustom);
+                            if (!Number.isNaN(parsed.getTime())) when = parsed;
+                          }
+                          if (!when || when.getTime() - Date.now() < 30_000) {
+                            setError(language === 'ru' ? 'Выберите время в будущем' : 'Pick a time in the future');
+                            return;
+                          }
+                          setScheduleModalOpen(false);
+                          void sendMessage(undefined, { scheduledAt: when.toISOString() });
+                        }}
+                      >
+                        OK
+                      </button>
+                    </div>
+                  </div>
+                </div>
               ) : null}
 
               {blockState.blocked || blockState.blockedMe ? (
@@ -4813,34 +4943,6 @@ export function MessengerWindow({
                     event.currentTarget.value = '';
                     files.forEach((file) => void prepareImageFromFile(file));
                   }} />
-                {selectedUser && scheduledMessages.some((m) => m.recipientId === selectedUser.id) ? (
-                  <div className="scheduled-messages-bar">
-                    <span className="scheduled-messages-title">
-                      {language === 'ru' ? 'Запланировано' : language === 'uk' ? 'Заплановано' : 'Scheduled'}
-                    </span>
-                    {scheduledMessages.filter((m) => m.recipientId === selectedUser.id).map((message) => (
-                      <div key={message.id} className="scheduled-message-row">
-                        <time>
-                          {message.awaitingOnline
-                            ? (language === 'ru' ? 'когда будет в сети' : language === 'uk' ? 'коли буде онлайн' : 'when online')
-                            : message.scheduledAt
-                              ? `${formatMessageDate(message.scheduledAt, language)} ${formatMessageTime(message.scheduledAt, language)}`
-                              : ''}
-                        </time>
-                        <span className="scheduled-message-body">{message.body || '📷'}</span>
-                        <button
-                          type="button"
-                          aria-label={t(language, 'cancel')}
-                          onClick={() => {
-                            api.cancelScheduledMessage(token, message.id)
-                              .then(() => setScheduledMessages((current) => current.filter((m) => m.id !== message.id)))
-                              .catch(() => undefined);
-                          }}
-                        >✕</button>
-                      </div>
-                    ))}
-                  </div>
-                ) : null}
                 {composerSlashPrefix ? (
                   <div className="slash-command-hints">
                     {SLASH_COMMANDS.filter((command) => command.name.startsWith(composerSlashPrefix.slice(1).toLowerCase())).map((command) => (
@@ -4942,6 +5044,20 @@ export function MessengerWindow({
                       }}
                     >
                       <EmojiToggleIcon />
+                    </button>
+                    <button
+                      className={scheduledViewOpen ? 'emoji-toggle inline dm-scheduled-toggle active' : 'emoji-toggle inline dm-scheduled-toggle'}
+                      type="button"
+                      title={language === 'ru' ? 'Запланированные сообщения' : language === 'uk' ? 'Заплановані повідомлення' : 'Scheduled messages'}
+                      aria-label={language === 'ru' ? 'Запланированные сообщения' : 'Scheduled messages'}
+                      onMouseDown={(event) => event.stopPropagation()}
+                      onClick={(event) => { event.stopPropagation(); setScheduledViewOpen((open) => !open); }}
+                    >
+                      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <path d="M6 3h11a2 2 0 0 1 2 2v16l-3-2-3 2-3-2-3 2V5a2 2 0 0 1 2-2z" />
+                        <path d="M9 8h7M9 12h7" />
+                      </svg>
+                      {scheduledForSelectedUser.length > 0 ? <span className="dm-scheduled-count">{scheduledForSelectedUser.length}</span> : null}
                     </button>
                     {emojiOpen ? <EmojiPicker language={language} enlarged initialTab={pickerTab} anchorRef={messageEmojiAnchorRef} placement="top-end" onSelect={insertEmoji} onSelectGif={(gif) => void sendGif(gif)} onClose={() => setEmojiOpen(false)} token={token} currentUser={currentUser} /> : null}
                   </div>
