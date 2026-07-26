@@ -21245,7 +21245,10 @@ div.settings-music-row {
 .chat-inline-gif img {
   display: block;
   width: 100%;
-  height: auto;
+  /* Reserved 16:9 box: the height is known before the GIF loads, so entering
+     a channel full of GIFs cannot shift the layout or re-scroll the thread.
+     `contain` keeps the full frame visible, letterboxed on the tinted bg. */
+  aspect-ratio: 16 / 9;
   max-height: 240px;
   object-fit: contain;
   border-radius: 12px;
