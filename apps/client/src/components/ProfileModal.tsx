@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 import { api } from '../api/client';
-import { cacheUser } from '../api/user-cache';
+import { cacheUser, getCachedUser } from '../api/user-cache';
 import type { Group, GroupRole, Language, PublicUser, UserConnection } from '../api/types';
 import { LOCALES, t } from '../i18n';
 import { buildProfileLink } from '../utils/profile-link';
@@ -306,6 +306,11 @@ export function ProfileModal({
   useEffect(() => {
     setFullWallpaper(user.wallpaper);
     if (user.wallpaper) return; // already complete, nothing to upgrade
+    // Paint a previously-fetched wallpaper immediately (even if the cache
+    // entry expired) so reopening a profile never flashes empty, then
+    // revalidate with a fresh fetch below.
+    const known = getCachedUser(user.id);
+    if (known?.wallpaper) setFullWallpaper(known.wallpaper);
     // Even for our own profile the prop can arrive "lite" (opened from a list),
     // so fetch the full user whenever the wallpaper is missing.
     let alive = true;

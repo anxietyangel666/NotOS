@@ -165,6 +165,8 @@ export type MessengerMessage = {
   reactions: GroupMessageReaction[];
   replyTo: MessageReplySnippet | null;
   linkPreview?: LinkPreview | null;
+  // Disappearing message: when the server will delete it.
+  expiresAt?: string | null;
   // Set while the message is waiting for its scheduled delivery time.
   scheduledAt?: string | null;
   // Parked until the recipient comes online.

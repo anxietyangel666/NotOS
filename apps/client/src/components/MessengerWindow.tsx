@@ -173,6 +173,48 @@ const AI_ASSISTANT_AVATAR = assetUrl('Icons/ai.png');
 let messengerBootstrapCache: { token: string; payload: MessengerBootstrapPayload; loadedAt: number } | null = null;
 const dmThreadCache = new Map<string, MessengerMessage[]>();
 const dmThreadCacheLoadedAt = new Map<string, number>();
+
+// ── DM thread disk persistence ──
+// Mirrors the group-chat approach: the last messages of each conversation are
+// snapshotted to localStorage so a cold app start paints the thread instantly
+// and revalidates in the background. Messages with inline data: media (voice
+// notes, base64 images), pending sends and disappearing messages are excluded.
+const DM_THREAD_STORAGE_PREFIX = 'notoc.dmThread.';
+const DM_THREAD_MAX_MESSAGES = 30;
+const DM_THREAD_MAX_BYTES = 300_000;
+
+function dmThreadHasInlineMedia(message: MessengerMessage) {
+  if (message.imageData?.startsWith('data:')) return true;
+  return (message.mediaItems ?? []).some((item) => item.dataUrl.startsWith('data:'));
+}
+
+function hydrateDmThread(cacheKey: string): MessengerMessage[] | undefined {
+  const inMemory = dmThreadCache.get(cacheKey);
+  if (inMemory) return inMemory;
+  try {
+    const raw = localStorage.getItem(DM_THREAD_STORAGE_PREFIX + cacheKey);
+    if (!raw) return undefined;
+    const messages = JSON.parse(raw) as MessengerMessage[];
+    if (Array.isArray(messages) && messages.length > 0) {
+      dmThreadCache.set(cacheKey, messages);
+      return messages;
+    }
+  } catch { /* corrupt snapshot — cold start as before */ }
+  return undefined;
+}
+
+function persistDmThread(cacheKey: string, messages: MessengerMessage[]) {
+  try {
+    const list = messages
+      .slice(-DM_THREAD_MAX_MESSAGES)
+      .filter((message) => !message.pending && !message.expiresAt && !dmThreadHasInlineMedia(message));
+    if (list.length === 0) return;
+    const payload = JSON.stringify(list);
+    if (payload.length <= DM_THREAD_MAX_BYTES) {
+      localStorage.setItem(DM_THREAD_STORAGE_PREFIX + cacheKey, payload);
+    }
+  } catch { /* quota exceeded — skip */ }
+}
 const dmBlockStateCache = new Map<string, { state: { blocked: boolean; blockedMe: boolean }; loadedAt: number }>();
 const CHAT_SKELETON_ROWS = [
   { width: 68, extra: 42 },
@@ -1029,6 +1071,18 @@ export function MessengerWindow({
     setBookmarksViewOpen(false);
     setPollModalOpen(false);
   }, [selectedUser?.id, selectedGroup?.id, activeView]);
+
+  // Mirror the open thread into the session cache and (debounced) into the
+  // localStorage snapshot, so both stay fresh from every update path — initial
+  // load, socket pushes, edits, deletions.
+  const dmThreadPersistTimerRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!selectedUser || isAiAssistantUserId(selectedUser.id) || messages.length === 0) return;
+    const cacheKey = dmCacheKey(currentUser.id, selectedUser.id);
+    messageCacheRef.current.set(cacheKey, messages);
+    if (dmThreadPersistTimerRef.current) window.clearTimeout(dmThreadPersistTimerRef.current);
+    dmThreadPersistTimerRef.current = window.setTimeout(() => persistDmThread(cacheKey, messages), 1200);
+  }, [messages, selectedUser?.id, currentUser.id]);
 
   // Load the pending scheduled messages once per session.
   useEffect(() => {
@@ -2133,8 +2187,9 @@ export function MessengerWindow({
         .catch(() => undefined);
     }
     // Show the cached thread immediately (if any) to avoid a visible empty
-    // state while the latest messages are fetched in the background.
-    const cached = messageCacheRef.current.get(cacheKey);
+    // state while the latest messages are fetched in the background. Cold
+    // starts additionally hydrate the snapshot persisted to localStorage.
+    const cached = hydrateDmThread(cacheKey);
     setMessages(cached ?? []);
     // Only show skeleton placeholders when there is no cached thread to display.
     setThreadLoading(!cached);

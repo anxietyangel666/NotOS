@@ -60,6 +60,15 @@ export function clearCachedCurrentUser(): void {
   }
 }
 
+/**
+ * Return the cached user even when the entry has expired. Used to paint
+ * heavy fields (profile wallpaper) instantly while a fresh fetch runs —
+ * a stale wallpaper beats an empty one.
+ */
+export function getCachedUser(id: string): PublicUser | null {
+  return cache.get(id)?.user ?? null;
+}
+
 /** Remove a user from the cache (e.g. after `desktop:userChanged`). */
 export function invalidateUser(id: string): void {
   cache.delete(id);

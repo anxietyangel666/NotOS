@@ -29,6 +29,38 @@ type DesktopWallProps = {
 
 const WALL_CACHE_TTL_MS = 45_000;
 const wallCache = new Map<string, { messages: DesktopWallMessage[]; hasMore: boolean; loadedAt: number }>();
+
+// Disk snapshot of the wall so a cold app start paints instantly and
+// revalidates in the background (loadedAt: 0 marks the entry as stale).
+const WALL_STORAGE_PREFIX = 'notoc.wallCache.';
+const WALL_STORAGE_MAX_BYTES = 300_000;
+
+function hydrateWallCache(ownerId: string) {
+  const inMemory = wallCache.get(ownerId);
+  if (inMemory) return inMemory;
+  try {
+    const raw = localStorage.getItem(WALL_STORAGE_PREFIX + ownerId);
+    if (!raw) return undefined;
+    const data = JSON.parse(raw) as { messages: DesktopWallMessage[]; hasMore: boolean };
+    if (Array.isArray(data.messages) && data.messages.length > 0) {
+      const entry = { messages: data.messages, hasMore: Boolean(data.hasMore), loadedAt: 0 };
+      wallCache.set(ownerId, entry);
+      return entry;
+    }
+  } catch { /* corrupt snapshot */ }
+  return undefined;
+}
+
+function persistWallCache(ownerId: string) {
+  const entry = wallCache.get(ownerId);
+  if (!entry || entry.messages.length === 0) return;
+  try {
+    const payload = JSON.stringify({ messages: entry.messages.slice(0, 12), hasMore: entry.hasMore });
+    if (payload.length <= WALL_STORAGE_MAX_BYTES) {
+      localStorage.setItem(WALL_STORAGE_PREFIX + ownerId, payload);
+    }
+  } catch { /* quota exceeded */ }
+}
 const WALL_URL_RE = /https?:\/\/[^\s<>"')]+/gi;
 
 function formatWallTime(value: string, language: Language) {
@@ -56,7 +88,7 @@ export function DesktopWall({ token, language, owner, currentUser, onOpenProfile
   const listRef = useRef<HTMLDivElement | null>(null);
   const emojiAnchorRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<EmojiInlineInputHandle | null>(null);
-  const cachedWall = wallCache.get(owner.id);
+  const cachedWall = hydrateWallCache(owner.id);
   const [messages, setMessages] = useState<DesktopWallMessage[]>(() => cachedWall?.messages ?? []);
   const [draft, setDraft] = useState('');
   const [error, setError] = useState('');
@@ -133,7 +165,7 @@ export function DesktopWall({ token, language, owner, currentUser, onOpenProfile
   useEffect(() => {
     let alive = true;
     let loadTimer: number | null = null;
-    const cached = wallCache.get(owner.id);
+    const cached = hydrateWallCache(owner.id);
     if (cached) {
       setMessages(cached.messages);
       setHasMore(cached.hasMore);
@@ -149,6 +181,7 @@ export function DesktopWall({ token, language, owner, currentUser, onOpenProfile
           .then((payload) => {
             if (!alive) return;
             wallCache.set(owner.id, { messages: payload.messages, hasMore: payload.hasMore, loadedAt: Date.now() });
+            persistWallCache(owner.id);
             setMessages(payload.messages);
             setHasMore(payload.hasMore);
           })
