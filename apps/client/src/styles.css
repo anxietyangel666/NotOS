@@ -23751,3 +23751,21 @@ div.settings-music-row {
   .die3d { transform: rotateX(var(--fx)) rotateY(var(--fy)); }
   .coin3d { transform: rotateY(var(--fy)); }
 }
+
+/* Root message image inside the thread panel */
+.thread-panel-root-image {
+  display: block;
+  padding: 0;
+  margin: 4px 0 2px;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  max-width: 180px;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.thread-panel-root-image img {
+  display: block;
+  width: 100%;
+  border-radius: 8px;
+}

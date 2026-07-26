@@ -1977,8 +1977,12 @@ export function createGroupRouter(io: Server) {
       const root = rootResult.rows[0];
       if (!root || !root.channel_id) throw new HttpError(404, 'Message not found', 'MESSAGE_NOT_FOUND');
       if (root.thread_root_id) throw new HttpError(400, 'Threads cannot be nested', 'THREAD_NESTED');
-      await requireChannelPermission(groupId, root.channel_id, req.auth.userId, 'ViewChannel', 'CHANNEL_VIEW_FORBIDDEN');
-      await requireChannelPermission(groupId, root.channel_id, req.auth.userId, 'SendMessages', 'GROUP_SEND_FORBIDDEN');
+      const { channel } = await requireChannelPermission(groupId, root.channel_id, req.auth.userId, 'ViewChannel', 'CHANNEL_VIEW_FORBIDDEN');
+      // Feed posts double as comment threads: publishing in a feed channel is
+      // admin-only, but any member who can view the feed may reply in-thread.
+      if (channel.type !== 'feed') {
+        await requireChannelPermission(groupId, root.channel_id, req.auth.userId, 'SendMessages', 'GROUP_SEND_FORBIDDEN');
+      }
 
       const message = await createGroupMessage(
         req.auth.userId, groupId, root.channel_id, input.body,

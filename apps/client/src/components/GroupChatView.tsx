@@ -3317,7 +3317,16 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
                 <img src={knownSenders.get(threadViewRoot.senderId)?.avatarData ?? ''} alt="" />
                 <div className="thread-panel-root-text">
                   <span className="thread-panel-author">{senderName(threadViewRoot.senderId)}</span>
-                  <span className="thread-panel-body">{threadViewRoot.body ? <MessageText text={threadViewRoot.body} /> : (threadViewRoot.imageData ? '📷' : '')}</span>
+                  {threadViewRoot.imageData ? (
+                    <button
+                      type="button"
+                      className="thread-panel-root-image"
+                      onClick={() => openImageViewer(threadViewRoot.imageData ?? '', threadViewRoot.imageName ?? '')}
+                    >
+                      <img src={threadViewRoot.imageData} alt="" loading="lazy" decoding="async" />
+                    </button>
+                  ) : null}
+                  {threadViewRoot.body ? <span className="thread-panel-body"><MessageText text={threadViewRoot.body} /></span> : null}
                 </div>
               </div>
             ) : null}
@@ -3768,8 +3777,10 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
                   {!message.deletedAt && isFeedPost ? (
                     <div className="feed-post-footer">
                       {activeChannelObj?.type === 'feed' ? (
-                      <button type="button" className="feed-comment-button" onClick={() => commentOnFeedPost(message)}>
-                        {language === 'ru' ? 'Оставить комментарий' : 'Leave a comment'}
+                      <button type="button" className="feed-comment-button" onClick={() => openThreadView(message)}>
+                        {(message.threadCount ?? 0) > 0
+                          ? `${language === 'ru' ? 'Комментарии' : language === 'uk' ? 'Коментарі' : 'Comments'} (${message.threadCount})`
+                          : (language === 'ru' ? 'Оставить комментарий' : language === 'uk' ? 'Залишити коментар' : 'Leave a comment')}
                       </button>
                       ) : <span />}
                       <span className="feed-post-stats">
@@ -4220,7 +4231,7 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
               <MenuReplyIcon />
             </button>
           ) : null}
-          {!messageMenu.message.deletedAt && !messageMenu.message.threadRootId && activeChannelObj?.type === 'text' ? (
+          {!messageMenu.message.deletedAt && !messageMenu.message.threadRootId && (activeChannelObj?.type === 'text' || activeChannelObj?.type === 'feed') ? (
             <button type="button" className="context-menu-action" onClick={() => { openThreadView(messageMenu.message); setMessageMenu(null); }}>
               <span className="context-menu-action-text">{t(language, 'replyInThread')}</span>
               <MenuReplyIcon />
