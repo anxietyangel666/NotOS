@@ -50,6 +50,79 @@ export function getGroupCache(groupId: string): GroupDataCacheEntry {
   return entry;
 }
 
+// ── Disk persistence ─────────────────────────────────────────────────────────
+// The Map above only survives within one app session, so the first group open
+// after a restart flashed empty while two sequential requests ran. Persist the
+// light parts (channels, folders, last messages of the active channel) so a
+// cold open paints instantly and revalidates in the background, matching the
+// DM experience. Members/roles are NOT persisted — their base64 avatars are
+// too heavy for localStorage.
+const GROUP_CACHE_STORAGE_PREFIX = 'notoc.groupCache.';
+const GROUP_CACHE_MAX_BYTES = 400_000;
+const GROUP_CACHE_MAX_MESSAGES = 30;
+
+type PersistedGroupCache = {
+  channels: GroupChannel[];
+  folders: GroupFolder[];
+  activeChannel: string | null;
+  messages: Record<string, GroupMessage[]>;
+  savedAt: number;
+};
+
+function groupCacheStorageKey(userId: string, groupId: string) {
+  return `${GROUP_CACHE_STORAGE_PREFIX}${userId}.${groupId}`;
+}
+
+// Inline data: URLs (voice notes, old base64 images) would blow the quota; a
+// message carrying them is simply left out of the snapshot.
+function hasInlineDataMedia(message: GroupMessage) {
+  if (message.imageData?.startsWith('data:')) return true;
+  return (message.mediaItems ?? []).some((item) => item.dataUrl.startsWith('data:'));
+}
+
+// Fills the session cache entry from disk when it is still empty. Leaves
+// bootstrapLoadedAt at 0 so the network revalidates immediately.
+export function hydrateGroupCache(userId: string, groupId: string): GroupDataCacheEntry {
+  const entry = getGroupCache(groupId);
+  if (entry.channels.length > 0) return entry;
+  try {
+    const raw = localStorage.getItem(groupCacheStorageKey(userId, groupId));
+    if (!raw) return entry;
+    const data = JSON.parse(raw) as PersistedGroupCache;
+    entry.channels = Array.isArray(data.channels) ? data.channels : [];
+    entry.folders = Array.isArray(data.folders) ? data.folders : [];
+    entry.activeChannel = data.activeChannel ?? null;
+    for (const [channelId, messages] of Object.entries(data.messages ?? {})) {
+      if (Array.isArray(messages) && messages.length > 0) entry.messages.set(channelId, messages);
+    }
+  } catch { /* corrupt snapshot — cold start as before */ }
+  return entry;
+}
+
+export function persistGroupCache(userId: string, groupId: string) {
+  const entry = groupDataCache.get(groupId);
+  if (!entry || entry.channels.length === 0) return;
+  try {
+    const messages: Record<string, GroupMessage[]> = {};
+    if (entry.activeChannel) {
+      const list = (entry.messages.get(entry.activeChannel) ?? [])
+        .slice(-GROUP_CACHE_MAX_MESSAGES)
+        .filter((message) => !message.pending && !hasInlineDataMedia(message));
+      if (list.length > 0) messages[entry.activeChannel] = list;
+    }
+    const payload = JSON.stringify({
+      channels: entry.channels,
+      folders: entry.folders,
+      activeChannel: entry.activeChannel,
+      messages,
+      savedAt: Date.now()
+    } satisfies PersistedGroupCache);
+    if (payload.length <= GROUP_CACHE_MAX_BYTES) {
+      localStorage.setItem(groupCacheStorageKey(userId, groupId), payload);
+    }
+  } catch { /* quota exceeded — skip silently */ }
+}
+
 function panelWidthKey(panel: 'channel' | 'member') {
   return `notoc.groupChat.${panel}PanelWidth`;
 }

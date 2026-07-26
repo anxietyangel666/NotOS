@@ -78,7 +78,9 @@ import {
   GROUP_MESSAGES_CACHE_TTL_MS,
   getGroupCache,
   groupDataCache,
+  hydrateGroupCache,
   loadPanelWidth,
+  persistGroupCache,
   savePanelWidth
 } from './group-chat/group-cache';
 import { GroupChatGifAttachment } from './group-chat/GroupChatGifAttachment';
@@ -944,9 +946,13 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
   // Load initial data
   useEffect(() => {
     // Seed from the session cache so a previously-opened group renders instantly
-    // instead of flashing empty for the 1-2s the network takes. For a group we
-    // have never opened, the cache is empty (renders blank, same as before).
-    const cache = getGroupCache(group.id);
+    // instead of flashing empty for the 1-2s the network takes. A cold start
+    // additionally hydrates from the localStorage snapshot, so even the first
+    // open after an app restart paints channels and messages immediately.
+    const cache = hydrateGroupCache(currentUser.id, group.id);
+    // Nothing to paint at all (never opened this group): show the skeleton
+    // instead of an empty thread while bootstrap + messages load.
+    if (cache.channels.length === 0) setThreadLoading(true);
     setChannels(cache.channels);
     setRoles(cache.roles);
     setMembers(cache.members);
@@ -1199,7 +1205,14 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
 
   // Mirror live state into the session cache so socket-driven updates (new
   // messages, channel/member/role changes) are reflected the next time this
-  // group is reopened, keeping the instant-render cache fresh.
+  // group is reopened, keeping the instant-render cache fresh. A debounced
+  // localStorage snapshot makes the same data survive app restarts.
+  const persistCacheTimerRef = useRef<number | null>(null);
+  function scheduleGroupCachePersist() {
+    if (persistCacheTimerRef.current) window.clearTimeout(persistCacheTimerRef.current);
+    persistCacheTimerRef.current = window.setTimeout(() => persistGroupCache(currentUser.id, group.id), 1200);
+  }
+
   useEffect(() => {
     const entry = getGroupCache(group.id);
     entry.channels = channels;
@@ -1207,6 +1220,8 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
     entry.members = members;
     entry.folders = folders;
     channelsRef.current = channels;
+    if (channels.length > 0) scheduleGroupCachePersist();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [group.id, channels, roles, members, folders]);
 
   useEffect(() => {
@@ -1214,6 +1229,8 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
     const entry = getGroupCache(group.id);
     entry.activeChannel = activeChannel;
     entry.messages.set(activeChannel, messages);
+    if (messages.length > 0) scheduleGroupCachePersist();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [group.id, activeChannel, messages]);
 
   useEffect(() => {
