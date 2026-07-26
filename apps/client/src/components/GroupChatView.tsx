@@ -3229,8 +3229,8 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
               <button
                 className={channelSummary.open ? 'messenger-call-button active' : 'messenger-call-button'}
                 type="button"
-                title={language === 'ru' ? 'Что я пропустил? (AI)' : language === 'uk' ? 'Що я пропустив? (AI)' : 'What did I miss? (AI)'}
-                aria-label={language === 'ru' ? 'Что я пропустил?' : 'What did I miss?'}
+                title={t(language, 'whatDidIMiss')}
+                aria-label={t(language, 'whatDidIMiss')}
                 onClick={() => {
                   if (channelSummary.open) {
                     setChannelSummary({ open: false, loading: false, text: '', error: '' });
@@ -3241,14 +3241,14 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
                     .then((result) => setChannelSummary({
                       open: true,
                       loading: false,
-                      text: result.summary || (language === 'ru' ? 'Пока нечего пересказывать' : 'Nothing to summarize yet'),
+                      text: result.summary || t(language, 'recapEmpty'),
                       error: ''
                     }))
                     .catch(() => setChannelSummary({
                       open: true,
                       loading: false,
                       text: '',
-                      error: language === 'ru' ? 'Не удалось получить пересказ' : 'Failed to summarize'
+                      error: t(language, 'recapFailed')
                     }));
                 }}
               >
@@ -3287,7 +3287,7 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
         {threadViewRootId ? (
           <div className="thread-panel">
             <div className="thread-panel-head">
-              <strong>{language === 'ru' ? 'Ветка' : language === 'uk' ? 'Гілка' : 'Thread'}</strong>
+              <strong>{t(language, 'thread')}</strong>
               <button type="button" onClick={closeThreadView} aria-label="close">✕</button>
             </div>
             {threadViewRoot ? (
@@ -3301,9 +3301,9 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
             ) : null}
             <div className="thread-panel-messages">
               {threadViewLoading ? (
-                <p className="thread-panel-hint">{language === 'ru' ? 'Загрузка...' : 'Loading...'}</p>
+                <p className="thread-panel-hint">{t(language, 'threadLoading')}</p>
               ) : threadViewMessages.length === 0 ? (
-                <p className="thread-panel-hint">{language === 'ru' ? 'Ответов пока нет — начните ветку' : 'No replies yet — start the thread'}</p>
+                <p className="thread-panel-hint">{t(language, 'threadEmpty')}</p>
               ) : threadViewMessages.map((reply) => (
                 <div key={reply.id} className="thread-panel-message">
                   <img src={knownSenders.get(reply.senderId)?.avatarData ?? ''} alt="" />
@@ -3322,12 +3322,12 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
                 type="text"
                 className="messenger-input"
                 value={threadViewDraft}
-                placeholder={language === 'ru' ? 'Ответить в ветке...' : 'Reply in thread...'}
+                placeholder={t(language, 'threadReplyPlaceholder')}
                 onChange={(event) => setThreadViewDraft(event.target.value)}
                 onKeyDown={(event) => { if (event.key === 'Enter') void sendThreadViewMessage(); }}
               />
               <button type="button" className="primary-action" disabled={!threadViewDraft.trim() || threadViewSending} onClick={() => void sendThreadViewMessage()}>
-                {language === 'ru' ? 'Отпр.' : 'Send'}
+                {t(language, 'sendShort')}
               </button>
             </div>
           </div>
@@ -3335,11 +3335,11 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
         {channelSummary.open ? (
           <div className="channel-summary-panel">
             <div className="channel-summary-head">
-              <strong>{language === 'ru' ? 'Пересказ канала' : language === 'uk' ? 'Переказ каналу' : 'Channel recap'}</strong>
+              <strong>{t(language, 'channelRecap')}</strong>
               <button type="button" onClick={() => setChannelSummary({ open: false, loading: false, text: '', error: '' })} aria-label="close">✕</button>
             </div>
             {channelSummary.loading ? (
-              <p className="channel-summary-loading">{language === 'ru' ? 'AI читает сообщения...' : 'AI is reading the messages...'}</p>
+              <p className="channel-summary-loading">{t(language, 'recapLoading')}</p>
             ) : channelSummary.error ? (
               <p className="channel-summary-error">{channelSummary.error}</p>
             ) : (
@@ -3736,7 +3736,7 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
                   {!message.deletedAt && !isFeedPost && (message.threadCount ?? 0) > 0 ? (
                     <button type="button" className="message-thread-chip" onClick={() => openThreadView(message)}>
                       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-                      {message.threadCount} {language === 'ru' ? (message.threadCount === 1 ? 'ответ' : (message.threadCount ?? 0) < 5 ? 'ответа' : 'ответов') : ((message.threadCount ?? 0) === 1 ? 'reply' : 'replies')}
+                      {message.threadCount} {t(language, message.threadCount === 1 ? 'threadReplyOne' : (message.threadCount ?? 0) < 5 ? 'threadReplyFew' : 'threadReplyMany')}
                     </button>
                   ) : null}
                   {!message.deletedAt && isFeedPost ? (
@@ -4170,7 +4170,7 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
           ) : null}
           {!messageMenu.message.deletedAt && !messageMenu.message.threadRootId && activeChannelObj?.type === 'text' ? (
             <button type="button" className="context-menu-action" onClick={() => { openThreadView(messageMenu.message); setMessageMenu(null); }}>
-              <span className="context-menu-action-text">{language === 'ru' ? 'Ответить в ветке' : language === 'uk' ? 'Відповісти в гілці' : 'Reply in thread'}</span>
+              <span className="context-menu-action-text">{t(language, 'replyInThread')}</span>
               <MenuReplyIcon />
             </button>
           ) : null}

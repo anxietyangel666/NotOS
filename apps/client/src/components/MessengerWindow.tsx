@@ -394,21 +394,17 @@ function parseChatTtlMarker(body: string): number | null {
 }
 
 function chatTtlLabel(seconds: number, language: Language) {
-  if (seconds >= 604800) return language === 'ru' ? '7 дней' : '7 days';
-  if (seconds >= 86400) return language === 'ru' ? '24 часа' : '24 hours';
-  if (seconds >= 3600) return language === 'ru' ? '1 час' : '1 hour';
+  if (seconds >= 604800) return t(language, 'ttlWeek');
+  if (seconds >= 86400) return t(language, 'ttlDay');
+  if (seconds >= 3600) return t(language, 'ttlOneHour');
   return '';
 }
 
 function chatTtlEventText(seconds: number, actorName: string, language: Language) {
   if (seconds > 0) {
-    return language === 'ru'
-      ? `${actorName} включил(а) исчезающие сообщения: ${chatTtlLabel(seconds, language)}`
-      : `${actorName} enabled disappearing messages: ${chatTtlLabel(seconds, language)}`;
+    return t(language, 'ttlEnabledBy', { name: actorName, duration: chatTtlLabel(seconds, language) });
   }
-  return language === 'ru'
-    ? `${actorName} отключил(а) исчезающие сообщения`
-    : `${actorName} turned off disappearing messages`;
+  return t(language, 'ttlDisabledBy', { name: actorName });
 }
 
 function chatBackgroundEventText(action: 'set' | 'clear', actorName: string, language: Language) {
@@ -1683,7 +1679,7 @@ export function MessengerWindow({
       window.dispatchEvent(new CustomEvent('notoc:message-reminder', {
         detail: {
           message: payload.message,
-          title: language === 'ru' ? 'Напоминание о сообщении' : 'Message reminder',
+          title: t(language, 'messageReminder'),
           body: payload.message.body
         }
       }));
@@ -3162,9 +3158,7 @@ export function MessengerWindow({
     if (ttlMarker !== null) {
       return {
         kind: 'plain',
-        value: language === 'ru'
-          ? (ttlMarker > 0 ? '⏱ Исчезающие сообщения включены' : '⏱ Исчезающие сообщения выключены')
-          : (ttlMarker > 0 ? '⏱ Disappearing messages on' : '⏱ Disappearing messages off')
+        value: `⏱ ${t(language, ttlMarker > 0 ? 'ttlOnPreview' : 'ttlOffPreview')}`
       };
     }
     const backgroundAction = parseChatBackgroundMarker(message.body);
@@ -3742,8 +3736,8 @@ export function MessengerWindow({
               <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 2h12a2 2 0 0 1 2 2v18l-8-4.5L4 22V4a2 2 0 0 1 2-2z"/></svg>
             </span>
             <span className="messenger-conversation-text">
-              <strong>{language === 'ru' ? 'Избранное' : language === 'uk' ? 'Збережене' : 'Saved Messages'}</strong>
-              <small>{language === 'ru' ? 'Заметки и файлы для себя' : language === 'uk' ? 'Нотатки та файли для себе' : 'Notes and files for yourself'}</small>
+              <strong>{t(language, 'savedMessages')}</strong>
+              <small>{t(language, 'savedMessagesHint')}</small>
             </span>
           </button>
           <div className="messenger-search-box messenger-direct-message-search">
@@ -3752,7 +3746,7 @@ export function MessengerWindow({
               type="text"
               value={globalSearchOpen ? globalSearchQuery : directMessageFilter}
               placeholder={globalSearchOpen
-                ? (language === 'ru' ? 'Поиск по всем перепискам' : language === 'uk' ? 'Пошук за всіма чатами' : 'Search all conversations')
+                ? t(language, 'searchAllConversations')
                 : t(language, 'search')}
               aria-label={t(language, 'search')}
               onChange={(event) => (globalSearchOpen ? setGlobalSearchQuery(event.target.value) : setDirectMessageFilter(event.target.value))}
@@ -3768,8 +3762,8 @@ export function MessengerWindow({
             <button
               type="button"
               className={globalSearchOpen ? 'dm-global-search-toggle active' : 'dm-global-search-toggle'}
-              title={language === 'ru' ? 'Искать во всех переписках' : 'Search across all conversations'}
-              aria-label={language === 'ru' ? 'Искать во всех переписках' : 'Search across all conversations'}
+              title={t(language, 'searchAllConversationsToggle')}
+              aria-label={t(language, 'searchAllConversationsToggle')}
               onClick={() => {
                 setGlobalSearchOpen((open) => !open);
                 setGlobalSearchQuery('');
@@ -3788,11 +3782,7 @@ export function MessengerWindow({
                   className={globalSearchKind === kind ? 'active' : ''}
                   onClick={() => setGlobalSearchKind(kind)}
                 >
-                  {kind === 'all'
-                    ? (language === 'ru' ? 'Все' : 'All')
-                    : kind === 'media'
-                      ? (language === 'ru' ? 'Фото' : 'Media')
-                      : (language === 'ru' ? 'Ссылки' : 'Links')}
+                  {t(language, kind === 'all' ? 'filterAll' : kind === 'media' ? 'filterMedia' : 'filterLinks')}
                 </button>
               ))}
             </div>
@@ -3805,11 +3795,7 @@ export function MessengerWindow({
                   className={dmListFilter === filter ? 'active' : ''}
                   onClick={() => setDmListFilter(filter)}
                 >
-                  {filter === 'all'
-                    ? (language === 'ru' ? 'Все' : 'All')
-                    : filter === 'unread'
-                      ? (language === 'ru' ? 'Непрочитанные' : 'Unread')
-                      : (language === 'ru' ? 'Архив' : 'Archive')}
+                  {t(language, filter === 'all' ? 'filterAll' : filter === 'unread' ? 'filterUnread' : 'filterArchived')}
                 </button>
               ))}
             </div>
@@ -3822,7 +3808,7 @@ export function MessengerWindow({
                   <div className="explorer-empty">{t(language, 'noMessages')}</div>
                 ) : null}
                 {!globalSearchLoading && globalSearchQuery.trim().length < 2 ? (
-                  <div className="explorer-empty">{language === 'ru' ? 'Введите минимум 2 символа' : 'Type at least 2 characters'}</div>
+                  <div className="explorer-empty">{t(language, 'typeAtLeastTwoChars')}</div>
                 ) : null}
                 {globalSearchResults.map((result) => (
                   <button
@@ -3875,8 +3861,8 @@ export function MessengerWindow({
                     <span
                       className="presence-activity-badge"
                       title={presenceActivities[conversation.user.id] === 'voice'
-                        ? (language === 'ru' ? 'В голосовом канале' : 'In a voice channel')
-                        : (language === 'ru' ? 'Смотрит Watch Together' : 'Watching together')}
+                        ? t(language, 'activityInVoice')
+                        : t(language, 'activityWatching')}
                       aria-hidden="true"
                     >
                       {presenceActivities[conversation.user.id] === 'voice' ? '🎧' : '📺'}
@@ -4087,16 +4073,12 @@ export function MessengerWindow({
                         <span aria-hidden="true">←</span>
                         {t(language, 'back')}
                       </button>
-                      <strong>{language === 'ru' ? 'Запланированные сообщения' : language === 'uk' ? 'Заплановані повідомлення' : 'Scheduled messages'}</strong>
+                      <strong>{t(language, 'scheduledMessages')}</strong>
                       <span className="scheduled-view-count">{scheduledForSelectedUser.length}</span>
                     </div>
                     {scheduledForSelectedUser.length === 0 ? (
                       <p className="scheduled-view-empty">
-                        {language === 'ru'
-                          ? 'Здесь появятся сообщения, для которых вы установили таймер.'
-                          : language === 'uk'
-                            ? 'Тут зʼявляться повідомлення з таймером.'
-                            : 'Messages you schedule will show up here.'}
+                        {t(language, 'scheduledEmpty')}
                       </p>
                     ) : null}
                     {scheduledForSelectedUser.map((message) => (
@@ -4104,7 +4086,7 @@ export function MessengerWindow({
                         <div className="scheduled-view-when">
                           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
                           {message.awaitingOnline
-                            ? (language === 'ru' ? 'Когда собеседник будет в сети' : language === 'uk' ? 'Коли співрозмовник буде онлайн' : 'When they come online')
+                            ? t(language, 'whenTheyComeOnline')
                             : message.scheduledAt
                               ? `${formatMessageDate(message.scheduledAt, language)}, ${formatMessageTime(message.scheduledAt, language)}`
                               : ''}
@@ -4142,7 +4124,7 @@ export function MessengerWindow({
                               <time className="message-time">
                                 {message.scheduledAt && !message.awaitingOnline
                                   ? formatMessageTime(message.scheduledAt, language)
-                                  : (language === 'ru' ? 'в сети' : 'online')}
+                                  : t(language, 'activityOnlineShort')}
                               </time>
                             </div>
                             {message.imageData ? (
@@ -4425,7 +4407,7 @@ export function MessengerWindow({
                             ) : message.viewOnce && (message.viewOnceSeenAt || (!message.imageData && !openedViewOnce[message.id])) ? (
                               <div className="view-once-placeholder">
                                 <span aria-hidden="true">👁</span>
-                                {language === 'ru' ? 'Фото просмотрено' : language === 'uk' ? 'Фото переглянуто' : 'Photo viewed'}
+                                {t(language, 'photoViewed')}
                               </div>
                             ) : message.viewOnce && message.senderId !== currentUser.id && !openedViewOnce[message.id] ? (
                               <button
@@ -4442,7 +4424,7 @@ export function MessengerWindow({
                                 }}
                               >
                                 <span aria-hidden="true">👁</span>
-                                {language === 'ru' ? 'Открыть один раз' : 'Open once'}
+                                {t(language, 'openOnce')}
                               </button>
                             ) : message.imageData && !forwarded ? (
                               <button
@@ -4671,7 +4653,7 @@ export function MessengerWindow({
                     <MenuReplyIcon />
                   </button>
                   <div className="context-menu-remind">
-                    <span className="context-menu-remind-label">{language === 'ru' ? 'Напомнить через' : 'Remind me in'}</span>
+                    <span className="context-menu-remind-label">{t(language, 'remindMeIn')}</span>
                     <div className="context-menu-remind-options">
                       {([[3600, '1h'], [10800, '3h'], [86400, '24h']] as const).map(([seconds, label]) => (
                         <button
@@ -4752,9 +4734,9 @@ export function MessengerWindow({
                     </button>
                   ) : null}
                   <div className="context-menu-ttl">
-                    <span className="context-menu-ttl-label">{language === 'ru' ? 'Таймер сообщений' : 'Message timer'}</span>
+                    <span className="context-menu-ttl-label">{t(language, 'messageTimer')}</span>
                     <div className="context-menu-ttl-options">
-                      {([[0, language === 'ru' ? 'Выкл' : 'Off'], [3600, '1h'], [86400, '24h'], [604800, '7d']] as const).map(([seconds, label]) => (
+                      {([[0, t(language, 'timerOff')], [3600, '1h'], [86400, '24h'], [604800, '7d']] as const).map(([seconds, label]) => (
                         <button
                           key={seconds}
                           type="button"
@@ -4812,7 +4794,7 @@ export function MessengerWindow({
                         }}
                       >
                         <span className="context-menu-action-text">
-                          {language === 'ru' ? 'Установить таймер' : language === 'uk' ? 'Встановити таймер' : 'Set timer'}
+                          {t(language, 'setTimer')}
                         </span>
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
                       </button>
@@ -4825,7 +4807,7 @@ export function MessengerWindow({
                         }}
                       >
                         <span className="context-menu-action-text">
-                          {language === 'ru' ? 'Отправить, когда будет в сети' : language === 'uk' ? 'Надіслати, коли буде онлайн' : 'Send when they are online'}
+                          {t(language, 'sendWhenOnline')}
                         </span>
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor" stroke="none"/><path d="M5.6 5.6a9 9 0 0 0 0 12.8M18.4 5.6a9 9 0 0 1 0 12.8"/></svg>
                       </button>
@@ -4838,13 +4820,13 @@ export function MessengerWindow({
               {scheduleModalOpen && selectedUser ? (
                 <div className="messenger-inline-modal schedule-modal-layer" onClick={() => setScheduleModalOpen(false)}>
                   <div className="schedule-modal" onClick={(event) => event.stopPropagation()}>
-                    <h3>{language === 'ru' ? 'Когда отправить?' : language === 'uk' ? 'Коли надіслати?' : 'When to send?'}</h3>
+                    <h3>{t(language, 'whenToSend')}</h3>
                     <div className="schedule-modal-options">
                       {([
-                        ['1h', language === 'ru' ? 'Через час' : language === 'uk' ? 'Через годину' : 'In 1 hour'],
-                        ['3h', language === 'ru' ? 'Через 3 часа' : language === 'uk' ? 'Через 3 години' : 'In 3 hours'],
-                        ['tomorrow', language === 'ru' ? 'Завтра утром' : language === 'uk' ? 'Завтра вранці' : 'Tomorrow morning'],
-                        ['custom', language === 'ru' ? 'Своё время' : language === 'uk' ? 'Свій час' : 'Custom time']
+                        ['1h', t(language, 'sendInOneHour')],
+                        ['3h', t(language, 'sendInThreeHours')],
+                        ['tomorrow', t(language, 'sendTomorrowMorning')],
+                        ['custom', t(language, 'sendCustomTime')]
                       ] as const).map(([value, label]) => (
                         <label key={value} className={scheduleChoice === value ? 'schedule-modal-option active' : 'schedule-modal-option'}>
                           <input
@@ -4887,7 +4869,7 @@ export function MessengerWindow({
                             if (!Number.isNaN(parsed.getTime())) when = parsed;
                           }
                           if (!when || when.getTime() - Date.now() < 30_000) {
-                            setError(language === 'ru' ? 'Выберите время в будущем' : 'Pick a time in the future');
+                            setError(t(language, 'pickFutureTime'));
                             return;
                           }
                           setScheduleModalOpen(false);
@@ -4997,8 +4979,8 @@ export function MessengerWindow({
                     <button
                       className={viewOnceArmed ? 'emoji-toggle inline dm-view-once-toggle active' : 'emoji-toggle inline dm-view-once-toggle'}
                       type="button"
-                      title={language === 'ru' ? 'Просмотр один раз' : 'View once'}
-                      aria-label={language === 'ru' ? 'Просмотр один раз' : 'View once'}
+                      title={t(language, 'viewOnce')}
+                      aria-label={t(language, 'viewOnce')}
                       onMouseDown={(event) => event.stopPropagation()}
                       onClick={(event) => { event.stopPropagation(); setViewOnceArmed((value) => !value); }}
                     >
@@ -5081,8 +5063,8 @@ export function MessengerWindow({
                     <button
                       className={scheduledViewOpen ? 'emoji-toggle inline dm-scheduled-toggle active' : 'emoji-toggle inline dm-scheduled-toggle'}
                       type="button"
-                      title={language === 'ru' ? 'Запланированные сообщения' : language === 'uk' ? 'Заплановані повідомлення' : 'Scheduled messages'}
-                      aria-label={language === 'ru' ? 'Запланированные сообщения' : 'Scheduled messages'}
+                      title={t(language, 'scheduledMessages')}
+                      aria-label={t(language, 'scheduledMessages')}
                       onMouseDown={(event) => event.stopPropagation()}
                       onClick={(event) => { event.stopPropagation(); setScheduledViewOpen((open) => !open); }}
                     >
@@ -5181,14 +5163,10 @@ export function MessengerWindow({
                 </svg>
               </span>
               <strong className="messenger-empty-title">
-                {language === 'ru' ? 'Выберите чат' : language === 'uk' ? 'Оберіть чат' : 'Select a chat'}
+                {t(language, 'selectChat')}
               </strong>
               <p className="messenger-empty-hint">
-                {language === 'ru'
-                  ? 'Откройте диалог слева, чтобы начать переписку'
-                  : language === 'uk'
-                    ? 'Відкрийте діалог ліворуч, щоб почати листування'
-                    : 'Open a conversation on the left to start messaging'}
+                {t(language, 'selectChatHint')}
               </p>
             </div>
           )}
@@ -5420,8 +5398,8 @@ export function MessengerWindow({
               setUserMenu(null);
             }}>
               {archivedConversations.has(userMenu.user.id)
-                ? (language === 'ru' ? 'Убрать из архива' : 'Unarchive')
-                : (language === 'ru' ? 'В архив' : 'Archive')}
+                ? t(language, 'unarchiveChat')
+                : t(language, 'archiveChat')}
             </button>
             <button type="button" onClick={() => {
               setAutoTranslateChats((prev) => {
@@ -5434,8 +5412,8 @@ export function MessengerWindow({
               setUserMenu(null);
             }}>
               {autoTranslateChats.has(userMenu.user.id)
-                ? (language === 'ru' ? 'Выключить автоперевод' : 'Disable auto-translate')
-                : (language === 'ru' ? 'Автоперевод входящих' : 'Auto-translate incoming')}
+                ? t(language, 'autoTranslateOff')
+                : t(language, 'autoTranslateOn')}
             </button>
           </div>,
           document.body

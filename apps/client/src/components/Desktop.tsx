@@ -1134,8 +1134,8 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
       const detail = (event as CustomEvent<{ title?: string; body?: string }>).detail;
       if (!detail) return;
       pushNotification({
-        title: detail.title ?? (language === 'ru' ? 'Напоминание' : 'Reminder'),
-        message: detail.body || (language === 'ru' ? 'Сообщение' : 'Message')
+        title: detail.title ?? t(language, 'reminder'),
+        message: detail.body || t(language, 'message')
       });
     }
     window.addEventListener('notoc:message-reminder', onMessageReminder);
