@@ -233,6 +233,37 @@ function savePinned(pinned: Set<string>) {
   try { localStorage.setItem(PINNED_KEY, JSON.stringify([...pinned])); } catch { }
 }
 
+// Archived conversations are hidden from the list until they get a new message
+// or the user opens the Archive filter. Stored locally like pinned chats.
+const ARCHIVED_KEY = 'notoc.messenger.archived';
+
+function loadArchived(): Set<string> {
+  try {
+    const raw = localStorage.getItem(ARCHIVED_KEY);
+    return raw ? new Set(JSON.parse(raw) as string[]) : new Set();
+  } catch { return new Set(); }
+}
+
+function saveArchived(archived: Set<string>) {
+  try { localStorage.setItem(ARCHIVED_KEY, JSON.stringify([...archived])); } catch { }
+}
+
+// Per-conversation "translate incoming messages automatically" toggle.
+const AUTO_TRANSLATE_KEY = 'notoc.messenger.autoTranslate';
+
+function loadAutoTranslate(): Set<string> {
+  try {
+    const raw = localStorage.getItem(AUTO_TRANSLATE_KEY);
+    return raw ? new Set(JSON.parse(raw) as string[]) : new Set();
+  } catch { return new Set(); }
+}
+
+function saveAutoTranslate(ids: Set<string>) {
+  try { localStorage.setItem(AUTO_TRANSLATE_KEY, JSON.stringify([...ids])); } catch { }
+}
+
+type DmListFilter = 'all' | 'unread' | 'archived';
+
 function dmBackgroundsKey(currentUserId: string) {
   return `notoc.messenger.backgrounds.${currentUserId}`;
 }
@@ -729,6 +760,20 @@ export function MessengerWindow({
   const [imageViewer, setImageViewer] = useState<{ items: MediaLightboxItem[]; index: number } | null>(null);
   const [mediaContextMenu, setMediaContextMenu] = useState<{ x: number; y: number; src: string } | null>(null);
   const [pinnedConversations, setPinnedConversations] = useState<Set<string>>(loadPinned);
+  const [archivedConversations, setArchivedConversations] = useState<Set<string>>(loadArchived);
+  const [dmListFilter, setDmListFilter] = useState<DmListFilter>('all');
+  const [autoTranslateChats, setAutoTranslateChats] = useState<Set<string>>(loadAutoTranslate);
+  // Scheduled messages awaiting delivery, plus the compose-time picker state.
+  const [scheduledMessages, setScheduledMessages] = useState<MessengerMessage[]>([]);
+  const [scheduleMenuOpen, setScheduleMenuOpen] = useState(false);
+  const [viewOnceArmed, setViewOnceArmed] = useState(false);
+  const [openedViewOnce, setOpenedViewOnce] = useState<Record<string, ChatMediaItem[]>>({});
+  // Global cross-conversation search.
+  const [globalSearchOpen, setGlobalSearchOpen] = useState(false);
+  const [globalSearchQuery, setGlobalSearchQuery] = useState('');
+  const [globalSearchKind, setGlobalSearchKind] = useState<'all' | 'media' | 'links'>('all');
+  const [globalSearchResults, setGlobalSearchResults] = useState<Array<{ user: PublicUser; message: MessengerMessage }>>([]);
+  const [globalSearchLoading, setGlobalSearchLoading] = useState(false);
   const [revealedSpoilers, setRevealedSpoilers] = useState<string[]>([]);
   // Pin bar cursor: clicking the bar jumps to the current pin and advances.
   const [pinCursor, setPinCursor] = useState(0);
@@ -924,12 +969,90 @@ export function MessengerWindow({
     });
   }, [conversations, pinnedConversations, currentUser.id]);
   const visibleConversations = useMemo(() => {
+    // Archive hides a chat until it has unread messages again, so an archived
+    // conversation that pings you still surfaces in the default list.
+    const byFilter = sortedConversations.filter((conversation) => {
+      const archived = archivedConversations.has(conversation.user.id);
+      if (dmListFilter === 'archived') return archived;
+      if (dmListFilter === 'unread') return conversation.unreadCount > 0;
+      return !archived || conversation.unreadCount > 0;
+    });
     const filter = directMessageFilter.trim().toLocaleLowerCase();
-    if (!filter) return sortedConversations;
-    return sortedConversations.filter((conversation) =>
+    if (!filter) return byFilter;
+    return byFilter.filter((conversation) =>
       conversation.user.nickname.toLocaleLowerCase().includes(filter)
     );
-  }, [directMessageFilter, sortedConversations]);
+  }, [directMessageFilter, sortedConversations, archivedConversations, dmListFilter]);
+
+  // Load the pending scheduled messages once per session.
+  useEffect(() => {
+    api.getScheduledMessages(token)
+      .then((payload) => setScheduledMessages(payload.messages))
+      .catch(() => undefined);
+  }, [token]);
+
+  // Auto-translate: whenever the open conversation has the toggle on, translate
+  // any incoming message we have not translated yet. Results reuse the same
+  // `messageTranslations` map the manual "Translate" action fills.
+  useEffect(() => {
+    if (!selectedUser || !autoTranslateChats.has(selectedUser.id)) return;
+    const pending = messages.filter((message) =>
+      message.senderId !== currentUser.id
+      && !message.deletedAt
+      && message.body.trim()
+      && !messageTranslations[message.id]
+      && !translatingIds.has(message.id)
+    ).slice(-8);
+    if (pending.length === 0) return;
+
+    let alive = true;
+    const target = getSavedTranslateTargetName();
+    setTranslatingIds((prev) => {
+      const next = new Set(prev);
+      pending.forEach((message) => next.add(message.id));
+      return next;
+    });
+    void Promise.all(pending.map(async (message) => {
+      try {
+        const { text } = await api.translateText(token, message.body.trim(), target);
+        if (alive) setMessageTranslations((prev) => ({ ...prev, [message.id]: text }));
+      } catch {
+        // Leave the original text in place on failure.
+      } finally {
+        if (alive) {
+          setTranslatingIds((prev) => {
+            const next = new Set(prev);
+            next.delete(message.id);
+            return next;
+          });
+        }
+      }
+    }));
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages, selectedUser?.id, autoTranslateChats, token, currentUser.id]);
+
+  // Debounced global search across every conversation.
+  useEffect(() => {
+    const query = globalSearchQuery.trim();
+    if (!globalSearchOpen || query.length < 2) {
+      setGlobalSearchResults([]);
+      setGlobalSearchLoading(false);
+      return;
+    }
+    let alive = true;
+    setGlobalSearchLoading(true);
+    const timer = window.setTimeout(() => {
+      api.searchAllMessages(token, query, globalSearchKind)
+        .then((payload) => { if (alive) setGlobalSearchResults(payload.results); })
+        .catch(() => { if (alive) setGlobalSearchResults([]); })
+        .finally(() => { if (alive) setGlobalSearchLoading(false); });
+    }, 300);
+    return () => {
+      alive = false;
+      window.clearTimeout(timer);
+    };
+  }, [globalSearchOpen, globalSearchQuery, globalSearchKind, token]);
 
   const currentNavLocation = useMemo<MessengerNavLocation>(() => ({
     activeView,
@@ -1524,6 +1647,28 @@ export function MessengerWindow({
       setDmTtls((current) => ({ ...current, [payload.userId]: payload.ttlSeconds }));
     }
 
+    function onScheduledCreated(payload: { message: MessengerMessage }) {
+      setScheduledMessages((current) => current.some((m) => m.id === payload.message.id)
+        ? current
+        : [...current, payload.message].sort((a, b) => new Date(a.scheduledAt ?? 0).getTime() - new Date(b.scheduledAt ?? 0).getTime()));
+    }
+
+    function onScheduledSent(payload: { message: MessengerMessage }) {
+      setScheduledMessages((current) => current.filter((m) => m.id !== payload.message.id));
+    }
+
+    function onMessageReminder(payload: { message: MessengerMessage }) {
+      // Surface the reminder as a desktop notification on the same event bus
+      // mentions use, so it works even when the messenger window is closed.
+      window.dispatchEvent(new CustomEvent('notoc:message-reminder', {
+        detail: {
+          message: payload.message,
+          title: language === 'ru' ? 'Напоминание о сообщении' : 'Message reminder',
+          body: payload.message.body
+        }
+      }));
+    }
+
     function onFriendsChanged(payload: FriendsChangedPayload) {
       payload.friends.forEach(cacheUser);
       setFriends(uniqueById(payload.friends));
@@ -1652,6 +1797,9 @@ export function MessengerWindow({
     socket.on('messenger:conversationCleared', onConversationCleared);
     socket.on('messenger:conversationBackgroundChanged', onConversationBackgroundChanged);
     socket.on('messenger:conversationTtlChanged', onConversationTtlChanged);
+    socket.on('messenger:scheduledCreated', onScheduledCreated);
+    socket.on('messenger:scheduledSent', onScheduledSent);
+    socket.on('messenger:messageReminder', onMessageReminder);
     socket.on('messenger:friendsChanged', onFriendsChanged);
     socket.on('desktop:userChanged', onUserChanged);
     socket.on('presence:snapshot', onPresenceSnapshot);
@@ -1679,6 +1827,9 @@ export function MessengerWindow({
       socket.off('messenger:conversationCleared', onConversationCleared);
       socket.off('messenger:conversationBackgroundChanged', onConversationBackgroundChanged);
       socket.off('messenger:conversationTtlChanged', onConversationTtlChanged);
+      socket.off('messenger:scheduledCreated', onScheduledCreated);
+      socket.off('messenger:scheduledSent', onScheduledSent);
+      socket.off('messenger:messageReminder', onMessageReminder);
       socket.off('messenger:friendsChanged', onFriendsChanged);
       socket.off('desktop:userChanged', onUserChanged);
       socket.off('presence:snapshot', onPresenceSnapshot);
@@ -2485,7 +2636,7 @@ export function MessengerWindow({
     return uploaded;
   }
 
-  async function sendMessage(attachmentOverride?: PendingChatImage) {
+  async function sendMessage(attachmentOverride?: PendingChatImage, sendOptions?: { scheduledAt?: string }) {
     if (!selectedUser) return;
     const recordingOverride = Boolean(attachmentOverride && (isVoiceAttachment(attachmentOverride.dataUrl, attachmentOverride.name) || isVideoCircleAttachment(attachmentOverride.dataUrl, attachmentOverride.name)));
     const batchImages = attachmentOverride ? [attachmentOverride] : pendingImages;
@@ -2561,7 +2712,21 @@ export function MessengerWindow({
       const mediaItems = !recordingOverride && uploadedBatchImages.length > 1
         ? uploadedBatchImages.map((item) => ({ dataUrl: item.dataUrl, name: item.name, spoiler: item.spoiler }))
         : undefined;
-      const payload = await api.sendMessage(token, selectedUser.id, body, uploadedImage && !mediaItems ? { dataUrl: uploadedImage.dataUrl, name: uploadedImage.name, spoiler: uploadedImage.spoiler } : undefined, replyTo, activeSenderGroup?.id ?? null, mediaItems);
+      const payload = await api.sendMessage(
+        token, selectedUser.id, body,
+        uploadedImage && !mediaItems ? { dataUrl: uploadedImage.dataUrl, name: uploadedImage.name, spoiler: uploadedImage.spoiler } : undefined,
+        replyTo, activeSenderGroup?.id ?? null, mediaItems,
+        { scheduledAt: sendOptions?.scheduledAt, viewOnce: viewOnceArmed && Boolean(uploadedImage) }
+      );
+      setViewOnceArmed(false);
+      // A scheduled message is not part of the visible thread yet: drop the
+      // optimistic bubble and let the "Scheduled" bar track it instead.
+      if (sendOptions?.scheduledAt) {
+        setMessages((current) => current.filter((message) => message.clientKey !== clientKey));
+        setScheduledMessages((current) => [...current, payload.message]
+          .sort((a, b) => new Date(a.scheduledAt ?? 0).getTime() - new Date(b.scheduledAt ?? 0).getTime()));
+        return;
+      }
       setMessages((current) => {
         // If the socket broadcast already delivered the real message, drop our
         // placeholder. Otherwise replace it in place, preserving clientKey.
@@ -3556,18 +3721,107 @@ export function MessengerWindow({
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.5" y2="16.5"/></svg>
             <input
               type="text"
-              value={directMessageFilter}
-              placeholder={t(language, 'search')}
+              value={globalSearchOpen ? globalSearchQuery : directMessageFilter}
+              placeholder={globalSearchOpen
+                ? (language === 'ru' ? 'Поиск по всем перепискам' : language === 'uk' ? 'Пошук за всіма чатами' : 'Search all conversations')
+                : t(language, 'search')}
               aria-label={t(language, 'search')}
-              onChange={(event) => setDirectMessageFilter(event.target.value)}
+              onChange={(event) => (globalSearchOpen ? setGlobalSearchQuery(event.target.value) : setDirectMessageFilter(event.target.value))}
             />
-            {directMessageFilter ? (
-              <button type="button" className="messenger-search-clear" onClick={() => setDirectMessageFilter('')} aria-label="clear">×</button>
+            {(globalSearchOpen ? globalSearchQuery : directMessageFilter) ? (
+              <button
+                type="button"
+                className="messenger-search-clear"
+                onClick={() => (globalSearchOpen ? setGlobalSearchQuery('') : setDirectMessageFilter(''))}
+                aria-label="clear"
+              >×</button>
             ) : null}
+            <button
+              type="button"
+              className={globalSearchOpen ? 'dm-global-search-toggle active' : 'dm-global-search-toggle'}
+              title={language === 'ru' ? 'Искать во всех переписках' : 'Search across all conversations'}
+              aria-label={language === 'ru' ? 'Искать во всех переписках' : 'Search across all conversations'}
+              onClick={() => {
+                setGlobalSearchOpen((open) => !open);
+                setGlobalSearchQuery('');
+                setDirectMessageFilter('');
+              }}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18a15 15 0 0 1 0-18z"/></svg>
+            </button>
           </div>
+          {globalSearchOpen ? (
+            <div className="dm-global-search-kinds">
+              {(['all', 'media', 'links'] as const).map((kind) => (
+                <button
+                  key={kind}
+                  type="button"
+                  className={globalSearchKind === kind ? 'active' : ''}
+                  onClick={() => setGlobalSearchKind(kind)}
+                >
+                  {kind === 'all'
+                    ? (language === 'ru' ? 'Все' : 'All')
+                    : kind === 'media'
+                      ? (language === 'ru' ? 'Фото' : 'Media')
+                      : (language === 'ru' ? 'Ссылки' : 'Links')}
+                </button>
+              ))}
+            </div>
+          ) : (
+            <div className="dm-list-filters">
+              {(['all', 'unread', 'archived'] as const).map((filter) => (
+                <button
+                  key={filter}
+                  type="button"
+                  className={dmListFilter === filter ? 'active' : ''}
+                  onClick={() => setDmListFilter(filter)}
+                >
+                  {filter === 'all'
+                    ? (language === 'ru' ? 'Все' : 'All')
+                    : filter === 'unread'
+                      ? (language === 'ru' ? 'Непрочитанные' : 'Unread')
+                      : (language === 'ru' ? 'Архив' : 'Archive')}
+                </button>
+              ))}
+            </div>
+          )}
           <div className="messenger-conversation-list">
-            {visibleConversations.length === 0 ? <div className="explorer-empty">{directMessageFilter.trim() ? t(language, 'noPeopleFound') : t(language, 'noMessages')}</div> : null}
-            {visibleConversations.map((conversation) => {
+            {globalSearchOpen ? (
+              <>
+                {globalSearchLoading ? <div className="explorer-empty">{t(language, 'checking')}</div> : null}
+                {!globalSearchLoading && globalSearchQuery.trim().length >= 2 && globalSearchResults.length === 0 ? (
+                  <div className="explorer-empty">{t(language, 'noMessages')}</div>
+                ) : null}
+                {!globalSearchLoading && globalSearchQuery.trim().length < 2 ? (
+                  <div className="explorer-empty">{language === 'ru' ? 'Введите минимум 2 символа' : 'Type at least 2 characters'}</div>
+                ) : null}
+                {globalSearchResults.map((result) => (
+                  <button
+                    key={result.message.id}
+                    type="button"
+                    className="messenger-search-result"
+                    onClick={() => {
+                      setGlobalSearchOpen(false);
+                      setGlobalSearchQuery('');
+                      void chooseUser(result.user).then(() => jumpToMessage(result.message.id));
+                    }}
+                  >
+                    <span className="messenger-avatar-wrap">
+                      <img src={result.user.avatarData} alt="" draggable={false} />
+                    </span>
+                    <span className="messenger-search-result-text">
+                      <span className="messenger-search-result-head">
+                        <strong>{result.user.nickname}</strong>
+                        <small>{formatMessageDate(result.message.createdAt, language)}</small>
+                      </span>
+                      <MessagePreviewText text={result.message.body || (result.message.imageData ? '📷' : '')} />
+                    </span>
+                  </button>
+                ))}
+              </>
+            ) : null}
+            {!globalSearchOpen && visibleConversations.length === 0 ? <div className="explorer-empty">{directMessageFilter.trim() ? t(language, 'noPeopleFound') : t(language, 'noMessages')}</div> : null}
+            {globalSearchOpen ? null : visibleConversations.map((conversation) => {
               const convPlate = nameplateStyle(conversation.user);
               const pinned = pinnedConversations.has(conversation.user.id);
               const showReadState = conversation.message.senderId === currentUser.id && !conversation.message.pending;
@@ -4058,6 +4312,28 @@ export function MessengerWindow({
                                 onOpen={() => openImageViewer(message.imageData ?? '', message.imageName ?? 'GIF')}
                                 onLoad={handleThreadMediaLoad}
                               />
+                            ) : message.viewOnce && (message.viewOnceSeenAt || (!message.imageData && !openedViewOnce[message.id])) ? (
+                              <div className="view-once-placeholder">
+                                <span aria-hidden="true">👁</span>
+                                {language === 'ru' ? 'Фото просмотрено' : language === 'uk' ? 'Фото переглянуто' : 'Photo viewed'}
+                              </div>
+                            ) : message.viewOnce && message.senderId !== currentUser.id && !openedViewOnce[message.id] ? (
+                              <button
+                                type="button"
+                                className="view-once-open"
+                                onClick={() => {
+                                  api.openViewOnceMedia(token, message.id)
+                                    .then((payload) => {
+                                      setOpenedViewOnce((current) => ({ ...current, [message.id]: payload.mediaItems }));
+                                      const first = payload.mediaItems[0];
+                                      if (first) openImageViewer(first.dataUrl, first.name ?? t(language, 'imageMessage'));
+                                    })
+                                    .catch(() => undefined);
+                                }}
+                              >
+                                <span aria-hidden="true">👁</span>
+                                {language === 'ru' ? 'Открыть один раз' : 'Open once'}
+                              </button>
                             ) : message.imageData && !forwarded ? (
                               <button
                                 className={spoilerHidden ? 'message-image spoiler' : 'message-image'}
@@ -4284,6 +4560,24 @@ export function MessengerWindow({
                     <span className="context-menu-action-text">{t(language, 'reply')}</span>
                     <MenuReplyIcon />
                   </button>
+                  <div className="context-menu-remind">
+                    <span className="context-menu-remind-label">{language === 'ru' ? 'Напомнить через' : 'Remind me in'}</span>
+                    <div className="context-menu-remind-options">
+                      {([[3600, '1h'], [10800, '3h'], [86400, '24h']] as const).map(([seconds, label]) => (
+                        <button
+                          key={seconds}
+                          type="button"
+                          onClick={() => {
+                            const messageId = messageMenu.message.id;
+                            setMessageMenu(null);
+                            api.remindAboutMessage(token, messageId, seconds).catch(() => undefined);
+                          }}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                   <button type="button" className="context-menu-action" onClick={() => forwardMessage(messageMenu.message)}>
                     <span className="context-menu-action-text">{t(language, 'forward')}</span>
                     <MenuForwardIcon />
@@ -4469,6 +4763,51 @@ export function MessengerWindow({
                     event.currentTarget.value = '';
                     files.forEach((file) => void prepareImageFromFile(file));
                   }} />
+                {selectedUser && scheduledMessages.some((m) => m.recipientId === selectedUser.id) ? (
+                  <div className="scheduled-messages-bar">
+                    <span className="scheduled-messages-title">
+                      {language === 'ru' ? 'Запланировано' : language === 'uk' ? 'Заплановано' : 'Scheduled'}
+                    </span>
+                    {scheduledMessages.filter((m) => m.recipientId === selectedUser.id).map((message) => (
+                      <div key={message.id} className="scheduled-message-row">
+                        <time>{message.scheduledAt ? formatMessageDate(message.scheduledAt, language) + ' ' + formatMessageTime(message.scheduledAt, language) : ''}</time>
+                        <span className="scheduled-message-body">{message.body || '📷'}</span>
+                        <button
+                          type="button"
+                          aria-label={t(language, 'cancel')}
+                          onClick={() => {
+                            api.cancelScheduledMessage(token, message.id)
+                              .then(() => setScheduledMessages((current) => current.filter((m) => m.id !== message.id)))
+                              .catch(() => undefined);
+                          }}
+                        >✕</button>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+                {scheduleMenuOpen && selectedUser ? (
+                  <div className="schedule-send-menu">
+                    <span className="schedule-send-title">{language === 'ru' ? 'Отправить позже' : 'Send later'}</span>
+                    <div className="schedule-send-options">
+                      {([
+                        [3600, language === 'ru' ? 'Через час' : 'In 1 hour'],
+                        [10800, language === 'ru' ? 'Через 3 часа' : 'In 3 hours'],
+                        [86400, language === 'ru' ? 'Завтра' : 'Tomorrow']
+                      ] as const).map(([seconds, label]) => (
+                        <button
+                          key={seconds}
+                          type="button"
+                          onClick={() => {
+                            setScheduleMenuOpen(false);
+                            void sendMessage(undefined, { scheduledAt: new Date(Date.now() + seconds * 1000).toISOString() });
+                          }}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
                 {messageDraft.startsWith('/') && !messageDraft.includes(' ') ? (
                   <div className="slash-command-hints">
                     {SLASH_COMMANDS.filter((command) => command.name.startsWith(messageDraft.slice(1).toLowerCase())).map((command) => (
@@ -4487,6 +4826,31 @@ export function MessengerWindow({
                     onClick={(event) => { event.stopPropagation(); imageFileInputRef.current?.click(); }}>
                     <AttachIcon />
                   </button>
+                  {pendingImages.length > 0 && !editingMessage ? (
+                    <button
+                      className={viewOnceArmed ? 'emoji-toggle inline dm-view-once-toggle active' : 'emoji-toggle inline dm-view-once-toggle'}
+                      type="button"
+                      title={language === 'ru' ? 'Просмотр один раз' : 'View once'}
+                      aria-label={language === 'ru' ? 'Просмотр один раз' : 'View once'}
+                      onMouseDown={(event) => event.stopPropagation()}
+                      onClick={(event) => { event.stopPropagation(); setViewOnceArmed((value) => !value); }}
+                    >
+                      <span aria-hidden="true">1</span>
+                    </button>
+                  ) : null}
+                  {!editingMessage ? (
+                    <button
+                      className={scheduleMenuOpen ? 'emoji-toggle inline dm-schedule-toggle active' : 'emoji-toggle inline dm-schedule-toggle'}
+                      type="button"
+                      title={language === 'ru' ? 'Отправить позже' : 'Send later'}
+                      aria-label={language === 'ru' ? 'Отправить позже' : 'Send later'}
+                      disabled={!messageDraft.trim() && pendingImages.length === 0}
+                      onMouseDown={(event) => event.stopPropagation()}
+                      onClick={(event) => { event.stopPropagation(); setScheduleMenuOpen((open) => !open); }}
+                    >
+                      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+                    </button>
+                  ) : null}
                   <button
                     className={selectedGroupIdentity ? 'messenger-identity-toggle active' : 'messenger-identity-toggle'}
                     type="button"
@@ -4860,6 +5224,34 @@ export function MessengerWindow({
               setUserMenu(null);
             }}>
               {pinnedConversations.has(userMenu.user.id) ? t(language, 'unpin') : t(language, 'pin')}
+            </button>
+            <button type="button" onClick={() => {
+              setArchivedConversations((prev) => {
+                const next = new Set(prev);
+                if (next.has(userMenu.user.id)) next.delete(userMenu.user.id);
+                else next.add(userMenu.user.id);
+                saveArchived(next);
+                return next;
+              });
+              setUserMenu(null);
+            }}>
+              {archivedConversations.has(userMenu.user.id)
+                ? (language === 'ru' ? 'Убрать из архива' : 'Unarchive')
+                : (language === 'ru' ? 'В архив' : 'Archive')}
+            </button>
+            <button type="button" onClick={() => {
+              setAutoTranslateChats((prev) => {
+                const next = new Set(prev);
+                if (next.has(userMenu.user.id)) next.delete(userMenu.user.id);
+                else next.add(userMenu.user.id);
+                saveAutoTranslate(next);
+                return next;
+              });
+              setUserMenu(null);
+            }}>
+              {autoTranslateChats.has(userMenu.user.id)
+                ? (language === 'ru' ? 'Выключить автоперевод' : 'Disable auto-translate')
+                : (language === 'ru' ? 'Автоперевод входящих' : 'Auto-translate incoming')}
             </button>
           </div>,
           document.body

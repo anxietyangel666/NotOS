@@ -165,6 +165,11 @@ export type MessengerMessage = {
   reactions: GroupMessageReaction[];
   replyTo: MessageReplySnippet | null;
   linkPreview?: LinkPreview | null;
+  // Set while the message is waiting for its scheduled delivery time.
+  scheduledAt?: string | null;
+  // Attachment that self-destructs once the recipient opens it.
+  viewOnce?: boolean;
+  viewOnceSeenAt?: string | null;
   // Client-only: a stable React key kept across the optimistic→server swap so
   // the bubble reconciles in place instead of remounting (no flash/jump). Also
   // marks a message as still-sending for a subtle pending style.

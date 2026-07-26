@@ -1127,6 +1127,22 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
     window.setTimeout(() => setNotifications((current) => current.filter((item) => item.id !== id)), 5200);
   }
 
+  // "Remind me about this message" fires from the messenger over a window
+  // event so the toast shows even when the messenger window is closed.
+  useEffect(() => {
+    function onMessageReminder(event: Event) {
+      const detail = (event as CustomEvent<{ title?: string; body?: string }>).detail;
+      if (!detail) return;
+      pushNotification({
+        title: detail.title ?? (language === 'ru' ? 'Напоминание' : 'Reminder'),
+        message: detail.body || (language === 'ru' ? 'Сообщение' : 'Message')
+      });
+    }
+    window.addEventListener('notoc:message-reminder', onMessageReminder);
+    return () => window.removeEventListener('notoc:message-reminder', onMessageReminder);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [language]);
+
   useEffect(() => {
     const socket = sharedSocket;
     if (!socket) return;

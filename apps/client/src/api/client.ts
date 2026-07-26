@@ -5,6 +5,7 @@ import type {
   AiSettings,
   AiChatSummary,
   ConversationPreview,
+  ChatMediaItem,
   ConversationSettings,
   CustomCategory,
   DesktopIconPositions,
@@ -398,12 +399,17 @@ export const api = {
       slowRequestMs: 1500
     });
   },
-  sendMessage(token: string, recipientId: string, body: string, image?: { dataUrl: string; name?: string; spoiler?: boolean }, replyTo?: string, senderGroupId?: string | null, mediaItems?: Array<{ dataUrl: string; name?: string | null; spoiler?: boolean }>) {
+  sendMessage(token: string, recipientId: string, body: string, image?: { dataUrl: string; name?: string; spoiler?: boolean }, replyTo?: string, senderGroupId?: string | null, mediaItems?: Array<{ dataUrl: string; name?: string | null; spoiler?: boolean }>, options?: { scheduledAt?: string; viewOnce?: boolean }) {
     const mediaUpload = Boolean(image?.dataUrl.startsWith('data:audio/') || image?.dataUrl.startsWith('data:video/'));
     return request<{ message: MessengerMessage }>('/api/messenger/messages', {
       method: 'POST',
       token,
-      body: { recipientId, body, image, mediaItems, replyTo, senderGroupId: senderGroupId || undefined },
+      body: {
+        recipientId, body, image, mediaItems, replyTo,
+        senderGroupId: senderGroupId || undefined,
+        scheduledAt: options?.scheduledAt,
+        viewOnce: options?.viewOnce || undefined
+      },
       label: mediaUpload ? 'messenger.sendMedia' : undefined,
       slowRequestMs: mediaUpload ? 3000 : undefined
     });
@@ -567,6 +573,32 @@ export const api = {
   // Load one page of a channel. Pass `before` (a message id) to fetch the page
   // of older messages for scroll-up pagination. `hasMore` indicates that an
   // even older page still exists.
+  searchAllMessages(token: string, query: string, kind: 'all' | 'media' | 'links' = 'all') {
+    const params = new URLSearchParams({ q: query });
+    if (kind !== 'all') params.set('kind', kind);
+    return request<{ results: Array<{ user: PublicUser; message: MessengerMessage }> }>(
+      `/api/messenger/search?${params.toString()}`,
+      { token }
+    );
+  },
+  getScheduledMessages(token: string) {
+    return request<{ messages: MessengerMessage[] }>('/api/messenger/scheduled', { token });
+  },
+  cancelScheduledMessage(token: string, messageId: string) {
+    return request<{ message: MessengerMessage }>(`/api/messenger/scheduled/${encodeURIComponent(messageId)}`, { token, method: 'DELETE' });
+  },
+  remindAboutMessage(token: string, messageId: string, inSeconds: number) {
+    return request<{ reminder: { id: string; remindAt: string } }>(
+      `/api/messenger/messages/${encodeURIComponent(messageId)}/remind`,
+      { token, method: 'POST', body: { inSeconds } }
+    );
+  },
+  openViewOnceMedia(token: string, messageId: string) {
+    return request<{ mediaItems: ChatMediaItem[]; message: MessengerMessage }>(
+      `/api/messenger/messages/${encodeURIComponent(messageId)}/view-once`,
+      { token, method: 'POST', body: {} }
+    );
+  },
   transcribeMessage(token: string, messageId: string) {
     return request<{ transcript: string }>(`/api/messenger/messages/${encodeURIComponent(messageId)}/transcribe`, { token, method: 'POST', body: {} });
   },

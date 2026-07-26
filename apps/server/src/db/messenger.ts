@@ -21,6 +21,9 @@ export type MessageRecord = {
   reply_to: string | null;
   link_preview: { url: string; title: string; description: string; imageUrl: string; siteName: string } | null;
   expires_at: Date | null;
+  scheduled_at: Date | null;
+  view_once: boolean;
+  view_once_seen_at: Date | null;
   created_at: Date;
 };
 
@@ -68,6 +71,9 @@ export type PublicMessage = {
   replyTo: MessageReplySnippet | null;
   linkPreview: { url: string; title: string; description: string; imageUrl: string; siteName: string } | null;
   expiresAt: string | null;
+  scheduledAt: string | null;
+  viewOnce: boolean;
+  viewOnceSeenAt: string | null;
 };
 
 export type ConversationPreview = {
@@ -117,7 +123,9 @@ function normalizeMediaItems(message: Pick<MessageRecord, 'deleted_at' | 'media_
 }
 
 export function toPublicMessage(message: MessageRecord, reactions: MessageReaction[] = [], replyTo: MessageReplySnippet | null = null): PublicMessage {
-  const mediaItems = normalizeMediaItems(message);
+  // A consumed view-once attachment is stripped server-side, so the client
+  // only ever receives the "already viewed" placeholder state.
+  const mediaItems = message.view_once && message.view_once_seen_at ? [] : normalizeMediaItems(message);
   return {
     id: message.id,
     senderId: message.sender_id,
@@ -142,7 +150,10 @@ export function toPublicMessage(message: MessageRecord, reactions: MessageReacti
     reactions: message.deleted_at ? [] : reactions,
     replyTo,
     linkPreview: message.deleted_at ? null : message.link_preview ?? null,
-    expiresAt: message.expires_at?.toISOString() ?? null
+    expiresAt: message.expires_at?.toISOString() ?? null,
+    scheduledAt: message.scheduled_at?.toISOString() ?? null,
+    viewOnce: Boolean(message.view_once),
+    viewOnceSeenAt: message.view_once_seen_at?.toISOString() ?? null
   };
 }
 
@@ -465,6 +476,7 @@ export async function listConversationPreviews(userId: string): Promise<Conversa
         FROM messages
         WHERE (sender_id = $1 OR recipient_id = $1)
           AND deleted_at IS NULL
+          AND scheduled_at IS NULL
           AND ${visibleToUserClause}
         ORDER BY other_id, created_at DESC
       ), unread AS (
@@ -473,6 +485,7 @@ export async function listConversationPreviews(userId: string): Promise<Conversa
         WHERE recipient_id = $1
           AND read_at IS NULL
           AND deleted_at IS NULL
+          AND scheduled_at IS NULL
           AND ${visibleToUserClause}
         GROUP BY sender_id
       )
@@ -545,6 +558,7 @@ export async function listConversation(
         AND GREATEST(sender_id, recipient_id) = GREATEST($1::uuid, $2::uuid)
         AND ${visibleToUserClause}
         AND deleted_at IS NULL
+        AND scheduled_at IS NULL
         ${cursorClause}
       ORDER BY created_at DESC, id DESC
       LIMIT ${limitParam}
@@ -574,6 +588,7 @@ export async function searchConversation(
         AND GREATEST(sender_id, recipient_id) = GREATEST($1::uuid, $2::uuid)
         AND ${visibleToUserClause}
         AND deleted_at IS NULL
+        AND scheduled_at IS NULL
         AND body ILIKE '%' || $3 || '%'
       ORDER BY created_at DESC, id DESC
       LIMIT $4
@@ -599,6 +614,7 @@ export async function listConversationAround(
       FROM messages
       WHERE id = $1
         AND deleted_at IS NULL
+        AND scheduled_at IS NULL
         AND NOT EXISTS (
           SELECT 1
           FROM message_hidden_for mhf
@@ -614,7 +630,8 @@ export async function listConversationAround(
   const pair = `LEAST(sender_id, recipient_id) = LEAST($1::uuid, $2::uuid)
     AND GREATEST(sender_id, recipient_id) = GREATEST($1::uuid, $2::uuid)
     AND ${visibleToUserClause}
-    AND deleted_at IS NULL`;
+    AND deleted_at IS NULL
+    AND scheduled_at IS NULL`;
 
   // Older page (strictly before the target), newest-first then reversed.
   const older = await pool.query<MessageRecord>(
@@ -651,6 +668,7 @@ export async function listConversationImages(
         AND GREATEST(sender_id, recipient_id) = GREATEST($1::uuid, $2::uuid)
         AND ${visibleToUserClause}
         AND deleted_at IS NULL
+        AND scheduled_at IS NULL
         AND image_data IS NOT NULL
       ORDER BY created_at DESC, id DESC
       LIMIT $3
@@ -673,6 +691,7 @@ export async function listConversationPinned(
         AND GREATEST(sender_id, recipient_id) = GREATEST($1::uuid, $2::uuid)
         AND ${visibleToUserClause}
         AND deleted_at IS NULL
+        AND scheduled_at IS NULL
         AND pinned_at IS NOT NULL
       ORDER BY pinned_at DESC, created_at DESC
       LIMIT $3
@@ -696,6 +715,7 @@ export async function listConversationLinks(
         AND GREATEST(sender_id, recipient_id) = GREATEST($1::uuid, $2::uuid)
         AND ${visibleToUserClause}
         AND deleted_at IS NULL
+        AND scheduled_at IS NULL
         AND body ~* 'https?://'
       ORDER BY created_at DESC, id DESC
       LIMIT $3
@@ -714,6 +734,7 @@ export async function markConversationRead(userId: string, friendId: string) {
         AND recipient_id = $1
         AND read_at IS NULL
         AND deleted_at IS NULL
+        AND scheduled_at IS NULL
       RETURNING id, read_at
     `,
     [userId, friendId]
@@ -760,6 +781,7 @@ export async function sweepExpiredMessages() {
       WHERE expires_at IS NOT NULL
         AND expires_at <= NOW()
         AND deleted_at IS NULL
+        AND scheduled_at IS NULL
       RETURNING *
     `
   );
@@ -805,16 +827,18 @@ export async function createMessage(
   replyTo?: string | null,
   senderGroup?: { id: string; name: string; avatarData: string } | null,
   mediaItems?: Array<{ dataUrl: string; name?: string | null; spoiler?: boolean }>,
-  expiresInSeconds?: number | null
+  expiresInSeconds?: number | null,
+  options?: { scheduledAt?: Date | null; viewOnce?: boolean }
 ) {
   const items = (mediaItems && mediaItems.length > 0 ? mediaItems : image ? [image] : [])
     .map((item) => ({ dataUrl: item.dataUrl, name: item.name ?? null, spoiler: Boolean(item.spoiler) }));
   const first = items[0];
   const result = await pool.query<MessageRecord>(
     `
-      INSERT INTO messages (id, sender_id, recipient_id, sender_group_id, sender_group_name, sender_group_avatar_data, body, image_data, image_name, image_spoiler, media_items, reply_to, expires_at)
+      INSERT INTO messages (id, sender_id, recipient_id, sender_group_id, sender_group_name, sender_group_avatar_data, body, image_data, image_name, image_spoiler, media_items, reply_to, expires_at, scheduled_at, view_once)
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12,
-        CASE WHEN $13::int IS NULL OR $13::int <= 0 THEN NULL ELSE NOW() + make_interval(secs => $13::int) END)
+        CASE WHEN $13::int IS NULL OR $13::int <= 0 THEN NULL ELSE NOW() + make_interval(secs => $13::int) END,
+        $14, $15)
       RETURNING *
     `,
     [
@@ -830,11 +854,190 @@ export async function createMessage(
       first?.spoiler ?? false,
       items.length > 0 ? JSON.stringify(items) : null,
       replyTo ?? null,
-      expiresInSeconds ?? null
+      expiresInSeconds ?? null,
+      options?.scheduledAt ?? null,
+      Boolean(options?.viewOnce)
     ]
   );
 
   return result.rows[0];
+}
+
+// ── Global search across every conversation of a user ──────────────────────
+export type GlobalSearchHit = MessageRecord & { other_id: string };
+
+export async function searchAllConversations(
+  userId: string,
+  query: string,
+  options: { limit?: number; kind?: 'all' | 'media' | 'links' } = {}
+): Promise<GlobalSearchHit[]> {
+  const limit = Math.min(options.limit ?? 60, 100);
+  const kind = options.kind ?? 'all';
+  const kindClause = kind === 'media'
+    ? "AND (image_data IS NOT NULL OR jsonb_array_length(COALESCE(media_items, '[]'::jsonb)) > 0)"
+    : kind === 'links'
+      ? "AND body ~* 'https?://'"
+      : '';
+
+  const result = await pool.query<GlobalSearchHit>(
+    `
+      SELECT *,
+        CASE WHEN sender_id = $1 THEN recipient_id ELSE sender_id END AS other_id
+      FROM messages
+      WHERE (sender_id = $1 OR recipient_id = $1)
+        AND deleted_at IS NULL
+        AND scheduled_at IS NULL
+        AND ${visibleToUserClause}
+        AND body ILIKE '%' || $2 || '%'
+        ${kindClause}
+      ORDER BY created_at DESC, id DESC
+      LIMIT $3
+    `,
+    [userId, query, limit]
+  );
+  return result.rows;
+}
+
+// ── Scheduled send ─────────────────────────────────────────────────────────
+export async function listScheduledMessages(userId: string): Promise<MessageRecord[]> {
+  const result = await pool.query<MessageRecord>(
+    `
+      SELECT * FROM messages
+      WHERE sender_id = $1 AND scheduled_at IS NOT NULL AND deleted_at IS NULL
+      ORDER BY scheduled_at ASC
+      LIMIT 100
+    `,
+    [userId]
+  );
+  return result.rows;
+}
+
+export async function cancelScheduledMessage(messageId: string, userId: string) {
+  const result = await pool.query<MessageRecord>(
+    `
+      DELETE FROM messages
+      WHERE id = $1 AND sender_id = $2 AND scheduled_at IS NOT NULL
+      RETURNING *
+    `,
+    [messageId, userId]
+  );
+  return result.rows[0] ?? null;
+}
+
+// Releases messages whose scheduled time has passed so they become ordinary
+// messages, returning them for socket delivery.
+export async function sweepDueScheduledMessages(): Promise<MessageRecord[]> {
+  const result = await pool.query<MessageRecord>(
+    `
+      UPDATE messages
+      SET scheduled_at = NULL, created_at = NOW()
+      WHERE scheduled_at IS NOT NULL
+        AND scheduled_at <= NOW()
+        AND deleted_at IS NULL
+      RETURNING *
+    `
+  );
+  return result.rows;
+}
+
+// ── View-once media ────────────────────────────────────────────────────────
+// Marks the attachment as seen and strips it from the row. Only the recipient
+// consumes it; the sender keeps seeing their own attachment.
+export async function consumeViewOnceMedia(messageId: string, viewerId: string) {
+  const result = await pool.query<MessageRecord>(
+    `
+      UPDATE messages
+      SET view_once_seen_at = NOW(),
+          image_data = NULL,
+          media_items = NULL
+      WHERE id = $1
+        AND recipient_id = $2
+        AND view_once = TRUE
+        AND view_once_seen_at IS NULL
+        AND deleted_at IS NULL
+      RETURNING *
+    `,
+    [messageId, viewerId]
+  );
+  return result.rows[0] ?? null;
+}
+
+// ── Message reminders ──────────────────────────────────────────────────────
+export type MessageReminderRecord = {
+  id: string;
+  user_id: string;
+  message_id: string;
+  remind_at: Date;
+  delivered_at: Date | null;
+  created_at: Date;
+};
+
+export async function createMessageReminder(userId: string, messageId: string, remindAt: Date) {
+  const result = await pool.query<MessageReminderRecord>(
+    `
+      INSERT INTO message_reminders (id, user_id, message_id, remind_at)
+      VALUES ($1, $2, $3, $4)
+      RETURNING *
+    `,
+    [randomUUID(), userId, messageId, remindAt]
+  );
+  return result.rows[0];
+}
+
+export async function listPendingReminders(userId: string): Promise<Array<MessageReminderRecord & { message: MessageRecord }>> {
+  const result = await pool.query<MessageReminderRecord & MessageRecord & { reminder_id: string }>(
+    `
+      SELECT r.id AS reminder_id, r.user_id, r.message_id, r.remind_at, r.delivered_at, m.*
+      FROM message_reminders r
+      JOIN messages m ON m.id = r.message_id
+      WHERE r.user_id = $1 AND r.delivered_at IS NULL AND m.deleted_at IS NULL
+      ORDER BY r.remind_at ASC
+      LIMIT 50
+    `,
+    [userId]
+  );
+  return result.rows.map((row) => ({
+    id: row.reminder_id,
+    user_id: row.user_id,
+    message_id: row.message_id,
+    remind_at: row.remind_at,
+    delivered_at: row.delivered_at,
+    created_at: row.created_at,
+    message: row as unknown as MessageRecord
+  }));
+}
+
+export async function cancelMessageReminder(reminderId: string, userId: string) {
+  const result = await pool.query(
+    'DELETE FROM message_reminders WHERE id = $1 AND user_id = $2 RETURNING id',
+    [reminderId, userId]
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
+// Marks due reminders delivered and returns them with their message so the
+// sweeper can push a notification to the owner.
+export async function sweepDueReminders(): Promise<Array<{ id: string; userId: string; message: MessageRecord }>> {
+  const due = await pool.query<{ id: string; user_id: string; message_id: string }>(
+    `
+      UPDATE message_reminders
+      SET delivered_at = NOW()
+      WHERE delivered_at IS NULL AND remind_at <= NOW()
+      RETURNING id, user_id, message_id
+    `
+  );
+  if (due.rows.length === 0) return [];
+  const messages = await pool.query<MessageRecord>(
+    'SELECT * FROM messages WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL',
+    [due.rows.map((row) => row.message_id)]
+  );
+  const byId = new Map(messages.rows.map((row) => [row.id, row]));
+  return due.rows
+    .map((row) => {
+      const message = byId.get(row.message_id);
+      return message ? { id: row.id, userId: row.user_id, message } : null;
+    })
+    .filter((entry): entry is { id: string; userId: string; message: MessageRecord } => entry !== null);
 }
 
 export async function updateMessage(
@@ -853,6 +1056,7 @@ export async function updateMessage(
         WHERE id = $1
           AND sender_id = $2
           AND deleted_at IS NULL
+          AND scheduled_at IS NULL
       ), editable AS (
         SELECT target.id
         FROM target
@@ -861,6 +1065,7 @@ export async function updateMessage(
             SELECT COUNT(*)
             FROM messages AS newer
             WHERE newer.deleted_at IS NULL
+            AND newer.scheduled_at IS NULL
               AND newer.created_at > target.created_at
               AND (
                 (newer.sender_id = target.sender_id AND newer.recipient_id = target.recipient_id)
@@ -893,6 +1098,7 @@ export async function deleteMessage(messageId: string, senderId: string) {
       WHERE id = $1
         AND sender_id = $2
         AND deleted_at IS NULL
+        AND scheduled_at IS NULL
       RETURNING *
     `,
     [messageId, senderId]
@@ -936,6 +1142,7 @@ export async function pinMessage(messageId: string, userId: string) {
       SET pinned_at = NOW()
       WHERE id = $1
         AND deleted_at IS NULL
+        AND scheduled_at IS NULL
         AND (sender_id = $2 OR recipient_id = $2)
         AND pinned_at IS NULL
       RETURNING *

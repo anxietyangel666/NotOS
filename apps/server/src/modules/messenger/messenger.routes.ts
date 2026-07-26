@@ -26,9 +26,18 @@ import {
   removeFriend,
   requestFriendship,
   searchConversation,
+  searchAllConversations,
   setConversationBackground,
   setConversationTtl,
   sweepExpiredMessages,
+  sweepDueScheduledMessages,
+  sweepDueReminders,
+  listScheduledMessages,
+  cancelScheduledMessage,
+  consumeViewOnceMedia,
+  createMessageReminder,
+  listPendingReminders,
+  cancelMessageReminder,
   unpinMessage,
   updateMessage,
   toPublicMessage,
@@ -43,7 +52,7 @@ import {
   blockExistsBetween,
   listBlockedIds
 } from '../../db/messenger.js';
-import { findUserById, toPublicUser, toPublicUserLite, userExistsById } from '../../db/users.js';
+import { findUserById, liteUserColumns, toPublicUser, toPublicUserLite, userExistsById } from '../../db/users.js';
 import {
   getMutualGroups,
   getUserGroups,
@@ -78,7 +87,11 @@ const messageSchema = z.object({
   image: z.preprocess((value) => (value === null ? undefined : value), messageImageSchema.optional()),
   mediaItems: z.preprocess((value) => (value === null ? undefined : value), chatMediaItemsSchema.optional()),
   replyTo: z.string().uuid().optional(),
-  senderGroupId: z.string().uuid().optional()
+  senderGroupId: z.string().uuid().optional(),
+  // Deliver later instead of now (ISO timestamp, up to 30 days ahead).
+  scheduledAt: z.string().datetime().optional(),
+  // Attachment self-destructs once the recipient opens it.
+  viewOnce: z.boolean().optional()
 }).refine((value) => value.body.length > 0 || Boolean(value.image) || Boolean(value.mediaItems?.length), {
   message: 'Message body or image is required'
 });
@@ -115,8 +128,9 @@ const CHAT_BACKGROUND_CLEAR_MARKER = '[chat-background:clear]';
 // Allowed disappearing-message timers (seconds): off, 1h, 24h, 7d.
 const ALLOWED_MESSAGE_TTLS = [0, 3600, 86400, 604800];
 
-// Every minute, hard-delete disappearing messages whose timer ran out and
-// notify both participants so open chats drop the bubble live.
+// Once a minute: expire disappearing messages, release scheduled messages that
+// are now due, and deliver message reminders. All three are time-driven and
+// share one timer so the server keeps a single background interval.
 export function startExpiredMessageSweeper(io: Server) {
   const timer = setInterval(async () => {
     try {
@@ -130,6 +144,32 @@ export function startExpiredMessageSweeper(io: Server) {
       }
     } catch (error) {
       console.error('Expired message sweep failed', error);
+    }
+
+    try {
+      const due = await sweepDueScheduledMessages();
+      for (const record of due) {
+        const message = await toPublicMessageEnriched(record);
+        io.to(record.sender_id).emit('messenger:message', { message });
+        io.to(record.sender_id).emit('messenger:scheduledSent', { message });
+        if (record.recipient_id !== record.sender_id) {
+          io.to(record.recipient_id).emit('messenger:message', { message });
+        }
+      }
+    } catch (error) {
+      console.error('Scheduled message sweep failed', error);
+    }
+
+    try {
+      const reminders = await sweepDueReminders();
+      for (const reminder of reminders) {
+        io.to(reminder.userId).emit('messenger:messageReminder', {
+          reminderId: reminder.id,
+          message: toPublicMessage(reminder.message)
+        });
+      }
+    } catch (error) {
+      console.error('Reminder sweep failed', error);
     }
   }, 60_000);
   timer.unref();
@@ -560,6 +600,148 @@ export function createMessengerRouter(io: Server) {
     })
   );
 
+  // ── Global search across every conversation ────────────────────────────────
+  router.get(
+    '/search',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const query = z.object({
+        q: z.string().trim().min(2).max(200),
+        kind: z.enum(['all', 'media', 'links']).optional(),
+        limit: z.coerce.number().int().min(1).max(100).optional()
+      }).parse(req.query);
+
+      const hits = await searchAllConversations(req.auth.userId, query.q, { kind: query.kind, limit: query.limit });
+      const blocked = new Set(await listBlockedIds(req.auth.userId));
+      const visible = hits.filter((hit) => !blocked.has(hit.other_id));
+      const otherIds = [...new Set(visible.map((hit) => hit.other_id))];
+      const users = otherIds.length
+        ? await pool.query<Parameters<typeof toPublicUserLite>[0]>(
+          `SELECT ${liteUserColumns()} FROM users WHERE id = ANY($1::uuid[])`,
+          [otherIds]
+        )
+        : { rows: [] as Array<Parameters<typeof toPublicUserLite>[0]> };
+      const userById = new Map(users.rows.map((user) => [user.id, toPublicUserLite(user)]));
+
+      res.json({
+        results: visible
+          .filter((hit) => userById.has(hit.other_id))
+          .map((hit) => ({
+            user: userById.get(hit.other_id)!,
+            message: toPublicMessage(hit)
+          }))
+      });
+    })
+  );
+
+  // ── Scheduled messages ─────────────────────────────────────────────────────
+  router.get(
+    '/scheduled',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const rows = await listScheduledMessages(req.auth.userId);
+      res.json({ messages: await toPublicMessagesEnriched(rows) });
+    })
+  );
+
+  router.delete(
+    '/scheduled/:messageId',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const messageId = z.string().uuid().parse(req.params.messageId);
+      const cancelled = await cancelScheduledMessage(messageId, req.auth.userId);
+      if (!cancelled) throw new HttpError(404, 'Scheduled message not found', 'SCHEDULED_NOT_FOUND');
+      res.json({ message: toPublicMessage(cancelled) });
+    })
+  );
+
+  // ── Message reminders ──────────────────────────────────────────────────────
+  router.get(
+    '/reminders',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const reminders = await listPendingReminders(req.auth.userId);
+      res.json({
+        reminders: reminders.map((reminder) => ({
+          id: reminder.id,
+          remindAt: reminder.remind_at.toISOString(),
+          message: toPublicMessage(reminder.message)
+        }))
+      });
+    })
+  );
+
+  router.post(
+    '/messages/:messageId/remind',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const messageId = z.string().uuid().parse(req.params.messageId);
+      const input = z.object({ inSeconds: z.number().int().min(60).max(30 * 24 * 3600) }).parse(req.body ?? {});
+
+      const existing = await pool.query<{ sender_id: string; recipient_id: string }>(
+        'SELECT sender_id, recipient_id FROM messages WHERE id = $1 AND deleted_at IS NULL',
+        [messageId]
+      );
+      const row = existing.rows[0];
+      if (!row) throw new HttpError(404, 'Message not found', 'MESSAGE_NOT_FOUND');
+      if (row.sender_id !== req.auth.userId && row.recipient_id !== req.auth.userId) {
+        throw new HttpError(403, 'Cannot set a reminder for this message', 'REMINDER_FORBIDDEN');
+      }
+
+      const remindAt = new Date(Date.now() + input.inSeconds * 1000);
+      const reminder = await createMessageReminder(req.auth.userId, messageId, remindAt);
+      res.json({ reminder: { id: reminder.id, remindAt: reminder.remind_at.toISOString() } });
+    })
+  );
+
+  router.delete(
+    '/reminders/:reminderId',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const reminderId = z.string().uuid().parse(req.params.reminderId);
+      const removed = await cancelMessageReminder(reminderId, req.auth.userId);
+      if (!removed) throw new HttpError(404, 'Reminder not found', 'REMINDER_NOT_FOUND');
+      res.json({ success: true });
+    })
+  );
+
+  // ── View-once media ────────────────────────────────────────────────────────
+  // Opening the attachment consumes it: the media is dropped from the row and
+  // both sides are told to re-render the "photo viewed" placeholder.
+  router.post(
+    '/messages/:messageId/view-once',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const messageId = z.string().uuid().parse(req.params.messageId);
+      const existing = await pool.query<MessageRecord>(
+        'SELECT * FROM messages WHERE id = $1 AND deleted_at IS NULL',
+        [messageId]
+      );
+      const row = existing.rows[0];
+      if (!row) throw new HttpError(404, 'Message not found', 'MESSAGE_NOT_FOUND');
+      if (!row.view_once) throw new HttpError(400, 'Message is not view-once', 'NOT_VIEW_ONCE');
+      if (row.recipient_id !== req.auth.userId) {
+        throw new HttpError(403, 'Only the recipient can open this', 'VIEW_ONCE_FORBIDDEN');
+      }
+      if (row.view_once_seen_at) throw new HttpError(410, 'Already viewed', 'VIEW_ONCE_CONSUMED');
+
+      // Hand the media back once, then strip it from storage.
+      const mediaItems = row.media_items && row.media_items.length > 0
+        ? row.media_items
+        : row.image_data
+          ? [{ dataUrl: row.image_data, name: row.image_name, spoiler: false }]
+          : [];
+
+      const consumed = await consumeViewOnceMedia(messageId, req.auth.userId);
+      if (!consumed) throw new HttpError(410, 'Already viewed', 'VIEW_ONCE_CONSUMED');
+
+      const message = toPublicMessage(consumed);
+      io.to(consumed.sender_id).emit('messenger:messageUpdated', { message });
+      io.to(consumed.recipient_id).emit('messenger:messageUpdated', { message });
+      res.json({ mediaItems, message });
+    })
+  );
+
   // ── Search within a conversation ────────────────────────────────────────────
   router.get(
     '/messages/:userId/search',
@@ -667,7 +849,32 @@ export function createMessengerRouter(io: Server) {
       const conversationSettings = isSelfMessage ? null : await getConversationSettings(req.auth.userId, input.recipientId);
       const messageTtlSeconds = conversationSettings?.message_ttl_seconds ?? 0;
 
-      const created = await createMessage(req.auth.userId, input.recipientId, input.body, input.image, input.replyTo, senderGroup, input.mediaItems, messageTtlSeconds);
+      // Scheduled sends stay invisible until the sweeper releases them; they
+      // must land in the future and within a month.
+      let scheduledAt: Date | null = null;
+      if (input.scheduledAt) {
+        const parsed = new Date(input.scheduledAt);
+        const deltaMs = parsed.getTime() - Date.now();
+        if (!Number.isFinite(parsed.getTime()) || deltaMs < 30_000 || deltaMs > 30 * 24 * 3600 * 1000) {
+          throw new HttpError(400, 'Scheduled time must be between 30 seconds and 30 days from now', 'INVALID_SCHEDULE');
+        }
+        scheduledAt = parsed;
+      }
+
+      const created = await createMessage(
+        req.auth.userId, input.recipientId, input.body, input.image, input.replyTo,
+        senderGroup, input.mediaItems, messageTtlSeconds,
+        { scheduledAt, viewOnce: Boolean(input.viewOnce) }
+      );
+
+      // A scheduled message is only echoed back to its author's own list.
+      if (scheduledAt) {
+        const scheduled = toPublicMessage(created);
+        io.to(req.auth.userId).emit('messenger:scheduledCreated', { message: scheduled });
+        res.json({ message: scheduled });
+        return;
+      }
+
       if (isSelfMessage) {
         // Saved Messages never show an unread badge: mark the note read on write.
         const read = await pool.query<{ read_at: Date }>(

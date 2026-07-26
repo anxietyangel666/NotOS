@@ -207,6 +207,40 @@ export async function migrate() {
     ALTER TABLE messages
       ADD COLUMN IF NOT EXISTS transcript TEXT;
 
+    -- Scheduled send: the message row exists but stays invisible to both sides
+    -- until a sweeper clears scheduled_at and delivers it.
+    ALTER TABLE messages
+      ADD COLUMN IF NOT EXISTS scheduled_at TIMESTAMPTZ;
+    CREATE INDEX IF NOT EXISTS messages_scheduled_idx
+      ON messages (scheduled_at)
+      WHERE scheduled_at IS NOT NULL AND deleted_at IS NULL;
+
+    -- View-once media: the attachment is dropped from the row once the
+    -- recipient opens it, leaving only a "photo viewed" placeholder.
+    ALTER TABLE messages
+      ADD COLUMN IF NOT EXISTS view_once BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE messages
+      ADD COLUMN IF NOT EXISTS view_once_seen_at TIMESTAMPTZ;
+
+    -- Full-text-ish search across all conversations of a user.
+    CREATE INDEX IF NOT EXISTS messages_body_trgm_idx
+      ON messages (recipient_id, created_at DESC)
+      WHERE deleted_at IS NULL;
+
+    -- "Remind me about this message" entries, delivered by the same sweeper.
+    CREATE TABLE IF NOT EXISTS message_reminders (
+      id UUID PRIMARY KEY,
+      user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      message_id UUID NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+      remind_at TIMESTAMPTZ NOT NULL,
+      delivered_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS message_reminders_due_idx
+      ON message_reminders (remind_at)
+      WHERE delivered_at IS NULL;
+
     -- Server-side cache of fetched OpenGraph previews keyed by sha256(url).
     -- data is NULL when the fetch failed, so dead links are not retried on
     -- every message that repeats them.
