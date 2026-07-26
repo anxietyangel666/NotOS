@@ -236,6 +236,42 @@ export async function migrate() {
       ON messages (recipient_id, created_at DESC)
       WHERE deleted_at IS NULL;
 
+    -- Global account XP: awarded per message with a cooldown, level is
+    -- derived client-side from the raw number.
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS xp BIGINT NOT NULL DEFAULT 0;
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS last_xp_at TIMESTAMPTZ;
+
+    -- Reaction roles: reacting with the bound emoji grants the role,
+    -- removing the reaction revokes it.
+    CREATE TABLE IF NOT EXISTS group_reaction_roles (
+      message_id UUID NOT NULL REFERENCES group_messages(id) ON DELETE CASCADE,
+      group_id UUID NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+      emoji TEXT NOT NULL,
+      role_id UUID NOT NULL REFERENCES group_roles(id) ON DELETE CASCADE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (message_id, emoji)
+    );
+
+    -- Word blocklist checked on every group message.
+    ALTER TABLE groups
+      ADD COLUMN IF NOT EXISTS automod_words JSONB NOT NULL DEFAULT '[]'::jsonb;
+
+    -- Admin audit trail (kicks, role changes, channel ops, automod hits...).
+    CREATE TABLE IF NOT EXISTS group_audit_log (
+      id UUID PRIMARY KEY,
+      group_id UUID NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+      actor_id UUID REFERENCES users(id) ON DELETE SET NULL,
+      action TEXT NOT NULL,
+      target TEXT NOT NULL DEFAULT '',
+      details JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS group_audit_log_group_idx
+      ON group_audit_log (group_id, created_at DESC);
+
     -- Polls: the chat message carries a [poll:<id>] marker; votes are one row
     -- per (poll, user, option). context locates the poll for access checks and
     -- socket fan-out ({type:'dm',a,b} or {type:'group',groupId,channelId}).

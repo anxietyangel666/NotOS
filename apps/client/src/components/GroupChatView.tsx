@@ -163,6 +163,9 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
   // Feed extras: who-viewed popover and the pinned-post banner.
   const [feedViewers, setFeedViewers] = useState<{ messageId: string; users: PublicUser[] | null } | null>(null);
   const [feedPinnedFetched, setFeedPinnedFetched] = useState<GroupMessage | null>(null);
+  // Reaction-role bindings editor (admins, via the message context menu).
+  const [reactionRoleModal, setReactionRoleModal] = useState<{ messageId: string; bindings: { emoji: string; roleId: string }[] | null; draftEmoji: string; draftRoleId: string; saving: boolean } | null>(null);
+  const [pinnedPanelOpen, setPinnedPanelOpen] = useState(false);
   const [groupMembersHidden, setGroupMembersHidden] = useState(false);
   const [messageMenu, setMessageMenu] = useState<{ x: number; y: number; message: GroupMessage; imageSrc?: string } | null>(null);
   const [channelMenu, setChannelMenu] = useState<{ x: number; y: number; kind: 'channel' | 'folder'; id: string; name: string } | null>(null);
@@ -319,7 +322,7 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
   const [defaultRoleId, setDefaultRoleId] = useState<string | null>(group.defaultRoleId ?? null);
   const [everyonePermissions, setEveryonePermissions] = useState<string[]>(group.everyonePermissions ?? []);
   const [defaultRoleMenuOpen, setDefaultRoleMenuOpen] = useState(false);
-  const [settingsTab, setSettingsTab] = useState<'overview' | 'invite' | 'roles' | 'members' | 'customization' | 'posts'>('overview');
+  const [settingsTab, setSettingsTab] = useState<'overview' | 'invite' | 'roles' | 'members' | 'customization' | 'posts' | 'audit'>('overview');
   // Server profile customization: admin-defined categories, the caller's
   // selected option ids, whether a required onboarding flow is pending, and
   // whether the member-facing "Настроить профиль" modal is open.
@@ -1098,6 +1101,7 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
   }, [token, group.id, activeChannel]);
 
   useEffect(() => {
+    setPinnedPanelOpen(false);
     if (!activeChannel) {
       setChannelPinnedMessages([]);
       setChannelMediaMessages([]);
@@ -3341,6 +3345,17 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
             >
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.5" y2="16.5"/></svg>
             </button>
+            {activeChannel && channelPinnedMessages.some((m) => m.pinnedAt && !m.deletedAt) ? (
+              <button
+                className={pinnedPanelOpen ? 'messenger-call-button active' : 'messenger-call-button'}
+                type="button"
+                title={t(language, 'pinnedMessages')}
+                aria-label={t(language, 'pinnedMessages')}
+                onClick={() => setPinnedPanelOpen((open) => !open)}
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/></svg>
+              </button>
+            ) : null}
             <button
               className={!groupMembersHidden ? 'messenger-call-button active' : 'messenger-call-button'}
               type="button"
@@ -3352,6 +3367,42 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
             </button>
           </div>
         </header>
+        {pinnedPanelOpen ? (
+          <div className="pinned-panel">
+            <div className="pinned-panel-header">
+              <strong>{t(language, 'pinnedMessages')}</strong>
+              <button type="button" className="pinned-panel-close" aria-label={t(language, 'close')} onClick={() => setPinnedPanelOpen(false)}>×</button>
+            </div>
+            <div className="pinned-panel-list">
+              {channelPinnedMessages
+                .filter((m) => m.pinnedAt && !m.deletedAt)
+                .sort((a, b) => new Date(b.pinnedAt!).getTime() - new Date(a.pinnedAt!).getTime())
+                .map((pinnedMessage) => {
+                  const sender = knownSenders.get(pinnedMessage.senderId);
+                  return (
+                    <button
+                      key={pinnedMessage.id}
+                      type="button"
+                      className="pinned-panel-item"
+                      onClick={() => {
+                        setPinnedPanelOpen(false);
+                        const el = document.getElementById('gmsg-' + pinnedMessage.id);
+                        if (el && threadRef.current) {
+                          const tRect = threadRef.current.getBoundingClientRect();
+                          const elRect = el.getBoundingClientRect();
+                          threadRef.current.scrollBy({ top: elRect.top - tRect.top - 80, behavior: 'smooth' });
+                        }
+                      }}
+                    >
+                      <strong>{pinnedMessage.senderGroup ? pinnedMessage.senderGroup.name : sender?.nickname ?? senderName(pinnedMessage.senderId)}</strong>
+                      <span>{pinnedMessage.body || (pinnedMessage.imageData ? '📷' : '')}</span>
+                      <time>{formatShortDate(pinnedMessage.createdAt)}</time>
+                    </button>
+                  );
+                })}
+            </div>
+          </div>
+        ) : null}
         {feedPinnedBanner ? (
           <button
             type="button"
@@ -4415,6 +4466,23 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
               <MenuPinIcon />
             </button>
           ) : null}
+          {canManageRoles && !messageMenu.message.deletedAt ? (
+            <button
+              type="button"
+              className="context-menu-action"
+              onClick={() => {
+                const targetId = messageMenu.message.feedSourceId ?? messageMenu.message.id;
+                setMessageMenu(null);
+                setReactionRoleModal({ messageId: targetId, bindings: null, draftEmoji: '', draftRoleId: '', saving: false });
+                api.getGroupReactionRoles(token, group.id, targetId)
+                  .then((payload) => setReactionRoleModal((current) => (current?.messageId === targetId ? { ...current, bindings: payload.bindings } : current)))
+                  .catch(() => setReactionRoleModal((current) => (current?.messageId === targetId ? { ...current, bindings: [] } : current)));
+              }}
+            >
+              <span className="context-menu-action-text">{t(language, 'reactionRoles')}</span>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg>
+            </button>
+          ) : null}
           {canEditMsg(messageMenu.message) ? (
             <button type="button" className="context-menu-action" onClick={() => void editMessage(messageMenu.message)}>
               <span className="context-menu-action-text">{t(language, 'editMessage')}</span>
@@ -4427,6 +4495,92 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
               <MenuDeleteIcon />
             </button>
           ) : null}
+        </div>,
+        document.body
+      ) : null}
+
+      {reactionRoleModal ? createPortal(
+        <div className="modal-backdrop important" style={{ zIndex: 12000 }} onMouseDown={() => setReactionRoleModal(null)}>
+          <div className="modal reaction-role-modal" onMouseDown={(event) => event.stopPropagation()}>
+            <h3>{t(language, 'reactionRoles')}</h3>
+            <p className="reaction-role-hint">{t(language, 'reactionRolesHint')}</p>
+            {reactionRoleModal.bindings === null ? (
+              <p className="reaction-role-hint">…</p>
+            ) : (
+              <>
+                <div className="reaction-role-rows">
+                  {reactionRoleModal.bindings.map((binding, index) => {
+                    const role = roles.find((item) => item.id === binding.roleId);
+                    return (
+                      <div className="reaction-role-row" key={`${binding.emoji}-${index}`}>
+                        <span className="reaction-role-emoji"><Twemoji emoji={binding.emoji} /></span>
+                        <span className="reaction-role-name" style={role?.color ? { color: role.color } : undefined}>{role?.name ?? '?'}</span>
+                        <button
+                          type="button"
+                          className="reaction-role-remove"
+                          aria-label={t(language, 'delete')}
+                          onClick={() => setReactionRoleModal((current) => current ? { ...current, bindings: (current.bindings ?? []).filter((_, i) => i !== index) } : current)}
+                        >
+                          ×
+                        </button>
+                      </div>
+                    );
+                  })}
+                  {reactionRoleModal.bindings.length === 0 ? <p className="reaction-role-hint">{t(language, 'reactionRolesEmpty')}</p> : null}
+                </div>
+                <div className="reaction-role-add">
+                  <input
+                    type="text"
+                    maxLength={8}
+                    placeholder="🙂"
+                    value={reactionRoleModal.draftEmoji}
+                    onChange={(event) => setReactionRoleModal((current) => current ? { ...current, draftEmoji: event.target.value } : current)}
+                  />
+                  <select
+                    value={reactionRoleModal.draftRoleId}
+                    onChange={(event) => setReactionRoleModal((current) => current ? { ...current, draftRoleId: event.target.value } : current)}
+                  >
+                    <option value="">{t(language, 'selectRole')}</option>
+                    {roles.filter((role) => !role.isOwner).map((role) => (
+                      <option key={role.id} value={role.id}>{role.name}</option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    className="ghost-btn"
+                    disabled={!reactionRoleModal.draftEmoji.trim() || !reactionRoleModal.draftRoleId}
+                    onClick={() => setReactionRoleModal((current) => {
+                      if (!current) return current;
+                      const emoji = current.draftEmoji.trim();
+                      if (!emoji || !current.draftRoleId) return current;
+                      const next = (current.bindings ?? []).filter((binding) => binding.emoji !== emoji);
+                      next.push({ emoji, roleId: current.draftRoleId });
+                      return { ...current, bindings: next, draftEmoji: '', draftRoleId: '' };
+                    })}
+                  >
+                    +
+                  </button>
+                </div>
+                <div className="modal-actions">
+                  <button type="button" className="ghost-btn" onClick={() => setReactionRoleModal(null)}>{t(language, 'cancel')}</button>
+                  <button
+                    type="button"
+                    disabled={reactionRoleModal.saving}
+                    onClick={() => {
+                      const modal = reactionRoleModal;
+                      if (!modal || modal.bindings === null) return;
+                      setReactionRoleModal({ ...modal, saving: true });
+                      api.setGroupReactionRoles(token, group.id, modal.messageId, modal.bindings)
+                        .then(() => setReactionRoleModal(null))
+                        .catch(() => setReactionRoleModal((current) => (current ? { ...current, saving: false } : current)));
+                    }}
+                  >
+                    {t(language, 'save')}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
         </div>,
         document.body
       ) : null}

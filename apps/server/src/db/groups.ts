@@ -12,6 +12,7 @@ export type GroupRecord = {
   description: string;
   default_role_id: string | null;
   everyone_permissions: string[];
+  automod_words: string[];
   created_at: Date;
 };
 
@@ -118,6 +119,7 @@ export type PublicGroup = {
   description: string;
   defaultRoleId: string | null;
   everyonePermissions: string[];
+  automodWords: string[];
   createdAt: string;
 };
 
@@ -241,6 +243,7 @@ export function toPublicGroup(group: GroupRecord): PublicGroup {
     description: group.description ?? '',
     defaultRoleId: group.default_role_id ?? null,
     everyonePermissions: group.everyone_permissions ?? [],
+    automodWords: Array.isArray(group.automod_words) ? group.automod_words : [],
     createdAt: group.created_at.toISOString()
   };
 }
@@ -591,7 +594,7 @@ export async function getGroupById(groupId: string) {
 export async function updateGroup(
   groupId: string,
   userId: string,
-  updates: { name?: string; avatarData?: string; nameplate?: NamePlate | null; description?: string }
+  updates: { name?: string; avatarData?: string; nameplate?: NamePlate | null; description?: string; automodWords?: string[] }
 ) {
   const member = await pool.query(
     `
@@ -615,6 +618,10 @@ export async function updateGroup(
   if (updates.name !== undefined) {
     setClauses.push(`name = $${paramIdx++}`);
     values.push(updates.name);
+  }
+  if (updates.automodWords !== undefined) {
+    setClauses.push(`automod_words = $${paramIdx++}::jsonb`);
+    values.push(JSON.stringify(updates.automodWords));
   }
   if (updates.avatarData !== undefined) {
     setClauses.push(`avatar_data = $${paramIdx++}`);
@@ -1669,4 +1676,81 @@ export async function setGroupMessagePin(messageId: string, pinned: boolean) {
     [messageId]
   );
   return result.rows[0] ?? null;
+}
+
+// ---- Reaction roles ----
+export type ReactionRoleBinding = { emoji: string; roleId: string };
+
+export async function listMessageReactionRoles(messageId: string): Promise<ReactionRoleBinding[]> {
+  const result = await pool.query<{ emoji: string; role_id: string }>(
+    'SELECT emoji, role_id FROM group_reaction_roles WHERE message_id = $1 ORDER BY created_at ASC',
+    [messageId]
+  );
+  return result.rows.map((row) => ({ emoji: row.emoji, roleId: row.role_id }));
+}
+
+// Replace-all semantics keep the admin dialog dead simple: what you see in
+// the list is exactly what is stored.
+export async function setMessageReactionRoles(messageId: string, groupId: string, bindings: ReactionRoleBinding[]) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('DELETE FROM group_reaction_roles WHERE message_id = $1', [messageId]);
+    for (const binding of bindings) {
+      await client.query(
+        'INSERT INTO group_reaction_roles (message_id, group_id, emoji, role_id) VALUES ($1, $2, $3, $4) ON CONFLICT (message_id, emoji) DO UPDATE SET role_id = EXCLUDED.role_id',
+        [messageId, groupId, binding.emoji, binding.roleId]
+      );
+    }
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function findReactionRole(messageId: string, emoji: string): Promise<{ roleId: string } | null> {
+  const result = await pool.query<{ role_id: string }>(
+    'SELECT role_id FROM group_reaction_roles WHERE message_id = $1 AND emoji = $2',
+    [messageId, emoji]
+  );
+  return result.rows[0] ? { roleId: result.rows[0].role_id } : null;
+}
+
+// ---- Audit log ----
+export async function logGroupAction(
+  groupId: string,
+  actorId: string | null,
+  action: string,
+  target = '',
+  details: Record<string, unknown> = {}
+) {
+  try {
+    await pool.query(
+      'INSERT INTO group_audit_log (id, group_id, actor_id, action, target, details) VALUES ($1, $2, $3, $4, $5, $6::jsonb)',
+      [randomUUID(), groupId, actorId, action, target.slice(0, 200), JSON.stringify(details)]
+    );
+  } catch (error) {
+    console.error('Audit log write failed', error);
+  }
+}
+
+export type AuditEntryRecord = {
+  id: string;
+  group_id: string;
+  actor_id: string | null;
+  action: string;
+  target: string;
+  details: Record<string, unknown>;
+  created_at: Date;
+};
+
+export async function listGroupAudit(groupId: string, limit = 100): Promise<AuditEntryRecord[]> {
+  const result = await pool.query<AuditEntryRecord>(
+    'SELECT * FROM group_audit_log WHERE group_id = $1 ORDER BY created_at DESC LIMIT $2',
+    [groupId, Math.min(limit, 200)]
+  );
+  return result.rows;
 }

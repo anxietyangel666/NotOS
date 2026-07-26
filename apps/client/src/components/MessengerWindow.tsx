@@ -240,6 +240,7 @@ function buildAiAssistantUser(currentUser: PublicUser, assistantName: string, as
     id: AI_ASSISTANT_USER_ID,
     nickname: assistantName || 'NotAI',
     role: 'user',
+    xp: 0,
     avatarData: assistantAvatarData || AI_ASSISTANT_AVATAR,
     wallpaper: '',
     language: currentUser.language,
@@ -690,6 +691,7 @@ function groupFromSenderSnapshot(senderGroup: SenderGroupSnapshot): Group {
     description: '',
     defaultRoleId: null,
     everyonePermissions: [],
+    automodWords: [],
     createdAt: new Date().toISOString()
   };
 }

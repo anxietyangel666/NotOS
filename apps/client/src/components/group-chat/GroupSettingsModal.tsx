@@ -5,7 +5,7 @@
 import { useEffect, useState, type Dispatch, type ReactNode, type SetStateAction } from 'react';
 import { createPortal } from 'react-dom';
 import { api } from '../../api/client';
-import type { GroupMessage } from '../../api/types';
+import type { GroupAuditEntry, GroupMessage } from '../../api/types';
 import type { CustomCategory, Group, GroupChannel, GroupInvite, GroupMember, GroupRole, Language, NamePlate, PublicUser } from '../../api/types';
 import { nameplateToCss } from '../../api/types';
 import { t } from '../../i18n';
@@ -18,10 +18,119 @@ import { UserName } from '../UserName';
 import { EVERYONE_ROLE_ID, MENTIONABLE_PERMISSION, MENTION_EVERYONE_PERMISSION } from './constants';
 import { rolePermissionLabel } from './permissions';
 
-export type GroupSettingsTab = 'overview' | 'invite' | 'roles' | 'members' | 'customization' | 'posts';
+export type GroupSettingsTab = 'overview' | 'invite' | 'roles' | 'members' | 'customization' | 'posts' | 'audit';
 
 // Admin toolbox for feed channels: per-channel stats, the sign-posts toggle
 // and the scheduled-posts queue. Self-contained (fetches its own data).
+function AutomodSection({ token, language, group }: { token: string; language: Language; group: Group }) {
+  const [draft, setDraft] = useState((group.automodWords ?? []).join('\n'));
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  return (
+    <div className="group-settings-section">
+      <h3>{t(language, 'automodTitle')}</h3>
+      <small className="muted-line">{t(language, 'automodHint')}</small>
+      <textarea
+        className="messenger-input"
+        rows={4}
+        style={{ resize: 'vertical' }}
+        placeholder={t(language, 'automodPlaceholder')}
+        value={draft}
+        onChange={(event) => { setDraft(event.target.value); setSaved(false); }}
+      />
+      <button
+        type="button"
+        className="secondary-action"
+        style={{ alignSelf: 'flex-end' }}
+        disabled={saving}
+        onClick={() => {
+          const words = [...new Set(draft.split(/[\n,]+/).map((word) => word.trim().toLowerCase()).filter(Boolean))].slice(0, 100);
+          setSaving(true);
+          api.updateGroup(token, group.id, { automodWords: words })
+            .then(() => { setSaved(true); setDraft(words.join('\n')); })
+            .catch(() => undefined)
+            .finally(() => setSaving(false));
+        }}
+      >
+        {saved ? t(language, 'saved') : t(language, 'save')}
+      </button>
+    </div>
+  );
+}
+
+function AuditLogView({
+  token,
+  language,
+  group,
+  formatShortDate
+}: {
+  token: string;
+  language: Language;
+  group: Group;
+  formatShortDate: (value: string) => string;
+}) {
+  const [entries, setEntries] = useState<GroupAuditEntry[] | null>(null);
+  const [users, setUsers] = useState<Record<string, PublicUser>>({});
+
+  useEffect(() => {
+    let alive = true;
+    api.getGroupAudit(token, group.id)
+      .then((payload) => {
+        if (!alive) return;
+        setEntries(payload.entries);
+        setUsers(payload.users);
+      })
+      .catch(() => { if (alive) setEntries([]); });
+    return () => { alive = false; };
+  }, [token, group.id]);
+
+  const actionLabel = (action: string): string => {
+    switch (action) {
+      case 'member_kicked': return t(language, 'auditMemberKicked');
+      case 'member_left': return t(language, 'auditMemberLeft');
+      case 'role_assigned': return t(language, 'auditRoleAssigned');
+      case 'role_removed': return t(language, 'auditRoleRemoved');
+      case 'channel_created': return t(language, 'auditChannelCreated');
+      case 'channel_deleted': return t(language, 'auditChannelDeleted');
+      case 'message_deleted': return t(language, 'auditMessageDeleted');
+      case 'automod_blocked': return t(language, 'auditAutomodBlocked');
+      case 'automod_updated': return t(language, 'auditAutomodUpdated');
+      case 'reaction_roles_updated': return t(language, 'auditReactionRoles');
+      default: return action;
+    }
+  };
+
+  return (
+    <div className="group-settings-section group-audit">
+      <h3>{t(language, 'tabAudit')}</h3>
+      {entries === null ? (
+        <small className="muted-line">…</small>
+      ) : entries.length === 0 ? (
+        <small className="muted-line">{t(language, 'auditEmpty')}</small>
+      ) : (
+        <div className="group-audit-list">
+          {entries.map((entry) => {
+            const actor = entry.actorId ? users[entry.actorId] : null;
+            const targetUser = users[entry.target];
+            const detailWord = entry.action === 'automod_blocked' && entry.target ? entry.target : null;
+            return (
+              <div className="group-audit-row" key={entry.id}>
+                <div className="group-audit-main">
+                  <strong>{actor?.nickname ?? '—'}</strong>
+                  <span>{actionLabel(entry.action)}</span>
+                  {targetUser ? <strong>{targetUser.nickname}</strong> : detailWord ? <code>{detailWord}</code> : null}
+                </div>
+                <time>{formatShortDate(entry.createdAt)}</time>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function FeedPostsTools({
   token,
   language,
@@ -411,6 +520,11 @@ export function GroupSettingsModal({
                 {t(language, 'tabPosts')}
               </button>
             ) : null}
+            {canManageRoles ? (
+              <button type="button" className={'group-settings-tab' + (settingsTab === 'audit' ? ' active' : '')} onClick={() => setSettingsTab('audit')}>
+                {t(language, 'tabAudit')}
+              </button>
+            ) : null}
           </div>
           {isOwner ? (
             <button
@@ -456,6 +570,9 @@ export function GroupSettingsModal({
                 />
                 <small className="muted-line" style={{ alignSelf: 'flex-end' }}>{newDescription.length}/200</small>
               </div>
+              {isOwner ? (
+                <AutomodSection token={token} language={language} group={group} />
+              ) : null}
               <div className="group-settings-section">
                 <h3>{t(language, 'nameplate')}</h3>
                 <div className="nameplate-editor group-nameplate-editor">
@@ -1190,6 +1307,10 @@ export function GroupSettingsModal({
 
           {settingsTab === 'posts' && canManageRoles ? (
             <FeedPostsTools token={token} language={language} group={group} channels={channels} formatShortDate={formatShortDate} />
+          ) : null}
+
+          {settingsTab === 'audit' && canManageRoles ? (
+            <AuditLogView token={token} language={language} group={group} formatShortDate={formatShortDate} />
           ) : null}
 
           {settingsTab === 'customization' && canManageRoles ? (

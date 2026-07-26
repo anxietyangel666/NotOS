@@ -42,6 +42,11 @@ import {
   updateGroupMessage,
   setGroupMessagePin,
   toggleGroupMessageReaction,
+  findReactionRole,
+  setMessageReactionRoles,
+  listMessageReactionRoles,
+  logGroupAction,
+  listGroupAudit,
   toPublicGroupMessagesWithReactions,
   toPublicGroupMessageEnriched,
   toPublicGroup,
@@ -89,7 +94,7 @@ import {
   needsOnboarding,
   markOnboardingComplete
 } from '../../db/customization.js';
-import { findUserById, toPublicUser, toPublicUserLite } from '../../db/users.js';
+import { findUserById, toPublicUser, toPublicUserLite, awardMessageXp } from '../../db/users.js';
 import { asyncHandler } from '../../http/async-handler.js';
 import { HttpError } from '../../http/errors.js';
 import { type AuthenticatedRequest, requireAuth } from '../../middleware/require-auth.js';
@@ -102,6 +107,7 @@ const createGroupSchema = z.object({
 
 const updateGroupSchema = z.object({
   name: z.string().trim().min(1).max(100).optional(),
+  automodWords: z.array(z.string().trim().min(1).max(40)).max(100).optional(),
   avatarData: z.string().max(1_000_000).optional(),
   description: z.string().trim().max(200).optional(),
   nameplate: z
@@ -566,6 +572,9 @@ export function createGroupRouter(io: Server) {
       const updated = await updateGroup(groupId, req.auth.userId, input);
 
       if (!updated) throw new HttpError(403, 'Only admins can update the group', 'GROUP_UPDATE_FORBIDDEN');
+      if (input.automodWords !== undefined) {
+        void logGroupAction(groupId, req.auth.userId, 'automod_updated', '', { count: input.automodWords.length });
+      }
 
       const group = toPublicGroup(updated);
 
@@ -709,6 +718,7 @@ export function createGroupRouter(io: Server) {
       const removed = await removeGroupMember(groupId, targetUserId, req.auth.userId);
       if (!removed) throw new HttpError(403, 'Cannot remove member', 'GROUP_REMOVE_FORBIDDEN');
 
+      void logGroupAction(groupId, req.auth.userId, req.auth.userId === targetUserId ? 'member_left' : 'member_kicked', targetUserId);
       io.to(targetUserId).emit('messenger:groupRemoved', { groupId });
 
       res.json({ success: true });
@@ -760,6 +770,10 @@ export function createGroupRouter(io: Server) {
       } else if (input.removeRoleId) {
         await detachRole(groupId, targetUserId, input.removeRoleId);
       }
+
+      void logGroupAction(groupId, req.auth.userId, input.removeRoleId ? 'role_removed' : 'role_assigned', targetUserId, {
+        roleId: input.roleId ?? input.addRoleId ?? input.removeRoleId ?? null
+      });
 
       const members = await listGroupMembers(groupId);
       const membersList = members.map(mapMember);
@@ -971,6 +985,7 @@ export function createGroupRouter(io: Server) {
       const members = await listGroupMembers(groupId);
       // A feed comes with its companion discussion channel (Telegram-style):
       // posts mirror into it and comments are replies to the mirror copy.
+      void logGroupAction(groupId, req.auth.userId, 'channel_created', input.name, { type: input.type ?? 'text' });
       if (input.type === 'feed') {
         const created = await createGroupFeed(groupId, input.name);
         const folder = toPublicGroupFolder(created.folder);
@@ -998,6 +1013,7 @@ export function createGroupRouter(io: Server) {
       await requireChannelPermission(groupId, channelId, req.auth.userId, 'ManageChannel', 'CHANNEL_DELETE_FORBIDDEN');
       const deleted = await deleteGroupChannel(channelId, groupId);
       if (!deleted) throw new HttpError(403, 'Cannot delete general channel', 'CHANNEL_DELETE_FORBIDDEN');
+      void logGroupAction(groupId, req.auth.userId, 'channel_deleted', channelId);
       const members = await listGroupMembers(groupId);
       await Promise.all(members.map((m) => io.to(m.user_id).emit('messenger:groupChannelDeleted', { channelId, groupId })));
       res.json({ success: true });
@@ -1676,6 +1692,18 @@ export function createGroupRouter(io: Server) {
         }
       }
 
+      // Stop-words automod: reject before anything is stored. Admins with
+      // ManageMessages bypass the filter (they maintain the list).
+      const automodWords = Array.isArray(group.automod_words) ? group.automod_words : [];
+      if (automodWords.length > 0 && input.body && !hasChannelPermission(effective, 'ManageMessages')) {
+        const lowered = input.body.toLowerCase();
+        const hit = automodWords.find((word) => word && lowered.includes(String(word).toLowerCase()));
+        if (hit) {
+          void logGroupAction(groupId, req.auth.userId, 'automod_blocked', String(hit), { channelId: input.channelId });
+          throw new HttpError(400, 'Message blocked by group word filter', 'AUTOMOD_BLOCKED');
+        }
+      }
+
       // Server-side game commands; "/pick @everyone" draws from the channel's
       // visible members.
       if (!input.image && !input.mediaItems?.length && /^\/(roll|coin|8ball|pick)\b/i.test(input.body.trim())) {
@@ -1705,6 +1733,9 @@ export function createGroupRouter(io: Server) {
 
       const message = await createGroupMessage(req.auth.userId, groupId, input.channelId, input.body, input.image, input.replyTo, senderGroup, input.mediaItems);
       if (!message) throw new HttpError(403, 'Cannot send message', 'GROUP_SEND_FORBIDDEN');
+
+      // Global account XP (60s server-side cooldown); never blocks the send.
+      void awardMessageXp(req.auth.userId).catch(() => undefined);
 
       const publicMessage = input.replyTo ? await toPublicGroupMessageEnriched(message) : toPublicGroupMessage(message);
 
@@ -1872,6 +1903,11 @@ export function createGroupRouter(io: Server) {
       }
 
       if (!canDelete) throw new HttpError(403, 'Cannot delete this message', 'GROUP_MESSAGE_DELETE_FORBIDDEN');
+      if (groupMessage.sender_id !== req.auth.userId) {
+        void logGroupAction(groupMessage.group_id, req.auth.userId, 'message_deleted', groupMessage.sender_id ?? '', {
+          channelId: groupMessage.channel_id
+        });
+      }
 
       const canonicalMessageId = groupMessage.feed_source_id ?? groupMessage.id;
       await pool.query(
@@ -1949,11 +1985,120 @@ export function createGroupRouter(io: Server) {
       }
 
       const canonicalMessageId = groupMessage.feed_source_id ?? groupMessage.id;
-      await toggleGroupMessageReaction(canonicalMessageId, req.auth.userId, emoji);
+      const reactions = await toggleGroupMessageReaction(canonicalMessageId, req.auth.userId, emoji);
+
+      // Reaction roles: a bound emoji grants the role on react and revokes it
+      // when the reaction is removed. Must never break the reaction itself.
+      try {
+        const binding = await findReactionRole(canonicalMessageId, emoji);
+        if (binding) {
+          const nowHas = reactions.some((reaction) => reaction.emoji === emoji && reaction.userIds.includes(req.auth.userId));
+          if (nowHas) await attachRole(groupMessage.group_id, req.auth.userId, binding.roleId);
+          else await detachRole(groupMessage.group_id, req.auth.userId, binding.roleId);
+          const members = await listGroupMembers(groupMessage.group_id);
+          const membersList = members.map(mapMember);
+          members.forEach((m) => io.to(m.user_id).emit('messenger:groupMemberRoleChanged', {
+            groupId: groupMessage.group_id,
+            userId: req.auth.userId,
+            roleId: binding.roleId,
+            members: membersList
+          }));
+        }
+      } catch (error) {
+        console.error('Reaction role sync failed', error);
+      }
+
       const messages = await emitFeedLinkedMessages('messenger:groupMessageUpdated', groupMessage.group_id, canonicalMessageId);
       const message = messages.find((item) => item.id === messageId) ?? messages.find((item) => item.id === canonicalMessageId) ?? await toPublicGroupMessageEnriched(groupMessage);
 
       res.json({ message });
+    })
+  );
+
+  // ── Reaction roles (admin) ─────────────────────────────────────────────────
+  const reactionRoleBindingsSchema = z.object({
+    bindings: z.array(z.object({
+      emoji: z.string().min(1).max(80),
+      roleId: z.string().uuid()
+    })).max(20)
+  });
+
+  router.get(
+    '/groups/:groupId/messages/:messageId/reaction-roles',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      const messageId = z.string().uuid().parse(req.params.messageId);
+      if (!(await isGroupMember(groupId, req.auth.userId))) throw new HttpError(403, 'Not a member', 'NOT_GROUP_MEMBER');
+      const existing = await pool.query('SELECT feed_source_id FROM group_messages WHERE id = $1 AND group_id = $2 AND deleted_at IS NULL', [messageId, groupId]);
+      if (!existing.rows[0]) throw new HttpError(404, 'Message not found', 'GROUP_MESSAGE_NOT_FOUND');
+      const canonicalId = existing.rows[0].feed_source_id ?? messageId;
+      res.json({ bindings: await listMessageReactionRoles(canonicalId) });
+    })
+  );
+
+  router.put(
+    '/groups/:groupId/messages/:messageId/reaction-roles',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      const messageId = z.string().uuid().parse(req.params.messageId);
+      const input = reactionRoleBindingsSchema.parse(req.body);
+
+      const perms = await getMemberPermissions(groupId, req.auth.userId);
+      const canManageRoles = perms?.isOwner || perms?.permissions?.includes('ManageRoles');
+      if (!canManageRoles) throw new HttpError(403, 'Not allowed to manage roles', 'ROLE_FORBIDDEN');
+
+      const existing = await pool.query('SELECT feed_source_id FROM group_messages WHERE id = $1 AND group_id = $2 AND deleted_at IS NULL', [messageId, groupId]);
+      if (!existing.rows[0]) throw new HttpError(404, 'Message not found', 'GROUP_MESSAGE_NOT_FOUND');
+      const canonicalId = existing.rows[0].feed_source_id ?? messageId;
+
+      // The owner role can never be handed out by a reaction.
+      const uniqueRoleIds = [...new Set(input.bindings.map((binding) => binding.roleId))];
+      if (uniqueRoleIds.length > 0) {
+        const roles = await pool.query<{ id: string; is_owner: boolean }>(
+          'SELECT id, is_owner FROM group_roles WHERE group_id = $1 AND id = ANY($2::uuid[])',
+          [groupId, uniqueRoleIds]
+        );
+        if (roles.rows.length !== uniqueRoleIds.length) throw new HttpError(404, 'Role not found', 'ROLE_NOT_FOUND');
+        if (roles.rows.some((role) => role.is_owner)) throw new HttpError(403, 'Cannot bind the owner role', 'ROLE_ASSIGN_OWNER');
+      }
+
+      await setMessageReactionRoles(canonicalId, groupId, input.bindings);
+      void logGroupAction(groupId, req.auth.userId, 'reaction_roles_updated', canonicalId, { count: input.bindings.length });
+      res.json({ bindings: input.bindings });
+    })
+  );
+
+  // ── Audit log (admin) ──────────────────────────────────────────────────────
+  router.get(
+    '/groups/:groupId/audit',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      const perms = await getMemberPermissions(groupId, req.auth.userId);
+      const allowed = perms?.isOwner || perms?.permissions?.includes('ManageRoles') || perms?.permissions?.includes('KickMembers');
+      if (!allowed) throw new HttpError(403, 'Not allowed to view the audit log', 'AUDIT_FORBIDDEN');
+
+      const rows = await listGroupAudit(groupId);
+      const userIds = [...new Set(rows.flatMap((row) => [row.actor_id, row.target].filter((value): value is string => Boolean(value && /^[0-9a-f-]{36}$/.test(value)))))];
+      const users: Record<string, ReturnType<typeof toPublicUserLite>> = {};
+      await Promise.all(userIds.map(async (id) => {
+        const user = await findUserById(id);
+        if (user) users[id] = toPublicUserLite(user);
+      }));
+
+      res.json({
+        entries: rows.map((row) => ({
+          id: row.id,
+          actorId: row.actor_id,
+          action: row.action,
+          target: row.target,
+          details: row.details ?? {},
+          createdAt: row.created_at.toISOString()
+        })),
+        users
+      });
     })
   );
 

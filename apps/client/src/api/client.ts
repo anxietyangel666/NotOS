@@ -36,7 +36,9 @@ import type {
   RecoverResponse,
   RegisterResponse,
   StoragePayload,
-  Theme
+  Theme,
+  ReactionRoleBinding,
+  GroupAuditEntry
 } from './types';
 
 export const DEFAULT_API_URL = import.meta.env.VITE_API_URL ?? 'https://server-production-23e35.up.railway.app';
@@ -511,7 +513,7 @@ export const api = {
   getGroupPublicProfile(token: string, groupId: string) {
     return request<{ group: Group; memberCount: number; isMember: boolean }>(`/api/messenger/groups/${encodeURIComponent(groupId)}/public-profile`, { token });
   },
-  updateGroup(token: string, groupId: string, input: { name?: string; avatarData?: string; nameplate?: NamePlate | null; description?: string }) {
+  updateGroup(token: string, groupId: string, input: { name?: string; avatarData?: string; nameplate?: NamePlate | null; description?: string; automodWords?: string[] }) {
     return request<{ group: Group }>(`/api/messenger/groups/${encodeURIComponent(groupId)}`, {
       method: 'PATCH', token, body: input
     });
@@ -651,6 +653,24 @@ export const api = {
   getFeedChannelStats(token: string, groupId: string, channelId: string) {
     return request<{ totals: { posts: number; views: number; reactions: number; comments: number }; top: Array<{ message: GroupMessage; views: number }> }>(
       `/api/messenger/groups/${encodeURIComponent(groupId)}/channels/${encodeURIComponent(channelId)}/stats`,
+      { token }
+    );
+  },
+  getGroupReactionRoles(token: string, groupId: string, messageId: string) {
+    return request<{ bindings: ReactionRoleBinding[] }>(
+      `/api/messenger/groups/${encodeURIComponent(groupId)}/messages/${encodeURIComponent(messageId)}/reaction-roles`,
+      { token }
+    );
+  },
+  setGroupReactionRoles(token: string, groupId: string, messageId: string, bindings: ReactionRoleBinding[]) {
+    return request<{ bindings: ReactionRoleBinding[] }>(
+      `/api/messenger/groups/${encodeURIComponent(groupId)}/messages/${encodeURIComponent(messageId)}/reaction-roles`,
+      { token, method: 'PUT', body: { bindings } }
+    );
+  },
+  getGroupAudit(token: string, groupId: string) {
+    return request<{ entries: GroupAuditEntry[]; users: Record<string, PublicUser> }>(
+      `/api/messenger/groups/${encodeURIComponent(groupId)}/audit`,
       { token }
     );
   },

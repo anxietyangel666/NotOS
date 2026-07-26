@@ -75,6 +75,7 @@ export type PublicUser = {
   pinnedImageData: string;
   pinnedCards: PinnedCard[];
   allowGroupIdentityMessages: boolean;
+  xp: number;
   createdAt: string;
   updatedAt: string;
 };
@@ -268,6 +269,7 @@ export type Group = {
   description: string;
   defaultRoleId: string | null;
   everyonePermissions: string[];
+  automodWords: string[];
   createdAt: string;
 };
 
@@ -521,3 +523,14 @@ export type RecoverResponse = {
 };
 
 export type AuthenticatedResponse = RegisterResponse | LoginResponse | RecoverResponse;
+
+export type ReactionRoleBinding = { emoji: string; roleId: string };
+
+export type GroupAuditEntry = {
+  id: string;
+  actorId: string | null;
+  action: string;
+  target: string;
+  details: Record<string, unknown>;
+  createdAt: string;
+};

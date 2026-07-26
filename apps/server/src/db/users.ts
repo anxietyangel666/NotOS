@@ -56,6 +56,8 @@ export type UserRecord = {
   auth_secret_hash: string;
   password_hash: string | null;
   recovery_key_hash: string;
+  xp: string | number;
+  last_xp_at: Date | null;
   created_at: Date;
   updated_at: Date;
 };
@@ -82,6 +84,7 @@ export type PublicUser = {
   profileAccentColor: string;
   nameplate: NamePlate | null;
   allowGroupIdentityMessages: boolean;
+  xp: number;
   createdAt: string;
   updatedAt: string;
 };
@@ -117,6 +120,7 @@ export function toPublicUser(user: UserRecord): PublicUser {
     profileAccentColor: user.profile_accent_color,
     nameplate: user.nameplate ?? null,
     allowGroupIdentityMessages: user.allow_group_identity_messages ?? true,
+    xp: Number(user.xp ?? 0),
     createdAt: user.created_at.toISOString(),
     updatedAt: user.updated_at.toISOString()
   };
@@ -142,7 +146,7 @@ const LITE_USER_FIELDS = [
   'id', 'nickname', 'role', 'avatar_data', 'language_code', 'theme', 'accent_color',
   'transparency_enabled', 'desktop_icon_size', 'hide_desktop_icons', 'desktop_sort',
   'status', 'name_style', 'profile_primary_color', 'profile_accent_color', 'nameplate',
-  'allow_group_identity_messages', 'created_at', 'updated_at'
+  'allow_group_identity_messages', 'xp', 'created_at', 'updated_at'
 ];
 
 export function liteUserColumns(prefix = ''): string {
@@ -174,6 +178,7 @@ export function toPublicUserLite(user: UserRecord): PublicUser {
     profileAccentColor: user.profile_accent_color,
     nameplate: user.nameplate ?? null,
     allowGroupIdentityMessages: user.allow_group_identity_messages ?? true,
+    xp: Number(user.xp ?? 0),
     createdAt: user.created_at.toISOString(),
     updatedAt: user.updated_at.toISOString()
   };
@@ -377,4 +382,21 @@ export async function updateUserSettings(
   );
 
   return result.rows[0] ?? null;
+}
+
+// Award message XP with a 60s cooldown so spamming does not farm levels.
+// Fire-and-forget from the send routes; returns the new total or null when
+// still cooling down.
+export async function awardMessageXp(userId: string): Promise<number | null> {
+  const result = await pool.query<{ xp: string }>(
+    `
+      UPDATE users
+      SET xp = xp + 15, last_xp_at = NOW()
+      WHERE id = $1
+        AND (last_xp_at IS NULL OR last_xp_at < NOW() - INTERVAL '60 seconds')
+      RETURNING xp
+    `,
+    [userId]
+  );
+  return result.rows[0] ? Number(result.rows[0].xp) : null;
 }

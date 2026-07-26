@@ -18,6 +18,7 @@ import { UserStatusPanel } from './UserStatusPanel';
 import { ProfilePreviewCard } from './ProfilePreviewCard';
 import { currentActivityProgressMs, useUserActivities } from './UserActivityStatus';
 import { assetUrl } from '../utils/assets';
+import { levelFromXp, tierKeyForLevel } from '../utils/level';
 
 const CONNECTION_ICONS = {
   spotify: assetUrl('Icons/spotify.png'),
@@ -110,6 +111,9 @@ export function ProfileModal({
   // those payloads small. We fetch the full user on open and store the heavy
   // wallpaper here so the card background fills in once available.
   const [fullWallpaper, setFullWallpaper] = useState(user.wallpaper);
+  // Global account XP -> level. Lite payloads carry xp too, but a stale
+  // cached prop may not, so revalidate together with the wallpaper fetch.
+  const [profileXp, setProfileXp] = useState(user.xp ?? 0);
   const [statusDraft, setStatusDraft] = useState(() => customEmojiToShortcodes(user.status ?? ''));
   const [savingStatus, setSavingStatus] = useState(false);
   const [editingStatus, setEditingStatus] = useState(false);
@@ -305,6 +309,7 @@ export function ProfileModal({
   // wallpaper. For self we already hold the complete user.
   useEffect(() => {
     setFullWallpaper(user.wallpaper);
+    setProfileXp(user.xp ?? 0);
     if (user.wallpaper) return; // already complete, nothing to upgrade
     // Paint a previously-fetched wallpaper immediately (even if the cache
     // entry expired) so reopening a profile never flashes empty, then
@@ -319,6 +324,7 @@ export function ProfileModal({
         if (!alive) return;
         cacheUser(full);
         setFullWallpaper(full.wallpaper);
+        setProfileXp(full.xp ?? 0);
       })
       .catch(() => { /* keep the lite data already shown */ });
     return () => { alive = false; };
@@ -702,6 +708,30 @@ export function ProfileModal({
                   </small>
                 ) : null}
               </div>
+
+              {(() => {
+                const levelInfo = levelFromXp(profileXp);
+                return (
+                  <div className="profile-level-card" title={`${levelInfo.currentXp} XP`}>
+                    <div className="profile-level-badge" aria-hidden="true">
+                      <svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M12 2l2.6 5.6L20 9l-4 4.2.9 6L12 16.4 7.1 19.2l.9-6L4 9l5.4-1.4L12 2z" />
+                      </svg>
+                      <span className="profile-level-number">{levelInfo.level}</span>
+                    </div>
+                    <div className="profile-level-copy">
+                      <div className="profile-level-titles">
+                        <strong>{t(language, 'levelLabel')} {levelInfo.level}</strong>
+                        <span className="profile-level-tier">{t(language, tierKeyForLevel(levelInfo.level))}</span>
+                      </div>
+                      <div className="profile-level-track">
+                        <div className="profile-level-fill" style={{ width: `${Math.max(2, Math.round(levelInfo.progress * 100))}%` }} />
+                      </div>
+                      <small className="profile-level-xp">{levelInfo.currentXp} / {levelInfo.nextLevelXp} XP</small>
+                    </div>
+                  </div>
+                );
+              })()}
 
               {activities.length > 0 ? (
                 <div className="profile-activities">

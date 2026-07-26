@@ -52,7 +52,7 @@ import {
   blockExistsBetween,
   listBlockedIds
 } from '../../db/messenger.js';
-import { findUserById, liteUserColumns, toPublicUser, toPublicUserLite, userExistsById } from '../../db/users.js';
+import { findUserById, liteUserColumns, toPublicUser, toPublicUserLite, userExistsById, awardMessageXp } from '../../db/users.js';
 import {
   getMutualGroups,
   getUserGroups,
@@ -1038,6 +1038,9 @@ export function createMessengerRouter(io: Server) {
         );
         created.read_at = read.rows[0]?.read_at ?? created.read_at;
       }
+      // Global account XP (60s server-side cooldown); never blocks the send.
+      if (!isSelfMessage) void awardMessageXp(req.auth.userId).catch(() => undefined);
+
       const message = input.replyTo ? await toPublicMessageEnriched(created) : toPublicMessage(created);
       io.to(req.auth.userId).emit('messenger:message', { message });
       if (!isSelfMessage) io.to(input.recipientId).emit('messenger:message', { message });
