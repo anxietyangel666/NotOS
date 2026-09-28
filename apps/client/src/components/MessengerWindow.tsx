@@ -6,7 +6,7 @@ import { cacheUser, getOrFetchUser } from '../api/user-cache';
 import { useSocket } from '../hooks/use-socket';
 import type { ChatMediaItem, ConversationPreview, FriendRequests, Group, GroupConversationPreview, GroupMessage, GroupRole, Language, MessengerMessage, PublicUser, StorageItem, AiSettings } from '../api/types';
 import { nameplateToCss } from '../api/types';
-import { readImageAsDataUrl } from '../auth/auth-file';
+import { openNativeImageFile, readImageAsDataUrl } from '../auth/auth-file';
 import { LOCALES, t, getSavedTimeFormat, getSavedTranslateTargetName, getSavedComposerTranslateTargetName } from '../i18n';
 import { EmojiPicker, GifStar } from './EmojiPicker';
 import { EmojiInlineInput, type EmojiInlineInputHandle } from './EmojiInlineInput';
@@ -496,6 +496,7 @@ function messageMentionTokens(body: string) {
 }
 
 function messageRunIdentity(message: MessengerMessage) {
+  if (message.aiGenerated) return `ai:${message.id}`;
   return message.senderGroup ? `group:${message.senderGroup.id}:user:${message.senderId}` : `user:${message.senderId}`;
 }
 
@@ -861,6 +862,7 @@ export function MessengerWindow({
   const [editingMessage, setEditingMessage] = useState<MessengerMessage | null>(null);
   // The message being replied to (shows the reply bar above the composer).
   const [replyTarget, setReplyTarget] = useState<MessageReplySnippet | null>(null);
+  const [replyingWithAiId, setReplyingWithAiId] = useState<string | null>(null);
   // The emoji-picker anchor for adding a reaction to a specific DM message.
   const [reactionPicker, setReactionPicker] = useState<{ message: MessengerMessage; anchor: HTMLElement } | null>(null);
   const reactionAnchorRef = useRef<HTMLElement | null>(null);
@@ -895,6 +897,9 @@ export function MessengerWindow({
   const [userMenu, setUserMenu] = useState<{ x: number; y: number; user: PublicUser } | null>(null);
   const userMenuRef = useRef<HTMLDivElement | null>(null);
   const userMenuPos = useAnchoredMenu(userMenu ? { x: userMenu.x, y: userMenu.y } : null, userMenuRef);
+  const [groupRailMenu, setGroupRailMenu] = useState<{ x: number; y: number; group: Group } | null>(null);
+  const groupRailMenuRef = useRef<HTMLDivElement | null>(null);
+  const groupRailMenuPos = useAnchoredMenu(groupRailMenu ? { x: groupRailMenu.x, y: groupRailMenu.y } : null, groupRailMenuRef);
   const imageCaptionMenuRef = useRef<HTMLDivElement | null>(null);
   const imageCaptionMenuPos = useAnchoredMenu(imageCaptionMenu, imageCaptionMenuRef);
   const [profileUser, setProfileUser] = useState<PublicUser | null>(null);
@@ -1019,17 +1024,19 @@ export function MessengerWindow({
   const hasSearchQuery = query.trim().length >= 2;
   const selectedIsFriend = useMemo(() => Boolean(selectedUser && friends.some((friend) => friend.id === selectedUser.id)), [friends, selectedUser]);
   const selectedTyping = Boolean(selectedUser && typingUserIds.includes(selectedUser.id));
-  const selectedChatBackground = selectedUser ? dmBackgrounds[selectedUser.id] ?? '' : '';
+  const lastChatBackgroundFromMessages = useMemo(() => {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const action = parseChatBackgroundMarker(messages[index].body);
+      if (action === 'clear') return '';
+      if (action === 'set' && messages[index].imageData) return messages[index].imageData ?? '';
+    }
+    return '';
+  }, [messages]);
+  const selectedChatBackground = selectedUser
+    ? (dmBackgrounds[selectedUser.id] || lastChatBackgroundFromMessages)
+    : '';
   const aiAssistantUser = useMemo(() => buildAiAssistantUser(currentUser, aiAssistantName, aiAssistantAvatarData), [aiAssistantAvatarData, aiAssistantName, currentUser]);
   const isAiAssistantSelected = selectedUser?.id === AI_ASSISTANT_USER_ID;
-  const selectedChatBackgroundStyle = selectedChatBackground
-    ? {
-        backgroundImage: `linear-gradient(color-mix(in srgb, var(--bg) 18%, transparent), color-mix(in srgb, var(--bg) 18%, transparent)), url("${selectedChatBackground}")`,
-        backgroundSize: 'cover',
-        backgroundPosition: 'center',
-        backgroundRepeat: 'no-repeat'
-      } as CSSProperties
-    : undefined;
   const canChooseGroupIdentityInDm = selectedUser?.allowGroupIdentityMessages !== false;
   const memberGroupIds = useMemo(() => new Set(groups.map((group) => group.id)), [groups]);
   const imageDropEnabled = Boolean(selectedUser && activeView === 'directMessages' && !editingMessage && !isAiAssistantSelected);
@@ -1318,7 +1325,7 @@ export function MessengerWindow({
   }, [selectedUser?.id, selectedGroup?.id]);
 
   useEffect(() => {
-    if (!messageMenu && !userMenu && !composerMenu && !chatMenu && !imageCaptionMenu) return;
+    if (!messageMenu && !userMenu && !composerMenu && !chatMenu && !imageCaptionMenu && !groupRailMenu) return;
 
     function closeMenu(event: globalThis.MouseEvent) {
       const target = event.target as Node | null;
@@ -1328,6 +1335,7 @@ export function MessengerWindow({
       setComposerMenu(null);
       setChatMenu(null);
       setImageCaptionMenu(null);
+      setGroupRailMenu(null);
     }
 
     const rafId = window.requestAnimationFrame(() => {
@@ -1337,7 +1345,7 @@ export function MessengerWindow({
       window.cancelAnimationFrame(rafId);
       window.removeEventListener('mousedown', closeMenu);
     };
-  }, [messageMenu, userMenu, composerMenu, chatMenu, imageCaptionMenu]);
+  }, [messageMenu, userMenu, composerMenu, chatMenu, imageCaptionMenu, groupRailMenu]);
 
   useEffect(() => {
     if (!resizing) return;
@@ -1445,13 +1453,44 @@ export function MessengerWindow({
     return { ...message, reactions: next };
   }
 
+  function findLatestMessageForUser(otherId: string, excludingMessageId: string): MessengerMessage | null {
+    const cacheKey = dmCacheKey(currentUser.id, otherId);
+    const cached = messageCacheRef.current.get(cacheKey);
+    const candidateList = cached && cached.length > 0
+      ? cached
+      : (selectedUserRef.current?.id === otherId ? messages : []);
+    const remaining = candidateList.filter((m) => m.id !== excludingMessageId && !m.deletedAt);
+    if (!remaining.length) return null;
+    return remaining.slice().sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0] ?? null;
+  }
+
+  function handleConversationOnMessageDeleted(deleted: MessengerMessage) {
+    const otherId = deleted.senderId === currentUser.id ? deleted.recipientId : deleted.senderId;
+    const prev = findLatestMessageForUser(otherId, deleted.id);
+    setConversations((current) =>
+      current.map((conversation) => {
+        if (conversation.message.id !== deleted.id) return conversation;
+        if (prev) {
+          return { ...conversation, message: prev };
+        }
+        return {
+          ...conversation,
+          message: { ...conversation.message, deletedAt: deleted.deletedAt ?? new Date().toISOString(), body: '' }
+        };
+      })
+    );
+    void api.getConversations(token).then((payload) => setConversations(payload.conversations)).catch(() => undefined);
+  }
+
   function replaceMessage(nextMessage: MessengerMessage, confirmedReactionEmoji?: string) {
     const otherId = nextMessage.senderId === currentUser.id ? nextMessage.recipientId : nextMessage.senderId;
     const cacheKey = dmCacheKey(currentUser.id, otherId);
     const cached = messageCacheRef.current.get(cacheKey);
     if (cached) {
       messageCacheRef.current.set(cacheKey, nextMessage.deletedAt
-        ? cached.filter((message) => message.id !== nextMessage.id)
+        ? cached
+            .filter((message) => message.id !== nextMessage.id)
+            .map((message) => markDeletedReplyInDm(message, nextMessage.id, nextMessage.deletedAt!))
         : cached.map((message) => (
           message.id === nextMessage.id ? mergePendingReactions(nextMessage, message, confirmedReactionEmoji) : message
         ))
@@ -1459,17 +1498,20 @@ export function MessengerWindow({
     }
     let mergedForPanels = nextMessage;
     setMessages((current) => {
-      if (nextMessage.deletedAt) return current.filter((message) => message.id !== nextMessage.id);
+      if (nextMessage.deletedAt) {
+        return current
+          .filter((message) => message.id !== nextMessage.id)
+          .map((message) => markDeletedReplyInDm(message, nextMessage.id, nextMessage.deletedAt!));
+      }
       return current.map((message) => {
-      if (message.id !== nextMessage.id) return message;
-      mergedForPanels = mergePendingReactions(nextMessage, message, confirmedReactionEmoji);
-      return mergedForPanels;
+        if (message.id !== nextMessage.id) return message;
+        mergedForPanels = mergePendingReactions(nextMessage, message, confirmedReactionEmoji);
+        return mergedForPanels;
       });
     });
     syncRightPanelMessage(mergedForPanels);
     if (nextMessage.deletedAt) {
-      setConversations((current) => current.filter((conversation) => conversation.message.id !== nextMessage.id));
-      void api.getConversations(token).then((payload) => setConversations(payload.conversations)).catch(() => undefined);
+      handleConversationOnMessageDeleted(nextMessage);
     } else {
       setConversations((current) =>
         current.map((conversation) => (conversation.message.id === nextMessage.id ? { ...conversation, message: mergedForPanels } : conversation))
@@ -1754,8 +1796,7 @@ export function MessengerWindow({
       if (selectedUserRef.current?.id === otherId) {
         setConversationPinnedMessages((current) => current.filter((message) => message.id !== deleted.id));
       }
-      setConversations((current) => current.filter((conversation) => conversation.message.id !== deleted.id));
-      void api.getConversations(token).then((payload) => setConversations(payload.conversations)).catch(() => undefined);
+      handleConversationOnMessageDeleted(deleted);
       syncRightPanelMessage(deleted);
       setEditingMessage((current) => (current?.id === deleted.id ? null : current));
     }
@@ -1778,8 +1819,10 @@ export function MessengerWindow({
       void api.getConversations(token).then((next) => setConversations(next.conversations)).catch(() => undefined);
     }
 
-    function onConversationBackgroundChanged(payload: { userId: string; backgroundData: string }) {
-      setDmBackgrounds((current) => ({ ...current, [payload.userId]: payload.backgroundData }));
+    function onConversationBackgroundChanged(payload: { userId: string; backgroundData?: string }) {
+      if (typeof payload.backgroundData !== 'string') return;
+      if (payload.backgroundData && !payload.backgroundData.startsWith('data:image/')) return;
+      setDmBackgrounds((current) => ({ ...current, [payload.userId]: payload.backgroundData ?? '' }));
     }
 
     function onConversationTtlChanged(payload: { userId: string; ttlSeconds: number }) {
@@ -1787,9 +1830,10 @@ export function MessengerWindow({
     }
 
     function onScheduledCreated(payload: { message: MessengerMessage }) {
-      setScheduledMessages((current) => current.some((m) => m.id === payload.message.id)
-        ? current
-        : [...current, payload.message].sort((a, b) => new Date(a.scheduledAt ?? 0).getTime() - new Date(b.scheduledAt ?? 0).getTime()));
+      setScheduledMessages((current) => {
+        if (current.some((m) => m.id === payload.message.id)) return current;
+        return [...current, payload.message].sort((a, b) => new Date(a.scheduledAt ?? 0).getTime() - new Date(b.scheduledAt ?? 0).getTime());
+      });
     }
 
     function onScheduledSent(payload: { message: MessengerMessage }) {
@@ -2836,6 +2880,7 @@ export function MessengerWindow({
     // When the server responds we reconcile IN PLACE (keep the same clientKey)
     // so React updates the existing bubble instead of remounting it — that
     // remount was what made the message flash and jump. Rolled back on failure.
+    const isParkedSend = Boolean(sendOptions?.scheduledAt || sendOptions?.sendWhenOnline);
     const clientKey = `ck-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const optimistic: MessengerMessage = {
       id: clientKey,
@@ -2861,7 +2906,7 @@ export function MessengerWindow({
       clientKey,
       pending: true
     };
-    setMessages((current) => [...current, optimistic]);
+    if (!isParkedSend) setMessages((current) => [...current, optimistic]);
 
     try {
       const uploadedBatchImages = recordingOverride ? batchImages : await uploadPendingChatImages(batchImages);
@@ -2882,10 +2927,12 @@ export function MessengerWindow({
       setViewOnceArmed(false);
       // A scheduled / parked message is not part of the visible thread yet:
       // drop the optimistic bubble and let the "Scheduled" bar track it.
-      if (sendOptions?.scheduledAt || sendOptions?.sendWhenOnline) {
-        setMessages((current) => current.filter((message) => message.clientKey !== clientKey));
-        setScheduledMessages((current) => [...current, payload.message]
-          .sort((a, b) => new Date(a.scheduledAt ?? 0).getTime() - new Date(b.scheduledAt ?? 0).getTime()));
+      if (isParkedSend) {
+        setScheduledMessages((current) => {
+          if (current.some((message) => message.id === payload.message.id)) return current;
+          return [...current, payload.message]
+            .sort((a, b) => new Date(a.scheduledAt ?? 0).getTime() - new Date(b.scheduledAt ?? 0).getTime());
+        });
         return;
       }
       setMessages((current) => {
@@ -2897,7 +2944,7 @@ export function MessengerWindow({
       });
       upsertConversation(payload.message);
     } catch (sendError) {
-      setMessages((current) => current.filter((message) => message.clientKey !== clientKey));
+      if (!isParkedSend) setMessages((current) => current.filter((message) => message.clientKey !== clientKey));
       if (!recordingOverride) {
         if (image) setImageCaptionDraft(body);
         else replaceMessageDraft(body);
@@ -2949,6 +2996,9 @@ export function MessengerWindow({
       id: message.id,
       senderId: message.senderId,
       senderGroup: message.senderGroup,
+      aiGenerated: message.aiGenerated,
+      aiName: message.aiName,
+      aiAvatarData: message.aiAvatarData,
       body: message.body,
       imageData: message.imageData,
       imageName: message.imageName,
@@ -2956,6 +3006,18 @@ export function MessengerWindow({
       createdAt: message.createdAt
     });
     window.setTimeout(() => messageInputRef.current?.focus(), 0);
+  }
+
+  async function handleReplyWithAi(message: MessengerMessage) {
+    if (replyingWithAiId) return;
+    setReplyingWithAiId(message.id);
+    try {
+      await api.replyWithAiDm(token, message.id);
+    } catch (err: any) {
+      console.error('Failed to reply with AI', err);
+    } finally {
+      setReplyingWithAiId(null);
+    }
   }
 
   function forwardBodyForMessage(message: Pick<MessengerMessage, 'body' | 'imageData' | 'imageName'>) {
@@ -3054,16 +3116,27 @@ export function MessengerWindow({
   }
 
   async function removeMessage(message: MessengerMessage) {
+    if (editingMessage?.id === message.id) {
+      setEditingMessage(null);
+      setEditingMediaItems([]);
+      replaceMessageDraft('');
+    }
+    setMessageMenu(null);
+    setDeleteConfirm(null);
+
+    const nowIso = new Date().toISOString();
+    const optimisticDeleted: MessengerMessage = {
+      ...message,
+      deletedAt: nowIso,
+      body: ''
+    };
+    replaceMessage(optimisticDeleted);
+
     try {
       const payload = await api.deleteMessage(token, message.id);
       replaceMessage(payload.message);
-      if (editingMessage?.id === message.id) {
-        setEditingMessage(null);
-        setEditingMediaItems([]);
-        replaceMessageDraft('');
-      }
-      setMessageMenu(null);
     } catch (deleteError) {
+      replaceMessage(message);
       setError(deleteError instanceof Error ? deleteError.message : t(language, 'unknownError'));
     }
   }
@@ -3089,19 +3162,54 @@ export function MessengerWindow({
     }
   }
 
-  async function chooseChatBackground(file: File | undefined) {
-    if (!file || !selectedUser) return;
-    if (!file.type.startsWith('image/') || file.size > 8 * 1024 * 1024) return;
+  async function applyChatBackgroundDataUrl(dataUrl: string) {
+    if (!selectedUser) return;
+    if (!dataUrl.startsWith('data:image/')) {
+      setError(t(language, 'chatBackgroundInvalid'));
+      return;
+    }
+    const comma = dataUrl.indexOf(',');
+    const bytes = comma >= 0 ? Math.ceil((dataUrl.length - comma - 1) * 0.75) : dataUrl.length;
+    if (bytes > 8 * 1024 * 1024) {
+      setError(t(language, 'chatBackgroundTooLarge'));
+      return;
+    }
     const targetUserId = selectedUser.id;
     try {
-      const dataUrl = await readImageAsDataUrl(file);
       const payload = await api.setConversationBackground(token, targetUserId, dataUrl);
-      setDmBackgrounds((current) => ({ ...current, [targetUserId]: payload.settings.backgroundData }));
+      setDmBackgrounds((current) => ({ ...current, [targetUserId]: payload.settings.backgroundData || dataUrl }));
       setMessages((current) => (current.some((message) => message.id === payload.message.id) ? current : [...current, payload.message]));
       upsertConversation(payload.message);
     } catch (backgroundError) {
       setError(backgroundError instanceof Error ? backgroundError.message : t(language, 'unknownError'));
     }
+  }
+
+  async function chooseChatBackground(file: File | undefined) {
+    if (!file || !selectedUser) return;
+    if (!file.type.startsWith('image/')) {
+      setError(t(language, 'chatBackgroundInvalid'));
+      return;
+    }
+    if (file.size > 8 * 1024 * 1024) {
+      setError(t(language, 'chatBackgroundTooLarge'));
+      return;
+    }
+    try {
+      await applyChatBackgroundDataUrl(await readImageAsDataUrl(file));
+    } catch (backgroundError) {
+      setError(backgroundError instanceof Error ? backgroundError.message : t(language, 'unknownError'));
+    }
+  }
+
+  async function pickChatBackground() {
+    if (!selectedUser) return;
+    if (window.notoc?.openImageFile) {
+      const native = await openNativeImageFile();
+      if (native?.dataUrl) await applyChatBackgroundDataUrl(native.dataUrl);
+      return;
+    }
+    backgroundInputRef.current?.click();
   }
 
   async function clearChatBackground() {
@@ -3794,7 +3902,8 @@ export function MessengerWindow({
                 avatar: group.avatarData || `data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" fill="%23444" rx="20"/><text x="50" y="58" text-anchor="middle" fill="%23fff" font-size="28" font-family="sans-serif">${(group.name[0]||'?').toUpperCase()}</text></svg>`,
                 unread: groupMentionCounts[group.id] ?? 0,
                 active: selectedGroup?.id === group.id,
-                onOpen: () => { setSelectedGroup(group); setSelectedUser(null); setMessages([]); }
+                onOpen: () => { setSelectedGroup(group); setSelectedUser(null); setMessages([]); },
+                onContextMenu: (event) => setGroupRailMenu({ x: event.clientX, y: event.clientY, group })
               }))}
             />
           </div>
@@ -4172,6 +4281,22 @@ export function MessengerWindow({
                   <button
                     className="messenger-call-button"
                     type="button"
+                    title={t(language, 'setChatBackground')}
+                    aria-label={t(language, 'setChatBackground')}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      void pickChatBackground();
+                    }}
+                  >
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <rect x="3" y="5" width="18" height="14" rx="2" />
+                      <circle cx="8.5" cy="10" r="1.5" />
+                      <path d="m21 16-5.5-5.5L9 17" />
+                    </svg>
+                  </button>
+                  <button
+                    className="messenger-call-button"
+                    type="button"
                     title={language === 'ru' ? 'Действия' : 'Actions'}
                     onClick={(event) => {
                       event.stopPropagation();
@@ -4209,8 +4334,19 @@ export function MessengerWindow({
 
               <div
                 className={selectedChatBackground ? 'messenger-thread-wrap chat-enlarged dm-custom-background' : 'messenger-thread-wrap chat-enlarged'}
-                style={selectedChatBackgroundStyle}
+                onContextMenu={(event) => {
+                  if (!selectedUser) return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  setChatMenu({ x: event.clientX, y: event.clientY });
+                }}
               >
+                {selectedChatBackground ? (
+                  <>
+                    <img className="dm-chat-wallpaper" src={selectedChatBackground} alt="" />
+                    <div className="dm-chat-wallpaper-dim" aria-hidden />
+                  </>
+                ) : null}
                 {(() => {
                   const pinnedSource = conversationPinnedMessages.length > 0 ? conversationPinnedMessages : messages;
                   const pinned = pinnedSource
@@ -4234,7 +4370,7 @@ export function MessengerWindow({
                       <div key={current.id} className="messenger-pinned-message">
                         <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/></svg>
                         {current.senderGroup ? <strong>{current.senderGroup.name}</strong> : sender ? <UserName user={sender} as="strong" /> : <strong>{senderName}</strong>}
-                        <span>{current.body || (isVideoCircleAttachment(current.imageData, current.imageName) ? '📹' : isVoiceAttachment(current.imageData, current.imageName) ? '🎤' : current.imageData ? '📷' : '')}</span>
+                        <span>{current.body ? <MessagePreviewText text={current.body} size={15} /> : (isVideoCircleAttachment(current.imageData, current.imageName) ? '📹' : isVoiceAttachment(current.imageData, current.imageName) ? '🎤' : current.imageData ? '📷' : '')}</span>
                       </div>
                     </div>
                   );
@@ -4501,9 +4637,13 @@ export function MessengerWindow({
                     mentionsCurrentUser ? 'message-mention-highlight' : '',
                     message.pending ? 'pending' : ''
                   ].filter(Boolean).join(' ');
-                  const senderUser = message.senderGroup ? null : (message.senderId === currentUser.id ? currentUser : selectedUser);
-                  const senderAvatar = message.senderGroup?.avatarData || (message.senderId === currentUser.id ? currentUser.avatarData : (selectedUser?.avatarData ?? ''));
-                  const senderName = message.senderGroup?.name || (message.senderId === currentUser.id ? currentUser.nickname : (selectedUser?.nickname ?? ''));
+                  const senderUser = message.senderGroup || message.aiGenerated ? null : (message.senderId === currentUser.id ? currentUser : selectedUser);
+                  const senderAvatar = message.aiGenerated
+                    ? (message.aiAvatarData || AI_ASSISTANT_AVATAR)
+                    : (message.senderGroup?.avatarData || (message.senderId === currentUser.id ? currentUser.avatarData : (selectedUser?.avatarData ?? '')));
+                  const senderName = message.aiGenerated
+                    ? (message.aiName || 'NotAI')
+                    : (message.senderGroup?.name || (message.senderId === currentUser.id ? currentUser.nickname : (selectedUser?.nickname ?? '')));
                   const callLogText = callLabel ? callLogSystemText(message, currentUser.id, language) : null;
 
                   {
@@ -4567,6 +4707,8 @@ export function MessengerWindow({
                       onContextMenu={(event) => {
                         if (message.deletedAt) return;
                         event.preventDefault();
+                        event.stopPropagation();
+                        setChatMenu(null);
                         setMessageMenu({
                           x: event.clientX,
                           y: event.clientY,
@@ -4579,12 +4721,9 @@ export function MessengerWindow({
                         src={senderAvatar}
                         alt=""
                         draggable={false}
-                        style={{ cursor: 'pointer' }}
+                        style={{ cursor: (message.senderGroup || message.aiGenerated) ? 'default' : 'pointer' }}
                         onClick={(event) => {
-                          if (message.senderGroup) {
-                            void openSenderGroupProfile(message.senderGroup, rectFrom(event));
-                            return;
-                          }
+                          if (message.senderGroup || message.aiGenerated) return;
                           setProfileUser(message.senderId === currentUser.id ? currentUser : selectedUser!);
                           setProfileAnchor(rectFrom(event));
                         }}
@@ -4609,7 +4748,12 @@ export function MessengerWindow({
                         ) : null}
                         {isStartOfGroup && !callLabel ? (
                           <div className="message-meta">
-                            {senderUser
+                            {message.aiGenerated ? (
+                              <span className="message-author-wrap">
+                                <strong className="message-author">{senderName}</strong>
+                                <span className="ai-message-badge">{language === 'ru' ? 'ИИ' : language === 'uk' ? 'ШІ' : 'AI'}</span>
+                              </span>
+                            ) : senderUser
                               ? <UserName user={senderUser} as="strong" className="message-author" />
                               : <strong className="message-author">{senderName}</strong>}
                             <time className="message-time">
@@ -4912,6 +5056,29 @@ export function MessengerWindow({
                     <span className="context-menu-action-text">{t(language, 'reply')}</span>
                     <MenuReplyIcon />
                   </button>
+                  {!messageMenu.message.deletedAt && !messageMenu.message.pending ? (
+                    <button
+                      type="button"
+                      className="context-menu-action"
+                      disabled={Boolean(replyingWithAiId)}
+                      onClick={() => {
+                        const target = messageMenu.message;
+                        setMessageMenu(null);
+                        void handleReplyWithAi(target);
+                      }}
+                    >
+                      <span className="context-menu-action-text">
+                        {replyingWithAiId === messageMenu.message.id ? t(language, 'aiReplying') : t(language, 'replyWithAi')}
+                      </span>
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z" />
+                        <path d="M5 3v4" />
+                        <path d="M19 17v4" />
+                        <path d="M3 5h4" />
+                        <path d="M17 19h4" />
+                      </svg>
+                    </button>
+                  ) : null}
                   {!messageMenu.message.pending ? (
                     <button type="button" className="context-menu-action" onClick={() => { toggleBookmark(messageMenu.message); setMessageMenu(null); }}>
                       <span className="context-menu-action-text">
@@ -4985,26 +5152,26 @@ export function MessengerWindow({
                 document.body
               ) : null}
 
-              {chatMenu && selectedUser ? (
-                <div ref={chatMenuRef} className="context-menu messenger-chat-menu-inline" onMouseDown={(event) => event.stopPropagation()}>
+              {chatMenu && selectedUser ? createPortal(
+                <div ref={chatMenuRef} className="context-menu" style={{ left: chatMenuPos.x, top: chatMenuPos.y }} onMouseDown={(event) => event.stopPropagation()}>
                   <button type="button" className="context-menu-action" onClick={() => { setClearConversationConfirm(selectedUser); setClearForEveryone(false); setChatMenu(null); }}>
-                    <span className="context-menu-action-text">{language === 'ru' ? 'Очистить историю' : 'Clear history'}</span>
+                    <span className="context-menu-action-text">{language === 'ru' ? 'Очистить историю' : language === 'uk' ? 'Очистити історію' : language === 'zh' ? '清除记录' : language === 'zh-TW' ? '清除紀錄' : 'Clear history'}</span>
                     <MenuDeleteIcon />
                   </button>
-                  <button type="button" className="context-menu-action" onClick={() => { backgroundInputRef.current?.click(); setChatMenu(null); }}>
-                    <span className="context-menu-action-text">{language === 'ru' ? 'Установить фон' : 'Set background'}</span>
+                  <button type="button" className="context-menu-action" onClick={() => { setChatMenu(null); void pickChatBackground(); }}>
+                    <span className="context-menu-action-text">{t(language, 'setChatBackground')}</span>
                     <MenuEditIcon />
                   </button>
                   {selectedChatBackground ? (
                     <button type="button" className="context-menu-action" onClick={() => { void clearChatBackground(); setChatMenu(null); }}>
-                      <span className="context-menu-action-text">{language === 'ru' ? 'Убрать фон' : 'Remove background'}</span>
+                      <span className="context-menu-action-text">{t(language, 'removeChatBackground')}</span>
                       <MenuDeleteIcon />
                     </button>
                   ) : null}
                   <div className="context-menu-ttl">
                     <span className="context-menu-ttl-label">{t(language, 'messageTimer')}</span>
                     <div className="context-menu-ttl-options">
-                      {([[0, t(language, 'timerOff')], [3600, '1h'], [86400, '24h'], [604800, '7d']] as const).map(([seconds, label]) => (
+                      {([[0, t(language, 'timerOff')], [3600, t(language, 'ttlOneHour')], [86400, t(language, 'ttlDay')], [604800, t(language, 'ttlWeek')]] as const).map(([seconds, label]) => (
                         <button
                           key={seconds}
                           type="button"
@@ -5014,7 +5181,9 @@ export function MessengerWindow({
                             setChatMenu(null);
                             api.setConversationTtl(token, userId, seconds)
                               .then((payload) => setDmTtls((current) => ({ ...current, [userId]: payload.settings.messageTtlSeconds })))
-                              .catch(() => undefined);
+                              .catch((ttlError) => {
+                                setError(ttlError instanceof Error ? ttlError.message : t(language, 'unknownError'));
+                              });
                           }}
                         >
                           {label}
@@ -5022,7 +5191,8 @@ export function MessengerWindow({
                       ))}
                     </div>
                   </div>
-                </div>
+                </div>,
+                document.body
               ) : null}
 
               {composerMenu ? createPortal(
@@ -5650,6 +5820,22 @@ export function MessengerWindow({
                 </div>
               )}
             </div>
+          </div>,
+          document.body
+        ) : null}
+
+        {groupRailMenu ? createPortal(
+          <div ref={groupRailMenuRef} className="context-menu" style={{ left: groupRailMenuPos.x, top: groupRailMenuPos.y }} onMouseDown={(event) => event.stopPropagation()}>
+            <button
+              type="button"
+              className="context-menu-action"
+              onClick={() => {
+                void navigator.clipboard.writeText(groupRailMenu.group.id);
+                setGroupRailMenu(null);
+              }}
+            >
+              <span className="context-menu-action-text">{t(language, 'copyId')}</span>
+            </button>
           </div>,
           document.body
         ) : null}

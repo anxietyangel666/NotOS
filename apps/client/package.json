@@ -1,6 +1,6 @@
 {
   "name": "@notoc/client",
-  "version": "0.5.0",
+  "version": "0.5.6",
   "private": true,
   "type": "module",
   "main": "electron/main.cjs",
@@ -8,7 +8,8 @@
     "dev": "vite --host 0.0.0.0",
     "desktop": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && electron .\"",
     "build": "tsc && vite build",
-    "dist:win": "npm run build && electron-builder --win portable --x64",
+    "dist:win": "npm run build && electron-builder --win nsis --x64",
+    "dist:portable": "npm run build && electron-builder --win portable --x64",
     "pack:win": "npm run build && electron-packager . NotOS --platform=win32 --arch=x64 --out=release-packaged --overwrite --ignore=src --ignore=release --ignore=release-packaged --icon=public/Emoji/app-icon.ico",
     "preview": "vite preview --host 0.0.0.0"
   },
@@ -28,13 +29,28 @@
     "win": {
       "target": [
         {
-          "target": "portable",
+          "target": "nsis",
           "arch": [
             "x64"
           ]
         }
       ],
-      "artifactName": "NotOS-${version}-${arch}.${ext}"
+      "icon": "public/Emoji/app-icon.ico",
+      "artifactName": "NotOS-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "allowElevation": true,
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "shortcutName": "NotOS",
+      "installerIcon": "public/Emoji/app-icon.ico",
+      "uninstallerIcon": "public/Emoji/app-icon.ico",
+      "installerHeaderIcon": "public/Emoji/app-icon.ico",
+      "deleteAppDataOnUninstall": false,
+      "runAfterFinish": true
     }
   },
   "dependencies": {

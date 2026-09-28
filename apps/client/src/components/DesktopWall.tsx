@@ -98,6 +98,7 @@ export function DesktopWall({ token, language, owner, currentUser, onOpenProfile
   // Lazy loading: whether an older page exists, plus a guard so scrolling only
   // fires one "load older" request at a time.
   const [hasMore, setHasMore] = useState(() => cachedWall?.hasMore ?? false);
+  const hasMoreRef = useRef(hasMore);
   const [loadingMore, setLoadingMore] = useState(false);
   const loadingMoreRef = useRef(false);
   // Right-click context menu for a wall message (Copy / Translate / Delete).
@@ -153,7 +154,8 @@ export function DesktopWall({ token, language, owner, currentUser, onOpenProfile
   function upsertMessage(message: DesktopWallMessage) {
     setMessages((current) => {
       const next = [message, ...current.filter((item) => item.id !== message.id)];
-      wallCache.set(owner.id, { messages: next, hasMore, loadedAt: Date.now() });
+      wallCache.set(owner.id, { messages: next, hasMore: hasMoreRef.current, loadedAt: Date.now() });
+      persistWallCache(owner.id);
       return next;
     });
   }
@@ -164,31 +166,31 @@ export function DesktopWall({ token, language, owner, currentUser, onOpenProfile
 
   useEffect(() => {
     let alive = true;
-    let loadTimer: number | null = null;
     const cached = hydrateWallCache(owner.id);
     if (cached) {
       setMessages(cached.messages);
       setHasMore(cached.hasMore);
+      hasMoreRef.current = cached.hasMore;
     } else {
       setMessages([]);
       setHasMore(false);
+      hasMoreRef.current = false;
     }
 
     if (!collapsed && (!cached || Date.now() - cached.loadedAt > WALL_CACHE_TTL_MS)) {
-      loadTimer = window.setTimeout(() => {
-        api
-          .getDesktopWall(token, owner.id, { limit: 12 })
-          .then((payload) => {
-            if (!alive) return;
-            wallCache.set(owner.id, { messages: payload.messages, hasMore: payload.hasMore, loadedAt: Date.now() });
-            persistWallCache(owner.id);
-            setMessages(payload.messages);
-            setHasMore(payload.hasMore);
-          })
-          .catch((loadError) => {
-            if (alive) setError(loadError instanceof Error ? loadError.message : t(language, 'unknownError'));
-          });
-      }, cached ? 0 : 1200);
+      api
+        .getDesktopWall(token, owner.id, { limit: 12 })
+        .then((payload) => {
+          if (!alive) return;
+          wallCache.set(owner.id, { messages: payload.messages, hasMore: payload.hasMore, loadedAt: Date.now() });
+          persistWallCache(owner.id);
+          setMessages(payload.messages);
+          setHasMore(payload.hasMore);
+          hasMoreRef.current = payload.hasMore;
+        })
+        .catch((loadError) => {
+          if (alive) setError(loadError instanceof Error ? loadError.message : t(language, 'unknownError'));
+        });
     }
 
     const socket = sharedSocket;
@@ -199,21 +201,28 @@ export function DesktopWall({ token, language, owner, currentUser, onOpenProfile
       const msg = payload.message;
       setMessages((current) => {
         if (current.some((m) => m.id === msg.id)) return current;
-        // Reconcile our own just-posted message: replace the pending optimistic
-        // node in place (keep its clientKey) instead of prepending a duplicate.
-        const pendingIdx = current.findIndex((m) => m.pending && m.author.id === msg.author.id && m.body === msg.body);
+        const pendingIdx = current.findIndex((m) => (m.clientKey && m.author.id === msg.author.id && m.body === msg.body) || m.id === msg.id);
+        let next: DesktopWallMessage[];
         if (pendingIdx !== -1) {
-          const next = current.slice();
+          next = current.slice();
           next[pendingIdx] = { ...msg, clientKey: current[pendingIdx].clientKey };
-          return next;
+        } else {
+          next = [msg, ...current];
         }
-        return [msg, ...current];
+        wallCache.set(owner.id, { messages: next, hasMore: hasMoreRef.current, loadedAt: Date.now() });
+        persistWallCache(owner.id);
+        return next;
       });
     }
 
     function onMessageDeleted(payload: { ownerId: string; messageId: string }) {
       if (payload.ownerId !== owner.id) return;
-      setMessages((current) => current.filter((message) => message.id !== payload.messageId));
+      setMessages((current) => {
+        const next = current.filter((message) => message.id !== payload.messageId);
+        wallCache.set(owner.id, { messages: next, hasMore: hasMoreRef.current, loadedAt: Date.now() });
+        persistWallCache(owner.id);
+        return next;
+      });
     }
 
     function onUserChanged(payload: { user: PublicUser }) {
@@ -227,12 +236,11 @@ export function DesktopWall({ token, language, owner, currentUser, onOpenProfile
 
     return () => {
       alive = false;
-      if (loadTimer !== null) window.clearTimeout(loadTimer);
       socket.off('desktopWall:messageCreated', onMessageCreated);
       socket.off('desktopWall:messageDeleted', onMessageDeleted);
       socket.off('desktop:userChanged', onUserChanged);
     };
-  }, [collapsed, hasMore, language, owner.id, sharedSocket, token]);
+  }, [collapsed, language, owner.id, sharedSocket, token]);
 
   // Load the next (older) page of wall messages and append them to the bottom
   // of the list. The oldest currently-loaded message id is the cursor.
@@ -248,9 +256,11 @@ export function DesktopWall({ token, language, owner, currentUser, onOpenProfile
         const seen = new Set(current.map((item) => item.id));
         const next = [...current, ...payload.messages.filter((item) => !seen.has(item.id))];
         wallCache.set(owner.id, { messages: next, hasMore: payload.hasMore, loadedAt: Date.now() });
+        persistWallCache(owner.id);
         return next;
       });
       setHasMore(payload.hasMore);
+      hasMoreRef.current = payload.hasMore;
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : t(language, 'unknownError'));
     } finally {
@@ -270,9 +280,7 @@ export function DesktopWall({ token, language, owner, currentUser, onOpenProfile
     setDraft('');
     setError('');
 
-    // Optimistic render: show the post instantly with a stable clientKey, then
-    // reconcile IN PLACE (keep the same clientKey) so React updates the existing
-    // node instead of remounting it — that remount caused the flash/jump.
+    // Optimistic render: show the post instantly with a stable clientKey
     const clientKey = `ck-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const optimistic: DesktopWallMessage = {
       id: clientKey,
@@ -281,9 +289,15 @@ export function DesktopWall({ token, language, owner, currentUser, onOpenProfile
       body,
       createdAt: new Date().toISOString(),
       clientKey,
-      pending: true
+      pending: false
     };
-    setMessages((current) => [optimistic, ...current]);
+
+    setMessages((current) => {
+      const next = [optimistic, ...current];
+      wallCache.set(owner.id, { messages: next, hasMore: hasMoreRef.current, loadedAt: Date.now() });
+      persistWallCache(owner.id);
+      return next;
+    });
 
     try {
       const payload = await api.createDesktopWallMessage(token, owner.id, body);
@@ -291,21 +305,38 @@ export function DesktopWall({ token, language, owner, currentUser, onOpenProfile
         const realAlreadyHere = current.some((item) => item.id === payload.message.id && item.clientKey !== clientKey);
         if (realAlreadyHere) return current.filter((item) => item.clientKey !== clientKey);
         const next = current.map((item) => (item.clientKey === clientKey ? { ...payload.message, clientKey } : item));
-        wallCache.set(owner.id, { messages: next, hasMore, loadedAt: Date.now() });
+        wallCache.set(owner.id, { messages: next, hasMore: hasMoreRef.current, loadedAt: Date.now() });
+        persistWallCache(owner.id);
         return next;
       });
     } catch (publishError) {
-      setMessages((current) => current.filter((item) => item.clientKey !== clientKey));
+      setMessages((current) => {
+        const next = current.filter((item) => item.clientKey !== clientKey);
+        wallCache.set(owner.id, { messages: next, hasMore: hasMoreRef.current, loadedAt: Date.now() });
+        persistWallCache(owner.id);
+        return next;
+      });
       setDraft(body);
       setError(publishError instanceof Error ? publishError.message : t(language, 'unknownError'));
     }
   }
 
   async function removeMessage(message: DesktopWallMessage) {
+    setMessageMenu(null);
+    const prevMessages = messages;
+    setMessages((current) => {
+      const next = current.filter((item) => item.id !== message.id && (!message.clientKey || item.clientKey !== message.clientKey));
+      wallCache.set(owner.id, { messages: next, hasMore: hasMoreRef.current, loadedAt: Date.now() });
+      persistWallCache(owner.id);
+      return next;
+    });
+
     try {
       await api.deleteDesktopWallMessage(token, message.id);
-      setMessages((current) => current.filter((item) => item.id !== message.id));
     } catch (deleteError) {
+      setMessages(prevMessages);
+      wallCache.set(owner.id, { messages: prevMessages, hasMore: hasMoreRef.current, loadedAt: Date.now() });
+      persistWallCache(owner.id);
       setError(deleteError instanceof Error ? deleteError.message : t(language, 'unknownError'));
     }
   }
@@ -343,12 +374,27 @@ export function DesktopWall({ token, language, owner, currentUser, onOpenProfile
             >
               <EmojiToggleIcon />
             </button>
-            {emojiOpen ? <EmojiPicker language={language} anchorRef={emojiAnchorRef} placement="left-start" onSelect={(emoji) => inputRef.current?.insertText(emoji)} onClose={() => setEmojiOpen(false)} /> : null}
+            {emojiOpen ? (
+              <EmojiPicker
+                language={language}
+                anchorRef={emojiAnchorRef}
+                placement="left-start"
+                onSelect={(emoji) => {
+                  inputRef.current?.insertText(emoji);
+                  setEmojiOpen(false);
+                }}
+                onClose={() => setEmojiOpen(false)}
+              />
+            ) : null}
           </div>
         </div>
+        <button
+          type="submit"
+          className="primary-action"
+          aria-label={t(language, 'sendMessage')}
+          disabled={!draft.trim() || draftContainsEmbed}
+        />
         {draftContainsEmbed ? <div className="desktop-wall-compose-warning">{t(language, 'wallEmbedsNotAllowed')}</div> : null}
-        {/* Submit on Enter; hidden submit keeps form submission working without a publish button. */}
-        <button type="submit" className="hidden-submit" tabIndex={-1} aria-hidden="true" />
       </form>
 
       {error ? <div className="inline-error desktop-wall-error">{error}</div> : null}

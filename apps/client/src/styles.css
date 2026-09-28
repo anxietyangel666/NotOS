@@ -4528,11 +4528,20 @@ body.window-dragging * {
 .inbox-sidebar {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
   min-width: 0;
-  padding: 12px 10px;
+  padding: 14px 10px;
   border-right: 1px solid var(--line);
-  background: color-mix(in srgb, var(--panel-strong) 72%, var(--panel));
+  background: color-mix(in srgb, var(--bg) 55%, var(--panel));
+}
+
+.inbox-sidebar-label {
+  padding: 4px 10px 10px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
 }
 
 .inbox-brand {
@@ -4571,29 +4580,51 @@ body.window-dragging * {
   justify-content: space-between;
   gap: 10px;
   width: 100%;
-  min-height: 38px;
-  padding: 0 10px;
+  min-height: 34px;
+  padding: 0 8px;
   border: 0;
-  border-radius: 7px;
-  color: var(--text);
+  border-radius: 6px;
+  color: var(--muted);
   text-align: left;
   background: transparent;
   cursor: pointer;
+  font-size: 13px;
 }
 
-.inbox-folder:hover,
+.inbox-folder-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.inbox-folder-icon {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  color: inherit;
+}
+
+.inbox-folder:hover {
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+  color: var(--text);
+}
+
 .inbox-folder.active {
-  background: color-mix(in srgb, var(--line) 22%, transparent);
+  background: color-mix(in srgb, var(--text) 10%, transparent);
+  color: var(--text);
+  font-weight: 600;
 }
 
 .inbox-folder b {
-  min-width: 24px;
-  padding: 2px 7px;
+  min-width: 18px;
+  padding: 1px 6px;
   border-radius: 999px;
-  color: var(--muted);
+  color: var(--text);
   text-align: center;
   font-size: 11px;
-  background: color-mix(in srgb, var(--line) 28%, transparent);
+  font-weight: 700;
+  background: color-mix(in srgb, var(--text) 10%, transparent);
 }
 
 .inbox-list-pane {
@@ -4608,9 +4639,25 @@ body.window-dragging * {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  min-height: 64px;
-  padding: 12px 14px;
+  min-height: 56px;
+  padding: 10px 16px;
   border-bottom: 1px solid var(--line);
+}
+
+.inbox-mark-read {
+  min-height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.inbox-mark-read:hover {
+  background: color-mix(in srgb, var(--text) 8%, transparent);
 }
 
 .inbox-list-head span {
@@ -4769,14 +4816,32 @@ body.window-dragging * {
   place-items: center;
   align-content: center;
   gap: 8px;
-  min-height: 220px;
-  padding: 20px;
+  min-height: 280px;
+  padding: 32px 28px;
   color: var(--muted);
   text-align: center;
 }
 
+.inbox-empty-icon {
+  display: grid;
+  place-items: center;
+  width: 64px;
+  height: 64px;
+  margin-bottom: 6px;
+  border-radius: 16px;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+}
+
 .inbox-empty strong {
   color: var(--text);
+  font-size: 16px;
+  font-weight: 650;
+}
+
+.inbox-empty span {
+  max-width: 320px;
+  line-height: 1.45;
 }
 
 .inbox-reading-pane {
@@ -5161,8 +5226,12 @@ body.window-dragging * {
   border-bottom: 1px solid var(--line);
 }
 
-.messenger-chat-header h3,
-
+.messenger-chat-header h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.25;
+}
 
 .messenger-error {
   grid-row: 2;
@@ -5170,10 +5239,36 @@ body.window-dragging * {
 }
 
 .messenger-thread-wrap {
+  position: relative;
   display: flex;
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
+}
+
+.dm-chat-wallpaper,
+.dm-chat-wallpaper-dim {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.dm-chat-wallpaper {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center;
+}
+
+.dm-chat-wallpaper-dim {
+  background: var(--bg);
+  opacity: 0.18;
+}
+
+.messenger-thread-wrap.dm-custom-background > :not(.dm-chat-wallpaper):not(.dm-chat-wallpaper-dim) {
+  position: relative;
+  z-index: 1;
 }
 
 .messenger-thread-wrap .messenger-pinned {
@@ -5435,6 +5530,12 @@ body.window-dragging * {
   line-height: 1.35;
 }
 
+.channel-settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 16px 0 8px;
+}
 .settings-toggle-row input[type="checkbox"] {
   width: 18px;
   height: 18px;
@@ -6469,6 +6570,32 @@ img.connection-service-icon {
   font-weight: 700;
 }
 
+.message-author-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.ai-message-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #6366f1 0%, #a855f7 100%);
+  color: #ffffff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: 4px;
+  margin-left: 2px;
+  vertical-align: middle;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  box-shadow: 0 1px 4px rgba(99, 102, 241, 0.35);
+  user-select: none;
+  pointer-events: none;
+}
+
 .message-time {
   color: var(--muted);
   font-size: 12px;
@@ -6810,6 +6937,13 @@ img.connection-service-icon {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--muted);
+}
+
+.messenger-pinned-message span img,
+.pinned-panel-item span img,
+.feed-pinned-body img {
+  display: inline-block;
+  vertical-align: -3px;
 }
 
 .messenger-compose {
@@ -7482,8 +7616,9 @@ div.settings-music-row {
 }
 
 .desktop-wall-form {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 6px;
 }
 
@@ -7495,12 +7630,12 @@ div.settings-music-row {
 }
 
 .desktop-wall-form .primary-action {
-  width: 42px;
-  min-width: 42px;
-  height: 42px;
+  width: 36px;
+  min-width: 36px;
+  height: 36px;
   padding: 0;
   border: 0;
-  border-radius: 14px;
+  border-radius: 8px;
   background: var(--text);
   cursor: pointer;
   flex-shrink: 0;
@@ -7531,12 +7666,14 @@ div.settings-music-row {
 }
 
 .desktop-wall-form .emoji-input-shell {
+  flex: 1 1 200px;
   min-height: 36px;
   border-radius: 8px;
   background: var(--panel-strong);
 }
 
 .desktop-wall-compose-warning {
+  flex-basis: 100%;
   margin: -2px 2px 0;
   color: var(--danger);
   font-size: 12px;
@@ -7865,7 +8002,8 @@ div.settings-music-row {
 .taskbar-app > .taskbar-app-icon.tile-icon-watch-together,
 .taskbar-app > .taskbar-app-icon.tile-icon-updates,
 .taskbar-app > .taskbar-app-icon.tile-icon-ai-chat,
-.taskbar-app > .taskbar-app-icon.tile-icon-inbox {
+.taskbar-app > .taskbar-app-icon.tile-icon-inbox,
+.taskbar-app > .taskbar-app-icon.tile-icon-settings {
   --desktop-app-icon-size: 24px;
   border: 1px solid var(--desktop-app-border);
   background:
@@ -7876,27 +8014,9 @@ div.settings-music-row {
     0 3px 9px var(--desktop-app-shadow);
 }
 
-.taskbar-app > .taskbar-app-icon.tile-icon-settings {
-  color: #ffffff;
-  background:
-    radial-gradient(circle at 30% 25%, rgba(255,255,255,0.34), transparent 30%),
-    linear-gradient(145deg, #8aa1b7 0%, #51677d 100%);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.5),
-    0 3px 9px rgba(54, 72, 92, 0.18);
-}
-
-.taskbar-app > .taskbar-app-icon.tile-icon-settings::before {
-  content: "";
-  width: 17px;
-  height: 17px;
-  border: 3px solid currentColor;
-  border-radius: 50%;
-  box-shadow:
-    0 -8px 0 -5px currentColor,
-    0 8px 0 -5px currentColor,
-    8px 0 0 -5px currentColor,
-    -8px 0 0 -5px currentColor;
+.taskbar-app > .taskbar-app-icon.tile-icon-settings::before,
+.taskbar-app > .taskbar-app-icon.tile-icon-settings::after {
+  content: none;
 }
 
 .taskbar-app.active {
@@ -8923,7 +9043,7 @@ div.settings-music-row {
   border-radius: 6px;
 }
 
-/* Bottom gradient fade ("Р·Р°РјС‹Р»РµРЅРЅС‹Р№" РїРµСЂРµС…РѕРґ РІРЅРёР·). */
+/* Bottom gradient fade ("замыленный" переход вниз). */
 .pack-embed-fade {
   position: absolute;
   left: 0;
@@ -10361,7 +10481,9 @@ div.settings-music-row {
 }
 
 .messenger-chat-header > div:not(.messenger-chat-header-actions) {
-  display: grid;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
   min-width: 0;
   gap: 2px;
 }
@@ -13043,11 +13165,15 @@ div.settings-music-row {
   }
 
   .desktop-wall-form {
-    grid-template-columns: 1fr 42px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
   }
 
   .desktop-wall-form .primary-action {
-    width: 42px;
+    width: 36px;
+    height: 36px;
   }
 
   .emoji-picker {
@@ -15216,14 +15342,13 @@ div.settings-music-row {
   margin-top: 12px;
 }
 .group-roles-row {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+  display: flex;
   align-items: center;
-  gap: 12px;
-  min-height: 48px;
-  padding: 9px 12px;
-  border: 1px solid transparent;
-  border-radius: 8px;
+  gap: 8px;
+  min-height: 40px;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 6px;
   font-size: 14px;
   position: relative;
 }
@@ -15246,12 +15371,83 @@ div.settings-music-row {
   background: var(--bg-soft);
   border-color: var(--line);
 }
+.group-roles-drag {
+  color: var(--muted);
+  font-size: 12px;
+  letter-spacing: -2px;
+  cursor: grab;
+  user-select: none;
+}
+.group-role-field-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--muted);
+  margin: 12px 0 6px;
+}
+.group-role-color-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+.group-role-color-swatch {
+  width: 22px;
+  height: 22px;
+  border: 2px solid transparent;
+  border-radius: 50%;
+  padding: 0;
+  cursor: pointer;
+}
+.group-role-color-swatch.active {
+  border-color: #fff;
+  box-shadow: 0 0 0 2px var(--blue);
+}
+.group-role-color-custom {
+  width: 32px;
+  height: 24px;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+.group-role-perm-group {
+  display: grid;
+  gap: 4px;
+  margin: 14px 0;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+.group-role-perm-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+.group-role-perm-group-head strong {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--muted);
+}
+.group-role-perm-toggle {
+  border: 0;
+  background: transparent;
+  color: var(--blue);
+  font-size: 12px;
+  cursor: pointer;
+}
+.group-settings-id-row {
+  margin-top: 12px;
+}
 .group-roles-row-name {
+  flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-weight: 700;
+  font-weight: 600;
 }
 .group-roles-row-count {
   font-size: 13px;
@@ -15259,17 +15455,17 @@ div.settings-music-row {
   white-space: nowrap;
 }
 .group-roles-icon-btn {
-  width: 36px;
-  height: 36px;
+  width: 28px;
+  height: 28px;
   flex-shrink: 0;
   display: grid;
   place-items: center;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: var(--lighter, var(--bg-soft));
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
   cursor: pointer;
-  font-size: 16px;
-  color: var(--text);
+  font-size: 14px;
+  color: var(--muted);
 }
 .group-roles-icon-btn:hover {
   background: var(--bg-soft);
@@ -15330,12 +15526,14 @@ div.settings-music-row {
 .group-settings-section.group-roles-editor-view {
   position: relative;
   display: grid;
-  grid-template-columns: 260px minmax(0, 1fr);
-  gap: 18px;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 20px;
   align-items: stretch;
   flex: 1 1 auto;
   min-height: 0;
   overflow: hidden;
+  padding: 8px 10px 8px 8px;
+  background: var(--panel);
 }
 .group-roles-editor-sidebar {
   display: flex;
@@ -15387,14 +15585,14 @@ div.settings-music-row {
 .group-roles-editor-list-item {
   display: flex;
   align-items: center;
-  gap: 12px;
-  min-height: 52px;
-  padding: 12px 14px;
-  border: 1px solid transparent;
-  border-radius: 8px;
+  gap: 8px;
+  min-height: 34px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 4px;
   background: transparent;
   cursor: pointer;
-  font-size: 19px;
+  font-size: 14px;
   color: var(--text);
   text-align: left;
 }
@@ -15403,32 +15601,29 @@ div.settings-music-row {
   border-color: var(--line);
 }
 .group-roles-editor-list-item.active {
-  background: color-mix(in srgb, var(--accent) 12%, var(--bg-soft));
-  border-color: color-mix(in srgb, var(--accent) 32%, var(--line));
-  font-weight: 700;
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+  font-weight: 600;
 }
 .group-roles-editor-panel {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 10px;
   min-width: 0;
   min-height: 0;
   overflow-y: auto;
-  /* Leave room so the slide-up save bar never covers the last control. */
-  padding: 2px 2px 78px;
-  font-size: 19px;
+  padding: 4px 8px 78px;
+  font-size: 14px;
 }
 .group-roles-editor-meta {
   display: flex;
-  gap: 12px;
+  gap: 10px;
   align-items: center;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--line);
+  max-width: 420px;
 }
 .group-roles-editor-meta .messenger-input {
   flex: 1;
-  min-height: 52px;
-  font-size: 19px;
+  min-height: 36px;
+  font-size: 14px;
 }
 
 .group-roles-editor-meta input[type="color"] {
@@ -15443,45 +15638,47 @@ div.settings-music-row {
 
 .group-role-editor-tabs {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  padding-bottom: 10px;
+  align-items: stretch;
+  gap: 4px;
+  padding: 0;
   border-bottom: 1px solid var(--line);
 }
 
 .group-role-editor-tabs button {
-  min-height: 48px;
-  padding: 10px 17px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: var(--panel);
+  min-height: 36px;
+  padding: 8px 12px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
   color: var(--muted);
-  font-size: 19px;
-  font-weight: 700;
+  font-size: 13px;
+  font-weight: 600;
   cursor: pointer;
 }
 
 .group-role-editor-tabs button:hover {
-  background: var(--bg-soft);
+  background: transparent;
   color: var(--text);
 }
 
 .group-role-editor-tabs button.active {
-  border-color: color-mix(in srgb, var(--accent) 34%, var(--line));
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
-  color: var(--accent);
+  border-bottom-color: var(--text);
+  background: transparent;
+  color: var(--text);
 }
 
 .group-role-editor-pane {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 8px;
   min-width: 0;
+  max-width: 520px;
 }
 
 .group-role-permission-search {
-  height: 52px;
-  font-size: 19px;
+  height: 36px;
+  font-size: 14px;
 }
 
 .group-role-empty-state {
@@ -15671,17 +15868,17 @@ div.settings-music-row {
 
 .group-role-permission-item {
   display: grid;
-  grid-template-columns: 22px minmax(0, 1fr);
+  grid-template-columns: 18px minmax(0, 1fr);
   align-items: center;
-  gap: 18px;
-  min-height: 52px;
-  font-size: 18px;
-  padding: 14px 16px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--bg) 55%, transparent);
+  gap: 10px;
+  min-height: 36px;
+  font-size: 14px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
   cursor: pointer;
-  transition: background 120ms ease, border-color 120ms ease;
+  transition: background 120ms ease;
 }
 
 .group-role-permission-item:hover {
@@ -16171,10 +16368,13 @@ div.settings-music-row {
 
 /* "Display separately" toggle in the role editor spans the full width. */
 .group-role-permission-item.group-role-hoist {
-  margin-top: 6px;
-  padding-top: 8px;
-  border-top: 1px solid var(--line);
-  font-weight: 600;
+  margin-top: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--bg) 40%, transparent);
+  font-weight: 500;
+  font-size: 13px;
 }
 
 .group-member-name {
@@ -16531,6 +16731,17 @@ div.settings-music-row {
   gap: 16px;
   font-size: 14px;
   background: var(--bg-soft);
+}
+
+.group-settings-content:has(.group-roles-list-view),
+.group-settings-content:has(.group-roles-editor-view) {
+  overflow: hidden;
+}
+
+.group-settings-section.group-roles-list-view {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
 }
 
 .group-settings-section {
@@ -17384,7 +17595,7 @@ div.settings-music-row {
 
 .group-settings-members-header {
   display: grid;
-  grid-template-columns: minmax(190px, 1.25fr) minmax(118px, 0.68fr) minmax(124px, 0.72fr) minmax(210px, 1fr) 32px;
+  grid-template-columns: minmax(190px, 1.25fr) minmax(118px, 0.68fr) minmax(124px, 0.72fr) minmax(210px, 1fr) auto;
   align-items: center;
   gap: 14px;
   padding: 0 12px 10px;
@@ -17451,13 +17662,21 @@ div.settings-music-row {
 
 .group-settings-member {
   display: grid;
-  grid-template-columns: minmax(190px, 1.25fr) minmax(118px, 0.68fr) minmax(124px, 0.72fr) minmax(210px, 1fr) 32px;
+  grid-template-columns: minmax(190px, 1.25fr) minmax(118px, 0.68fr) minmax(124px, 0.72fr) minmax(210px, 1fr) auto;
   align-items: center;
   gap: 12px;
   padding: 9px 12px;
   border-radius: 8px;
   font-size: 14px;
   position: relative;
+}
+
+.group-settings-member-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 32px;
 }
 
 .group-settings-member:hover {
@@ -17667,7 +17886,7 @@ div.settings-music-row {
 
   .group-settings-members-header,
   .group-settings-member {
-    grid-template-columns: minmax(160px, 1fr) minmax(190px, 1fr) 32px;
+    grid-template-columns: minmax(160px, 1fr) minmax(190px, 1fr) auto;
   }
 
   .group-settings-members-header span:nth-child(2),
@@ -20120,10 +20339,18 @@ div.settings-music-row {
 
 /* AI Chat app: history sidebar on the left, conversation on the right. */
 .ai-chat-window {
+  --ai-chat-sidebar-width: 220px;
+  /* Composer emoji button (40) + gap (8). Title and empty-state share this
+     so they sit on the same axis as the "send a message to AI" field. */
+  --ai-chat-emoji-slot: 48px;
   display: flex;
   flex-direction: column;
   width: min(880px, 92vw);
   height: min(620px, 86vh);
+}
+
+.ai-chat-window .window-frame-center-title {
+  left: calc(50% + (var(--ai-chat-sidebar-width) / 2) - (var(--ai-chat-emoji-slot) / 2));
 }
 
 .ai-chat-body {
@@ -20169,7 +20396,7 @@ div.settings-music-row {
 .ai-chat-sidebar {
   display: flex;
   flex-direction: column;
-  width: 220px;
+  width: var(--ai-chat-sidebar-width);
   flex-shrink: 0;
   border-right: 1px solid var(--line);
   padding: 10px;
@@ -20273,6 +20500,10 @@ div.settings-music-row {
   gap: 10px;
 }
 
+.ai-chat-messages:has(.ai-chat-empty-state) {
+  overflow: hidden;
+}
+
 .ai-chat-empty-state {
   flex: 1;
   display: flex;
@@ -20281,7 +20512,12 @@ div.settings-music-row {
   font-size: 13px;
   color: var(--text-secondary);
   text-align: center;
-  padding: 0 16px;
+  padding: 0;
+}
+
+/* Same column as the composer textarea (leave the emoji slot on the right). */
+.ai-chat-body .ai-chat-empty-state {
+  margin-right: var(--ai-chat-emoji-slot);
 }
 
 .ai-chat-notice {
@@ -20372,18 +20608,67 @@ div.settings-music-row {
   color: var(--red);
 }
 
+.ai-chat-error-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 16px;
+  background: rgba(235, 87, 87, 0.1);
+  border-bottom: 1px solid rgba(235, 87, 87, 0.2);
+}
+
+.ai-chat-retry-btn {
+  border: none;
+  background: var(--red);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.ai-chat-retry-btn:hover {
+  opacity: 0.9;
+}
+
 .ai-chat-composer {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 12px 16px;
+  padding: 10px 16px 14px;
   border-top: 1px solid var(--line);
 }
 
 .ai-chat-composer-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
+  width: 100%;
+}
+
+.ai-chat-attach-btn {
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  border-radius: 8px;
+  transition: color 120ms ease, background 120ms ease;
+}
+
+.ai-chat-attach-btn:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--lighter);
+}
+
+.ai-chat-attach-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .ai-chat-spacer {
@@ -20449,28 +20734,49 @@ div.settings-music-row {
   white-space: nowrap;
 }
 
-.ai-chat-composer textarea,
-.ai-chat-composer .ai-chat-input-centered,
-.ai-chat-composer .emoji-inline-input {
-  flex: 1;
+.ai-chat-input-shell {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 44px;
+  padding: 4px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-strong);
+  box-sizing: border-box;
+}
+
+.ai-chat-input-shell:focus-within {
+  border-color: var(--accent);
+}
+
+.ai-chat-textarea {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.4;
   resize: none;
-  max-height: 140px;
-  min-height: 40px;
+  padding: 6px 0;
+  max-height: 120px;
+  min-height: 24px;
 }
 
-/* Centered placeholder + typed text for the AI composer input. */
-.ai-chat-input-centered {
-  text-align: center;
-}
-
-.ai-chat-input-centered::placeholder {
-  text-align: center;
+.ai-chat-textarea::placeholder {
+  color: var(--muted);
 }
 
 .ai-chat-emoji-host {
   flex-shrink: 0;
   display: flex;
-  align-items: flex-end;
+  align-items: center;
+  gap: 4px;
 }
 
 .ai-chat-media {
@@ -22784,7 +23090,8 @@ div.settings-music-row {
 .tile-icon-watch-together,
 .tile-icon-updates,
 .tile-icon-ai-chat,
-.tile-icon-inbox {
+.tile-icon-inbox,
+.tile-icon-settings {
   --desktop-app-icon-size: 34px;
   --desktop-app-bg-top: #f8fbff;
   --desktop-app-bg-bottom: #dbeafe;
@@ -22810,7 +23117,9 @@ div.settings-music-row {
 .tile-icon-ai-chat::before,
 .tile-icon-ai-chat::after,
 .tile-icon-inbox::before,
-.tile-icon-inbox::after {
+.tile-icon-inbox::after,
+.tile-icon-settings::before,
+.tile-icon-settings::after {
   content: none;
 }
 
@@ -22854,11 +23163,20 @@ div.settings-music-row {
   --desktop-app-shadow: rgba(70, 102, 138, 0.14);
 }
 
+.tile-icon-settings {
+  --desktop-app-icon-image: url("../Icons/settings.png");
+  --desktop-app-bg-top: #f8fafc;
+  --desktop-app-bg-bottom: #cbd5e1;
+  --desktop-app-border: rgba(100, 116, 139, 0.32);
+  --desktop-app-shadow: rgba(71, 85, 105, 0.16);
+}
+
 .icon-size-small .tile-icon-messenger,
 .icon-size-small .tile-icon-watch-together,
 .icon-size-small .tile-icon-updates,
 .icon-size-small .tile-icon-ai-chat,
-.icon-size-small .tile-icon-inbox {
+.icon-size-small .tile-icon-inbox,
+.icon-size-small .tile-icon-settings {
   --desktop-app-icon-size: 26px;
 }
 
@@ -22866,7 +23184,8 @@ div.settings-music-row {
 .icon-size-large .tile-icon-watch-together,
 .icon-size-large .tile-icon-updates,
 .icon-size-large .tile-icon-ai-chat,
-.icon-size-large .tile-icon-inbox {
+.icon-size-large .tile-icon-inbox,
+.icon-size-large .tile-icon-settings {
   --desktop-app-icon-size: 44px;
 }
 
@@ -22874,7 +23193,8 @@ div.settings-music-row {
 .remote-desktop-icon .tile-icon-watch-together,
 .remote-desktop-icon .tile-icon-updates,
 .remote-desktop-icon .tile-icon-ai-chat,
-.remote-desktop-icon .tile-icon-inbox {
+.remote-desktop-icon .tile-icon-inbox,
+.remote-desktop-icon .tile-icon-settings {
   --desktop-app-icon-size: 26px;
 }
 
@@ -23082,8 +23402,9 @@ div.settings-music-row {
   border-radius: 6px;
   background: transparent;
   color: var(--text);
-  font-size: 13px;
-  line-height: 1.1;
+  font-size: 12px;
+  line-height: 1.15;
+  text-align: center;
   cursor: pointer;
 }
 .context-menu-ttl-options button:hover { background: var(--bg-soft); }
@@ -23943,42 +24264,116 @@ button.feed-post-stats:not(:disabled):hover { color: var(--text); }
 .feed-tools-top-row time { color: var(--muted); font-size: 11px; white-space: nowrap; }
 
 
-/* ── Global level (minimal) ──────────────────────────────────────────────── */
-.profile-level-card {
+/* ── Avatar level ring (League-client style) ─────────────────────────────── */
+/* The ring lives inside .profile-avatar-wrap, which clips to a circle by
+   default. Opting into overflow: visible lets the arc and the level badge sit
+   outside the avatar border; the image keeps its own radius so nothing leaks
+   past the rounded corners. */
+.profile-avatar-wrap:has(.level-ring) {
+  overflow: visible;
+}
+
+.profile-avatar-wrap:has(.level-ring) img {
+  border-radius: 50%;
+}
+
+.level-ring {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+/* Scale the arc slightly past the avatar edge so it reads as a separate ring
+   rather than a border on the image. */
+.level-ring-arc {
+  position: absolute;
+  inset: -7px;
+  width: calc(100% + 14px);
+  height: calc(100% + 14px);
+  overflow: visible;
+  /* Fill grows clockwise from 12 o'clock instead of 3 o'clock. */
+  transform: rotate(-90deg);
+}
+
+.level-ring-arc circle {
+  fill: none;
+  stroke-width: 5;
+  stroke-linecap: round;
+}
+
+.level-ring-track {
+  stroke: var(--line);
+  opacity: 0.55;
+}
+
+.level-ring-fill {
+  stroke: var(--accent, #2AABEE);
+  transition: stroke-dasharray 0.45s ease;
+}
+
+/* Only the drawn band is hoverable, so the avatar underneath keeps its own
+   context menu and the presence dot stays clickable. */
+.level-ring-arc circle {
+  pointer-events: stroke;
+}
+
+/* One panel above the avatar holding the progress circle and the level number.
+   Sits above the avatar's own stacking context so the banner never covers it. */
+.level-ring-badge {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 9px);
+  z-index: 2;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px 3px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--panel-strong, var(--panel));
+  color: var(--text);
+  white-space: nowrap;
+  /* The arc sets pointer-events: none on the host, so opt back in here. */
+  pointer-events: auto;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
+}
+
+.level-ring-badge-arc {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  overflow: visible;
+  /* Fill grows clockwise from 12 o'clock instead of 3 o'clock. */
+  transform: rotate(-90deg);
+}
+
+.level-ring-badge-arc circle {
+  fill: none;
+  /* Matches BADGE_RADIUS in LevelRing.tsx: 40 + 20/2 = 50, exactly the viewBox
+     edge. Butt caps, because round caps at this thickness visibly overshoot. */
+  stroke-width: 20;
+  stroke-linecap: butt;
+}
+
+.level-ring-badge b {
+  font-size: 12.5px;
+  font-weight: 700;
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Tooltip is a small stack rather than the default single-line bubble. */
+.level-ring-tip {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  margin-top: 10px;
-  padding: 10px 12px;
-  border-radius: 10px;
-  border: 1px solid var(--line);
-  background: var(--panel);
+  gap: 2px;
+  align-items: flex-start;
+  text-align: left;
 }
 
-.profile-level-row {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.profile-level-label { font-size: 13px; font-weight: 600; }
-.profile-level-xp { font-size: 11.5px; opacity: 0.55; }
-
-.profile-level-track {
-  height: 4px;
-  border-radius: 999px;
-  background: var(--line);
-  overflow: hidden;
-}
-
-.profile-level-fill {
-  height: 100%;
-  border-radius: inherit;
-  background: var(--accent, currentColor);
-  opacity: 0.85;
-  transition: width 0.4s ease;
-}
+.level-ring-tip span { font-weight: 600; }
+.level-ring-tip small { font-weight: 500; opacity: 0.62; }
 
 /* ── Reaction-role editor ────────────────────────────────────────────────── */
 .reaction-role-modal { width: min(420px, 92vw); }

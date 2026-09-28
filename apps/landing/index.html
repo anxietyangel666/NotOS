@@ -1,0 +1,959 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NotOS — Виртуальный рабочий стол и мессенджер нового поколения</title>
+  <meta name="description" content="NotOS — инновационный мессенджер с виртуальным рабочим столом: кастомные обои, Watch Together, удаленный рабочий стол друзей, видео-кружочки и встроенный AI. Скачать бесплатно для Windows.">
+  <meta name="keywords" content="NotOS, мессенджер, виртуальный рабочий стол, watch together, удаленный рабочий стол, видео кружочки, голосовой чат, discord аналог">
+  
+  <!-- Open Graph -->
+  <meta property="og:title" content="NotOS — Виртуальный рабочий стол и мессенджер">
+  <meta property="og:description" content="Кастомные обои, Watch Together, визиты к друзьям, видео-кружочки и AI-помощник.">
+  <meta property="og:image" content="assets/logo.png">
+  <meta property="og:url" content="https://notos.tech">
+  <meta property="og:type" content="website">
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/png" href="assets/logo.png">
+  <link rel="apple-touch-icon" href="assets/logo.png">
+
+  <!-- Fonts & Styles -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Background Glows -->
+  <div class="bg-glow bg-glow-1"></div>
+  <div class="bg-glow bg-glow-2"></div>
+  <div class="bg-glow bg-glow-3"></div>
+
+  <!-- Navigation -->
+  <header class="navbar">
+    <div class="container nav-container">
+      <a href="#" class="brand">
+        <img src="assets/logo.png" alt="NotOS Logo" class="brand-logo">
+        <span class="brand-name">NotOS</span>
+        <span class="badge-version" id="navVersionBadge">v0.5.6</span>
+      </a>
+
+      <nav class="nav-links">
+        <a href="#features" data-i18n="nav_features">Возможности</a>
+        <a href="#preview" data-i18n="nav_preview">Интерфейс</a>
+        <a href="#status" data-i18n="nav_status">Статус</a>
+        <a href="#download" data-i18n="nav_download">Скачать</a>
+      </nav>
+
+      <div class="nav-actions">
+        <!-- Live Server Status Indicator in Header -->
+        <a href="#status" class="status-indicator-pill" id="navStatusPill" title="Статус серверов NotOS">
+          <span class="pulse-dot"></span>
+          <span class="status-text" id="navStatusText" data-i18n="status_online">Сервер онлайн</span>
+        </a>
+
+        <!-- Language Switcher -->
+        <div class="lang-selector">
+          <button class="lang-btn active" data-lang="ru">RU</button>
+          <button class="lang-btn" data-lang="en">EN</button>
+          <button class="lang-btn" data-lang="uk">UA</button>
+        </div>
+
+        <a href="#download" class="btn btn-sm btn-primary nav-download-btn" data-i18n="nav_get_app">
+          Скачать
+        </a>
+      </div>
+    </div>
+  </header>
+
+  <!-- Hero Section -->
+  <section class="hero-section">
+    <div class="container hero-container">
+      <div class="hero-badge">
+        <span class="badge-sparkle">✨</span>
+        <span data-i18n="hero_pill">NotOS Desktop — Обновление 0.5.5 уже доступно</span>
+      </div>
+
+      <h1 class="hero-title" data-i18n="hero_title">
+        Ваш виртуальный рабочий стол для <span class="gradient-text">общения и отдыха</span>
+      </h1>
+
+      <p class="hero-subtitle" data-i18n="hero_subtitle">
+        NotOS переносит виртуальный рабочий стол в мессенджер: кастомные обои, совместный просмотр фильмов, визиты к друзьям, видео-кружочки и AI-помощник в одном быстром приложении.
+      </p>
+
+      <div class="hero-cta-group">
+        <a href="#" class="btn btn-primary btn-lg download-btn" id="heroDownloadBtn">
+          <svg class="btn-icon" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M0 3.449L9.75 2.1v9.451H0m10.949-9.602L24 0v11.4H10.949M0 12.6h9.75v9.451L0 20.699M10.949 12.6H24V24l-12.901-1.801"/>
+          </svg>
+          <div class="btn-text-block">
+            <span class="btn-main-text" data-i18n="btn_download_windows">Скачать для Windows</span>
+            <span class="btn-sub-text" id="heroDownloadSub">Версия 0.5.5 • 125 МБ • Win 10/11</span>
+          </div>
+        </a>
+
+        <a href="#features" class="btn btn-secondary btn-lg" data-i18n="btn_learn_more">
+          Узнать подробнее
+        </a>
+      </div>
+
+      <div class="hero-meta">
+        <span class="meta-item">
+          <svg viewBox="0 0 20 20" fill="currentColor" class="meta-icon"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/></svg>
+          <span data-i18n="meta_desktop">Виртуальный Desktop OS</span>
+        </span>
+        <span class="meta-item">
+          <svg viewBox="0 0 20 20" fill="currentColor" class="meta-icon"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/></svg>
+          <span data-i18n="meta_watch">Watch Together & Кино</span>
+        </span>
+        <span class="meta-item">
+          <svg viewBox="0 0 20 20" fill="currentColor" class="meta-icon"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/></svg>
+          <span data-i18n="meta_privacy">Приватность без номеров</span>
+        </span>
+        <span class="meta-item">
+          <svg viewBox="0 0 20 20" fill="currentColor" class="meta-icon"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/></svg>
+          <span data-i18n="meta_updates">Автообновления в 1 клик</span>
+        </span>
+      </div>
+    </div>
+  </section>
+
+  <!-- Interactive Mockup Preview: 1-в-1 Authentic NotOS Desktop -->
+  <section class="preview-section" id="preview">
+    <div class="container">
+      <div class="section-header center-header">
+        <span class="section-tag" data-i18n="preview_tag">ИНТЕРФЕЙС NOTOS</span>
+        <h2 class="section-title" data-i18n="preview_title">Настоящий рабочий стол 1-в-1</h2>
+        <p class="section-subtitle" data-i18n="preview_subtitle">
+          Никаких однообразных серых колонок. NotOS объединяет плавающие окна мессенджера, кинотеатр Watch Together, музыкальный плеер и нативную панель задач Taskbar.
+        </p>
+      </div>
+
+      <div class="window-mockup notos-os-window">
+        <!-- Mockup Native Window Titlebar -->
+        <div class="mockup-titlebar">
+          <div class="window-app-identity">
+            <img src="assets/logo.png" alt="NotOS" class="titlebar-icon">
+            <span class="window-app-title">NotOS Desktop v0.5.2</span>
+          </div>
+          <div class="window-active-session">
+            <span class="session-user-badge">alex@notos</span>
+            <span class="session-status-dot"></span>
+            <span class="session-status-text">48 kHz WebRTC</span>
+          </div>
+          <div class="window-controls-native">
+            <span class="win-btn win-min" title="Свернуть">─</span>
+            <span class="win-btn win-max" title="Развернуть">▢</span>
+            <span class="win-btn win-close" title="Закрыть">✕</span>
+          </div>
+        </div>
+
+        <!-- NotOS Virtual Desktop Workspace -->
+        <div class="mockup-desktop">
+          <!-- Desktop Background Ambient Glow -->
+          <div class="desktop-wallpaper-glow"></div>
+
+          <!-- Desktop Icons (Left Column) -->
+          <div class="mockup-desktop-icons">
+            <div class="desktop-icon-item">
+              <div class="desktop-icon-tile tile-settings">ST</div>
+              <span class="desktop-icon-label">Настройки</span>
+            </div>
+            <div class="desktop-icon-item">
+              <div class="desktop-icon-tile tile-watch">WT</div>
+              <span class="desktop-icon-label">Кинотеатр</span>
+            </div>
+            <div class="desktop-icon-item">
+              <div class="desktop-icon-tile tile-music">MU</div>
+              <span class="desktop-icon-label">Музыка</span>
+            </div>
+            <div class="desktop-icon-item">
+              <div class="desktop-icon-tile tile-inbox">
+                IN
+                <span class="desktop-badge-dot">1</span>
+              </div>
+              <span class="desktop-icon-label">Почта</span>
+            </div>
+          </div>
+
+          <!-- Windows Layer -->
+          <div class="mockup-windows-stage">
+            <!-- Window 1: NotOS Messenger Window (Primary Foreground) -->
+            <div class="os-window window-messenger">
+              <div class="os-window-header">
+                <div class="os-window-title">
+                  <span class="os-win-icon">💬</span>
+                  <span>Мессенджер — # Общий чат</span>
+                </div>
+                <div class="os-window-actions">
+                  <span class="os-win-action">─</span>
+                  <span class="os-win-action">▢</span>
+                  <span class="os-win-action action-close">✕</span>
+                </div>
+              </div>
+
+              <div class="os-window-content messenger-layout">
+                <!-- Messenger Sidebar -->
+                <div class="msg-sidebar">
+                  <div class="msg-search-box">
+                    <span>🔍</span>
+                    <span class="placeholder-text">Поиск чатов...</span>
+                  </div>
+
+                  <div class="msg-nav-group">
+                    <span class="msg-nav-label">КАНАЛЫ И ЗВОНКИ</span>
+                    <div class="msg-channel-item active">
+                      <span class="chan-icon">🔊</span>
+                      <div class="chan-meta">
+                        <span class="chan-name">Голосовой #1</span>
+                        <div class="chan-audio-indicator">
+                          <span class="bar bar-1"></span>
+                          <span class="bar bar-2"></span>
+                          <span class="bar bar-3"></span>
+                        </div>
+                      </div>
+                      <span class="chan-count">3/10</span>
+                    </div>
+                  </div>
+
+                  <div class="msg-nav-group">
+                    <span class="msg-nav-label">ЛИЧНЫЕ СООБЩЕНИЯ</span>
+                    <div class="msg-user-item active">
+                      <div class="user-avatar-wrap">
+                        <div class="avatar-ring-online"></div>
+                        <div class="avatar-initials bg-pink">S</div>
+                      </div>
+                      <div class="user-item-info">
+                        <div class="user-item-nameplate np-neon-cyan">Sophia</div>
+                        <span class="user-item-status">Кинула кружочек 🎥</span>
+                      </div>
+                    </div>
+
+                    <div class="msg-user-item">
+                      <div class="user-avatar-wrap">
+                        <div class="avatar-initials bg-purple">M</div>
+                      </div>
+                      <div class="user-item-info">
+                        <div class="user-item-nameplate np-neon-violet">Maks</div>
+                        <span class="user-item-status">Слушает Synthwave</span>
+                      </div>
+                    </div>
+
+                    <div class="msg-user-item">
+                      <div class="user-avatar-wrap">
+                        <div class="avatar-initials bg-green">AI</div>
+                      </div>
+                      <div class="user-item-info">
+                        <div class="user-item-nameplate np-neon-emerald">NotOS AI</div>
+                        <span class="user-item-status">Ассистент активен</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Active Chat Body -->
+                <div class="msg-chat-area">
+                  <!-- Chat Header -->
+                  <div class="chat-header">
+                    <div class="chat-header-user">
+                      <div class="avatar-wrap-sm">
+                        <div class="avatar-initials bg-pink">S</div>
+                        <span class="status-dot-sm"></span>
+                      </div>
+                      <div class="chat-user-meta">
+                        <span class="user-item-nameplate np-neon-cyan">Sophia</span>
+                        <span class="chat-user-sub">В сети • NotOS Desktop</span>
+                      </div>
+                    </div>
+                    <div class="chat-header-actions">
+                      <button class="chat-act-btn" title="Позвонить">📞</button>
+                      <button class="chat-act-btn" title="Стрим экрана">🖥️</button>
+                      <button class="chat-act-btn" title="Смотреть вместе">🍿</button>
+                    </div>
+                  </div>
+
+                  <!-- Chat Messages Stream -->
+                  <div class="chat-messages">
+                    <!-- Message 1: Text Message -->
+                    <div class="chat-msg-row">
+                      <div class="msg-avatar-col">
+                        <div class="avatar-initials bg-pink">S</div>
+                      </div>
+                      <div class="msg-content-col">
+                        <div class="msg-author-meta">
+                          <span class="user-item-nameplate np-neon-cyan">Sophia</span>
+                          <span class="msg-time">21:38</span>
+                        </div>
+                        <div class="msg-text-bubble">
+                          Привет! Зацените как быстро открывается рабочий стол и играет музыка в фоне! Включила новый стрим в Watch Together 🔥
+                        </div>
+                      </div>
+                    </div>
+
+                    <!-- Message 2: Voice Message with Waveform -->
+                    <div class="chat-msg-row">
+                      <div class="msg-avatar-col">
+                        <img src="assets/logo.png" class="msg-avatar-img" alt="Alex">
+                      </div>
+                      <div class="msg-content-col">
+                        <div class="msg-author-meta">
+                          <span class="user-item-nameplate np-neon-violet">Alex [Dev]</span>
+                          <span class="msg-time">21:39</span>
+                        </div>
+                        <!-- Voice Message Player Bubble -->
+                        <div class="msg-voice-bubble">
+                          <button class="voice-play-btn" title="Воспроизвести">
+                            <span class="play-icon">▶</span>
+                          </button>
+                          <div class="voice-wave-container">
+                            <div class="voice-wave-bars">
+                              <span class="vbar" style="height: 40%"></span>
+                              <span class="vbar" style="height: 70%"></span>
+                              <span class="vbar" style="height: 100%"></span>
+                              <span class="vbar" style="height: 55%"></span>
+                              <span class="vbar" style="height: 85%"></span>
+                              <span class="vbar" style="height: 60%"></span>
+                              <span class="vbar" style="height: 90%"></span>
+                              <span class="vbar" style="height: 45%"></span>
+                              <span class="vbar" style="height: 75%"></span>
+                              <span class="vbar" style="height: 35%"></span>
+                              <span class="vbar" style="height: 65%"></span>
+                              <span class="vbar" style="height: 80%"></span>
+                              <span class="vbar" style="height: 50%"></span>
+                              <span class="vbar" style="height: 95%"></span>
+                              <span class="vbar" style="height: 70%"></span>
+                              <span class="vbar" style="height: 40%"></span>
+                              <span class="vbar" style="height: 60%"></span>
+                              <span class="vbar" style="height: 30%"></span>
+                            </div>
+                            <div class="voice-time-row">
+                              <span class="voice-duration">0:28</span>
+                              <span class="voice-codec-chip">48 kHz HD</span>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <!-- Message 3: Video Circle (Кружочек) -->
+                    <div class="chat-msg-row">
+                      <div class="msg-avatar-col">
+                        <div class="avatar-initials bg-pink">S</div>
+                      </div>
+                      <div class="msg-content-col">
+                        <div class="msg-author-meta">
+                          <span class="user-item-nameplate np-neon-cyan">Sophia</span>
+                          <span class="msg-time">21:40</span>
+                        </div>
+                        <!-- Video Circle Bubble -->
+                        <div class="msg-video-circle-bubble">
+                          <div class="video-circle-frame">
+                            <div class="video-circle-ring"></div>
+                            <div class="video-circle-poster">
+                              <span class="circle-camera-icon">🎥</span>
+                              <span class="circle-play-overlay">▶</span>
+                            </div>
+                            <span class="circle-duration-badge">0:14</span>
+                          </div>
+                          <span class="video-circle-hint">Видеосообщение</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- Chat Composer -->
+                  <div class="chat-composer">
+                    <button class="composer-icon-btn" title="Прикрепить файл">📎</button>
+                    <input type="text" class="composer-input" placeholder="Написать сообщение Sophia..." readonly value="Смотрим! Сейчас подключусь к комнате...">
+                    <button class="composer-icon-btn" title="Эмодзи">😊</button>
+                    <button class="composer-voice-btn" title="Записать кружочек / голос">
+                      <span>🎙️</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Window 2: Watch Together Window (Floating Top-Right) -->
+            <div class="os-window window-watch">
+              <div class="os-window-header">
+                <div class="os-window-title">
+                  <span class="os-win-icon">🍿</span>
+                  <span>Watch Together — Cyberpunk: Edgerunners</span>
+                </div>
+                <div class="os-window-actions">
+                  <span class="os-win-action">─</span>
+                  <span class="os-win-action">▢</span>
+                  <span class="os-win-action action-close">✕</span>
+                </div>
+              </div>
+
+              <div class="watch-window-body">
+                <!-- Video Screen -->
+                <div class="watch-screen">
+                  <div class="watch-screen-content">
+                    <div class="cinema-ambient-light"></div>
+                    <div class="cinema-title-overlay">
+                      <span class="cinema-sync-chip">
+                        <span class="pulse-dot"></span>
+                        СИНХРОНИЗИРОВАНО (1080p 60fps)
+                      </span>
+                    </div>
+                    <div class="cinema-center-action">
+                      <div class="cinema-play-circle">▶</div>
+                    </div>
+                    <div class="cinema-viewers-bar">
+                      <div class="viewer-avatar-group">
+                        <img src="assets/logo.png" class="viewer-chip" title="Alex" alt="Alex">
+                        <span class="viewer-chip bg-pink" title="Sophia">S</span>
+                        <span class="viewer-chip bg-purple" title="Maks">M</span>
+                      </div>
+                      <span class="viewers-count-text">3 друга смотрят</span>
+                    </div>
+                  </div>
+
+                  <!-- Video Controls Bar -->
+                  <div class="watch-control-bar">
+                    <div class="watch-progress-track">
+                      <div class="watch-progress-fill" style="width: 58%"></div>
+                      <div class="watch-progress-thumb"></div>
+                    </div>
+                    <div class="watch-buttons-row">
+                      <div class="watch-btns-left">
+                        <button class="wbtn">⏸</button>
+                        <button class="wbtn">🔊</button>
+                        <span class="watch-timestamp">14:18 / 24:30</span>
+                      </div>
+                      <div class="watch-btns-right">
+                        <span class="quality-badge">HD</span>
+                        <button class="wbtn">⛶</button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Floating Widget: Desktop Music Player Widget (Bottom-Right) -->
+            <div class="desktop-floating-widget music-widget">
+              <div class="widget-header">
+                <span class="widget-icon">🎵</span>
+                <span class="widget-title">Музыкальный плеер</span>
+                <div class="music-equalizer">
+                  <span class="eq-bar eq-1"></span>
+                  <span class="eq-bar eq-2"></span>
+                  <span class="eq-bar eq-3"></span>
+                </div>
+              </div>
+              <div class="widget-track-info">
+                <div class="track-artwork">💿</div>
+                <div class="track-meta">
+                  <span class="track-title">Midnight City</span>
+                  <span class="track-artist">M83 • Плейлист рабочего стола</span>
+                </div>
+              </div>
+              <div class="widget-controls">
+                <button class="wctl-btn">⏮</button>
+                <button class="wctl-btn wctl-play">⏸</button>
+                <button class="wctl-btn">⏭</button>
+                <div class="widget-vol-bar">
+                  <div class="vol-fill" style="width: 75%"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Bottom Authentic NotOS Taskbar -->
+          <footer class="mockup-taskbar">
+            <!-- Profile Start Button -->
+            <div class="taskbar-profile-start">
+              <div class="tb-avatar-wrap">
+                <img src="assets/logo.png" alt="Profile" class="tb-avatar-img">
+                <span class="tb-online-badge"></span>
+              </div>
+              <div class="tb-user-info">
+                <span class="tb-nameplate np-neon-violet">Alex [Dev]</span>
+                <span class="tb-user-status">В сети</span>
+              </div>
+            </div>
+
+            <!-- Taskbar App Launchers -->
+            <div class="taskbar-apps-list">
+              <button class="taskbar-app-btn" type="button" title="Настройки">
+                <span class="taskbar-app-tile tile-settings">ST</span>
+                <span class="taskbar-app-name">Настройки</span>
+              </button>
+
+              <button class="taskbar-app-btn active" type="button" title="Мессенджер">
+                <span class="taskbar-app-tile tile-messenger">M</span>
+                <span class="taskbar-app-name">Мессенджер</span>
+              </button>
+
+              <button class="taskbar-app-btn" type="button" title="Почта и заявки">
+                <span class="taskbar-app-tile tile-inbox">
+                  IN
+                  <span class="tb-badge">1</span>
+                </span>
+                <span class="taskbar-app-name">Почта</span>
+              </button>
+
+              <button class="taskbar-app-btn active-app" type="button" title="Watch Together">
+                <span class="taskbar-app-tile tile-watch">WT</span>
+                <span class="taskbar-app-name">Watch Together</span>
+              </button>
+
+              <button class="taskbar-app-btn" type="button" title="AI-Ассистент">
+                <span class="taskbar-app-tile tile-ai">AI</span>
+                <span class="taskbar-app-name">AI-Чат</span>
+              </button>
+
+              <button class="taskbar-app-btn" type="button" title="Удаленный рабочий стол друзей">
+                <span class="taskbar-app-tile tile-remote">PC</span>
+                <span class="taskbar-app-name">Удаленный стол</span>
+              </button>
+            </div>
+
+            <!-- Taskbar Spacer -->
+            <div class="taskbar-spacer"></div>
+
+            <!-- Taskbar Clock -->
+            <div class="taskbar-clock-block" id="mockupClock">
+              <span class="tb-time" id="tbClockTime">21:42</span>
+              <span class="tb-date" id="tbClockDate">28.09.2026</span>
+            </div>
+          </footer>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Bento Grid Features Section -->
+  <section class="features-section" id="features">
+    <div class="container">
+      <div class="section-header">
+        <span class="section-tag" data-i18n="features_tag">ВОЗМОЖНОСТИ NOTOS</span>
+        <h2 class="section-title" data-i18n="features_title">Больше чем мессенджер — персональная экосистема</h2>
+        <p class="section-subtitle" data-i18n="features_subtitle">
+          Исследуйте возможности NotOS в интерактивном формате: от виртуального рабочего стола до визитов к друзьям и умного AI.
+        </p>
+      </div>
+
+      <div class="bento-grid">
+        <!-- Tile 1 (Large / 2-column span): Virtual Desktop OS -->
+        <div class="bento-card bento-card-wide card-desktop">
+          <div class="bento-badge-pill">
+            <span class="pill-spark">🖥️</span>
+            <span>Desktop Experience</span>
+          </div>
+          <div class="bento-content-top">
+            <h3 class="bento-title" data-i18n="b1_title">Виртуальный Рабочий Стол (Desktop OS)</h3>
+            <p class="bento-desc" data-i18n="b1_desc">
+              Свободно перемещайте окна, ставьте собственные динамические и видео-обои до 10 МБ, управляйте виджетами и панелью задач Taskbar. Интерфейс, который подстраивается под вас.
+            </p>
+          </div>
+          <!-- Demonstration Box -->
+          <div class="bento-demo bento-demo-desktop">
+            <div class="demo-desktop-frame">
+              <div class="mini-window mini-win-1">
+                <div class="mini-win-bar"><span>Мессенджер</span><span>✕</span></div>
+                <div class="mini-win-content">
+                  <div class="mini-line w-80"></div>
+                  <div class="mini-line w-50"></div>
+                </div>
+              </div>
+              <div class="mini-window mini-win-2">
+                <div class="mini-win-bar"><span>Виджет часов</span></div>
+                <div class="mini-clock-display">21:42 • Пн</div>
+              </div>
+              <div class="mini-taskbar-preview">
+                <div class="mini-tb-start"></div>
+                <div class="mini-tb-icons">
+                  <span class="mini-tb-dot"></span>
+                  <span class="mini-tb-dot active"></span>
+                  <span class="mini-tb-dot"></span>
+                </div>
+                <div class="mini-tb-clock">21:42</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tile 2: Watch Together -->
+        <div class="bento-card card-watch">
+          <div class="bento-badge-pill">
+            <span class="pill-spark">🍿</span>
+            <span>Синхронизация</span>
+          </div>
+          <h3 class="bento-title" data-i18n="b2_title">Watch Together & Кинотеатр</h3>
+          <p class="bento-desc" data-i18n="b2_desc">
+            Смотрите фильмы, YouTube, аниме и сериалы синхронно с друзьями. Покадровая синхронизация воспроизведения, перемотки и паузы для всех участников.
+          </p>
+          <!-- Demonstration Box -->
+          <div class="bento-demo bento-demo-watch">
+            <div class="demo-cinema-box">
+              <div class="demo-cinema-screen">
+                <span class="cinema-sync-tag">● SYNC 1080p</span>
+                <span class="cinema-play-btn">▶</span>
+              </div>
+              <div class="demo-cinema-bar">
+                <div class="demo-bar-track"><div class="demo-bar-fill"></div></div>
+                <div class="demo-viewers">
+                  <span class="demo-avatar bg-pink">S</span>
+                  <span class="demo-avatar bg-blue">A</span>
+                  <span class="demo-avatar bg-purple">M</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tile 3: Remote Desktop -->
+        <div class="bento-card card-remote">
+          <div class="bento-badge-pill">
+            <span class="pill-spark">🌐</span>
+            <span>Визиты к друзьям</span>
+          </div>
+          <h3 class="bento-title" data-i18n="b3_title">Удаленный рабочий стол друзей</h3>
+          <p class="bento-desc" data-i18n="b3_desc">
+            Заходите в гости на рабочий стол друга в один клик: слушайте его музыку, изучайте его оформление и оставляйте сообщения на его стене профиля.
+          </p>
+          <!-- Demonstration Box -->
+          <div class="bento-demo bento-demo-remote">
+            <div class="demo-remote-card">
+              <div class="remote-host-badge">
+                <span class="remote-pulse"></span>
+                <span>Рабочий стол Sophia</span>
+              </div>
+              <div class="remote-actions-list">
+                <div class="remote-action-item">
+                  <span>🎵 Плейлист хоста:</span>
+                  <span class="remote-val">Synthwave Nights</span>
+                </div>
+                <div class="remote-action-item">
+                  <span>🎨 Тема оформления:</span>
+                  <span class="remote-val">Neon Cyber Blue</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tile 4: Video Circles & Voice Waveforms -->
+        <div class="bento-card card-circles">
+          <div class="bento-badge-pill">
+            <span class="pill-spark">🎥</span>
+            <span>Кружочки & Звук</span>
+          </div>
+          <h3 class="bento-title" data-i18n="b4_title">Видео-кружочки и HD-звук</h3>
+          <p class="bento-desc" data-i18n="b4_desc">
+            Записывайте видеосообщения в Telegram-стиле прямо на рабочем столе и отправляйте голосовые с живой анимацией звуковой волны и кристальным 48 kHz звуком.
+          </p>
+          <!-- Demonstration Box -->
+          <div class="bento-demo bento-demo-media">
+            <div class="demo-media-layout">
+              <div class="demo-video-circle">
+                <div class="circle-pulse-ring"></div>
+                <span class="demo-cam-icon">📹</span>
+                <span class="demo-circle-time">0:15</span>
+              </div>
+              <div class="demo-voice-waveform">
+                <span class="demo-wave-play">▶</span>
+                <div class="demo-wave-bars">
+                  <span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+                </div>
+                <span class="demo-wave-len">0:32</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tile 5: Desktop Wall & Music Player -->
+        <div class="bento-card card-wall">
+          <div class="bento-badge-pill">
+            <span class="pill-spark">📝</span>
+            <span>Стена & Музыка</span>
+          </div>
+          <h3 class="bento-title" data-i18n="b5_title">Стена профиля и музыкальный плеер</h3>
+          <p class="bento-desc" data-i18n="b5_desc">
+            Персональная доска для друзей: оставляйте треки, стикеры, взрывы эмодзи (Emoji Bursts) и закрепляйте памятные медиа-карточки.
+          </p>
+          <!-- Demonstration Box -->
+          <div class="bento-demo bento-demo-wall">
+            <div class="demo-wall-card">
+              <div class="wall-card-author">
+                <span class="wall-avatar">A</span>
+                <span class="wall-author-name">Alex [Dev]</span>
+                <span class="wall-emoji-burst">🔥 🚀 ✨</span>
+              </div>
+              <p class="wall-message-text">«Оставил любимый трек на твоей стене, послушай!»</p>
+              <div class="wall-music-chip">
+                <span>🎵 The Midnight — Days of Thunder</span>
+                <span class="wall-chip-play">▶</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tile 6: Custom NamePlates -->
+        <div class="bento-card card-nameplates">
+          <div class="bento-badge-pill">
+            <span class="pill-spark">✨</span>
+            <span>Персонализация</span>
+          </div>
+          <h3 class="bento-title" data-i18n="b6_title">Кастомные NamePlates & Неон</h3>
+          <p class="bento-desc" data-i18n="b6_desc">
+            Выделяйтесь уникальными неоновыми подложками для никнеймов, кастомными градиентами, бейджами и темами оформления (Dark, Blue, Mint).
+          </p>
+          <!-- Demonstration Box -->
+          <div class="bento-demo bento-demo-nameplates">
+            <div class="nameplate-preview-stack">
+              <div class="demo-np np-neon-cyan">
+                <span>✦ Sophia</span>
+                <span class="np-tag">VIP</span>
+              </div>
+              <div class="demo-np np-neon-violet">
+                <span>⚡ Alex [Dev]</span>
+                <span class="np-tag">CREATOR</span>
+              </div>
+              <div class="demo-np np-neon-emerald">
+                <span>🛡️ Maks</span>
+                <span class="np-tag">PRO</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tile 7: Built-in AI Assistant -->
+        <div class="bento-card card-ai">
+          <div class="bento-badge-pill">
+            <span class="pill-spark">🧠</span>
+            <span>Нейросеть</span>
+          </div>
+          <h3 class="bento-title" data-i18n="b7_title">Встроенный AI-Ассистент</h3>
+          <p class="bento-desc" data-i18n="b7_desc">
+            Умная нейросеть прямо в отдельном окне: поможет с кодом, переводом, идеями и решением любых вопросов прямо во время общения.
+          </p>
+          <!-- Demonstration Box -->
+          <div class="bento-demo bento-demo-ai">
+            <div class="demo-ai-chat">
+              <div class="ai-prompt-bubble">
+                <span class="ai-label">Вы:</span>
+                <span>Синхронизируй воспроизведение стрима</span>
+              </div>
+              <div class="ai-response-bubble">
+                <span class="ai-label">NotOS AI:</span>
+                <code>syncTimeline(currentTick, latency); // 0ms lag</code>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tile 8: Privacy & Auth Key -->
+        <div class="bento-card card-privacy">
+          <div class="bento-badge-pill">
+            <span class="pill-spark">🔒</span>
+            <span>Безопасность</span>
+          </div>
+          <h3 class="bento-title" data-i18n="b8_title">Приватность без номеров телефонов</h3>
+          <p class="bento-desc" data-i18n="b8_desc">
+            Никаких телефонных номеров, спама и утечек. Вход по защищенному Auth-файлу сессии и PIN-коду. Ваши ключи хранятся только локально.
+          </p>
+          <!-- Demonstration Box -->
+          <div class="bento-demo bento-demo-security">
+            <div class="demo-auth-badge">
+              <div class="auth-key-icon">🔑</div>
+              <div class="auth-key-info">
+                <span class="auth-key-title">notos-session-auth.key</span>
+                <span class="auth-key-status">Локальный приватный ключ • PIN Active</span>
+              </div>
+              <span class="auth-check-icon">✓</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Live Server Status Section -->
+  <section class="status-section" id="status">
+    <div class="container">
+      <div class="status-card">
+        <div class="status-header">
+          <div class="status-title-group">
+            <span class="status-card-pill" data-i18n="status_monitoring">МОНИТОРИНГ СЕРВЕРОВ</span>
+            <h2 class="status-heading" data-i18n="status_heading">Состояние сервисов NotOS</h2>
+          </div>
+          <div class="status-overall-badge" id="statusOverallBadge">
+            <span class="pulse-dot"></span>
+            <span id="statusOverallText" data-i18n="status_all_operational">Все системы работают</span>
+          </div>
+        </div>
+
+        <div class="status-grid">
+          <div class="status-item">
+            <div class="status-item-meta">
+              <span class="status-item-name" data-i18n="service_voice">Голосовой сигналлинг (WebSockets)</span>
+              <span class="status-item-state state-good" id="stVoice">Нормально</span>
+            </div>
+            <div class="status-bar"><div class="status-bar-fill fill-good"></div></div>
+          </div>
+
+          <div class="status-item">
+            <div class="status-item-meta">
+              <span class="status-item-name" data-i18n="service_api">API Сервер и авторизация</span>
+              <span class="status-item-state state-good" id="stApi">Нормально</span>
+            </div>
+            <div class="status-bar"><div class="status-bar-fill fill-good"></div></div>
+          </div>
+
+          <div class="status-item">
+            <div class="status-item-meta">
+              <span class="status-item-name" data-i18n="service_updates">Сервер обновлений (Auto-Update)</span>
+              <span class="status-item-state state-good" id="stUpdates">Нормально</span>
+            </div>
+            <div class="status-bar"><div class="status-bar-fill fill-good"></div></div>
+          </div>
+
+          <div class="status-item">
+            <div class="status-item-meta">
+              <span class="status-item-name" data-i18n="service_webrtc">WebRTC & P2P Стриминг</span>
+              <span class="status-item-state state-good" id="stWebrtc">Нормально</span>
+            </div>
+            <div class="status-bar"><div class="status-bar-fill fill-good"></div></div>
+          </div>
+        </div>
+
+        <div class="status-footer">
+          <div class="ping-block">
+            <span class="ping-label" data-i18n="status_latency">Текущая задержка:</span>
+            <span class="ping-value" id="statusPingValue">~18 мс</span>
+          </div>
+          <div class="uptime-block">
+            <span class="uptime-label">Uptime:</span>
+            <span class="uptime-value">99.98%</span>
+          </div>
+          <button class="btn btn-xs btn-outline" id="refreshStatusBtn" data-i18n="status_refresh">
+            Проверить снова
+          </button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Download CTA Section -->
+  <section class="download-section" id="download">
+    <div class="container">
+      <div class="download-box">
+        <div class="download-content">
+          <img src="assets/logo.png" class="download-logo" alt="NotOS">
+          <h2 class="download-title" data-i18n="cta_title">Готовы общаться на новом уровне?</h2>
+          <p class="download-desc" data-i18n="cta_desc">
+            Скачайте клиент NotOS для Windows бесплатно прямо сейчас. Установка занимает меньше минуты, а все обновления приходят автоматически.
+          </p>
+
+          <div class="download-action-wrap">
+            <a href="#" class="btn btn-primary btn-xl download-btn" id="ctaDownloadBtn">
+              <svg class="btn-icon" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M0 3.449L9.75 2.1v9.451H0m10.949-9.602L24 0v11.4H10.949M0 12.6h9.75v9.451L0 20.699M10.949 12.6H24V24l-12.901-1.801"/>
+              </svg>
+              <div class="btn-text-block">
+                <span class="btn-main-text" data-i18n="btn_download_full">Скачать NotOS для Windows</span>
+                <span class="btn-sub-text" id="ctaDownloadSub">Версия 0.5.5 • 125 МБ • Прямая загрузка</span>
+              </div>
+            </a>
+          </div>
+
+          <p class="download-changelog" id="downloadChangelog">
+            <strong data-i18n="cta_whats_new">Что нового в v0.5.5:</strong>
+            <span data-i18n="cta_notes">Ответ с помощью ИИ в чатах и группах (@упоминание, бейдж ИИ, персональный аватар), улучшенный ИИ чат AnyModel/Grok, оптимизация автообновлений.</span>
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <div class="container footer-container">
+      <div class="footer-brand-col">
+        <div class="brand">
+          <img src="assets/logo.png" alt="NotOS Logo" class="brand-logo-sm">
+          <span class="brand-name">NotOS</span>
+        </div>
+        <p class="footer-tagline" data-i18n="footer_tagline">
+          Мессенджер нового поколения для голосового общения, звонков и совместного просмотра.
+        </p>
+        <span class="footer-copy">© 2026 NotOS. <span data-i18n="footer_rights">Все права защищены.</span></span>
+      </div>
+
+      <div class="footer-links-col">
+        <h4 data-i18n="footer_product">Продукт</h4>
+        <a href="#features" data-i18n="nav_features">Возможности</a>
+        <a href="#preview" data-i18n="nav_preview">Интерфейс</a>
+        <a href="#download" data-i18n="nav_download">Скачать установщик</a>
+        <a href="#status" data-i18n="nav_status">Статус серверов</a>
+      </div>
+
+      <div class="footer-links-col">
+        <h4 data-i18n="footer_legal">Правовая информация</h4>
+        <button class="footer-link-btn" id="openPrivacyBtn" data-i18n="modal_privacy_title">Политика конфиденциальности</button>
+        <button class="footer-link-btn" id="openTermsBtn" data-i18n="modal_terms_title">Условия использования</button>
+      </div>
+    </div>
+  </footer>
+
+  <!-- Modal: Privacy Policy -->
+  <div class="modal-backdrop" id="privacyModal">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <h3 class="modal-title" data-i18n="modal_privacy_title">Политика конфиденциальности</h3>
+        <button class="modal-close-btn" id="closePrivacyBtn">&times;</button>
+      </div>
+      <div class="modal-body" data-i18n-html="privacy_body">
+        <h4>1. Общие положения</h4>
+        <p>Настоящая Политика конфиденциальности описывает, как сервис NotOS (далее — «Сервис») обрабатывает и защищает данные пользователей. Мы уважительно относимся к вашей приватности и сводим сбор информации к строго необходимому минимуму для обеспечения связи.</p>
+
+        <h4>2. Сбор и использование информации</h4>
+        <p>NotOS собирает только базовые данные, необходимые для вашей авторизации и функционирования комнат: ваш никнейм, уникальный идентификатор сессии и выбранные вами пользовательские настройки. Все персональные файлы сессий и ключи авторизации генерируются и хранятся локально на вашем компьютере.</p>
+
+        <h4>3. Голосовые данные и медиапотоки</h4>
+        <p>Голосовые и видеопотоки во время звонков и конференций передаются по зашифрованным WebRTC-каналам напрямую между участниками либо через защищенные медиа-шлюзы. Мы не ведем скрытую запись ваших разговоров и не сохраняем содержимое трансляций экранов.</p>
+
+        <h4>4. Передача третьим лицам</h4>
+        <p>Мы принципиально не продаем, не передаем и не монетизируем пользовательские данные рекламным сетям или аналитическим трекерам.</p>
+
+        <h4>5. Обновления политики</h4>
+        <p>Политика конфиденциальности может обновляться по мере добавления новых функций. Актуальная версия всегда доступна на официальном сайте notos.tech.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Terms of Service -->
+  <div class="modal-backdrop" id="termsModal">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <h3 class="modal-title" data-i18n="modal_terms_title">Условия использования</h3>
+        <button class="modal-close-btn" id="closeTermsBtn">&times;</button>
+      </div>
+      <div class="modal-body" data-i18n-html="terms_body">
+        <h4>1. Принятие условий</h4>
+        <p>Используя клиент или сервисы NotOS, вы соглашаетесь соблюдать настоящие Условия использования. Если вы не согласны с какими-либо положениями, пожалуйста, воздержитесь от использования Сервиса.</p>
+
+        <h4>2. Правила поведения</h4>
+        <p>Пользователям запрещается использовать Сервис для распространения вредоносного программного обеспечения, организации спам-рассылок, нарушения законов, оскорблений и действий, нарушающих работу инфраструктуры Сервиса.</p>
+
+        <h4>3. Интеллектуальная собственность</h4>
+        <p>Все права на графические материалы, код, бренд и логотип NotOS принадлежат разработчикам проекта. Вы получаете право использовать клиентское приложение исключительно в личных некоммерческих целях.</p>
+
+        <h4>4. Отказ от гарантий</h4>
+        <p>Сервис предоставляется по принципу «как есть» (as is). Мы постоянно работаем над улучшением стабильности и безопасности, однако не несем ответственности за временные перебои со связью у третьих провайдеров.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Scripts -->
+  <script src="script.js"></script>
+</body>
+</html>

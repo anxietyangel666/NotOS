@@ -2,19 +2,20 @@ import { Fragment, useEffect, useMemo, useRef, useState, type ClipboardEvent as 
 import { createPortal } from 'react-dom';
 import { api } from '../api/client';
 import { readImageAsDataUrl } from '../auth/auth-file';
-import type { ChannelPermissionOverride, ChatMediaItem, CustomCategory, Group, GroupChannel, GroupFolder, GroupInvite, GroupMember, GroupMessage, GroupRole, Language, NamePlate, PublicUser } from '../api/types';
+import type { ChannelExtraSettings, ChannelPermissionOverride, ChatMediaItem, CustomCategory, Group, GroupChannel, GroupFolder, GroupInvite, GroupMember, GroupMessage, GroupRole, Language, NamePlate, PublicUser } from '../api/types';
+import { DEFAULT_CHANNEL_EXTRA_SETTINGS, normalizeChannelExtraSettings } from '../api/types';
 import { CustomizationModal } from './CustomizationModal';
 import { DEFAULT_NAMEPLATE } from '../api/types';
 import type { VoiceRoom } from '../hooks/use-voice-room';
 import type { TenorGif } from '../utils/tenor';
 import { VoiceStage } from './VoiceStage';
-import { t, getSavedTimeFormat, getSavedTranslateTargetName, getSavedComposerTranslateTargetName } from '../i18n';
+import { LOCALES, t, getSavedTimeFormat, getSavedTranslateTargetName, getSavedComposerTranslateTargetName } from '../i18n';
 import { AvatarCropper } from './AvatarCropper';
 import { NameplateCropper } from './NameplateCropper';
 import { EmojiPicker } from './EmojiPicker';
 import { EmojiInlineInput, type EmojiInlineInputHandle } from './EmojiInlineInput';
 import { InviteEmbed } from './InviteEmbed';
-import { MessageText, Twemoji } from './Twemoji';
+import { MessagePreviewText, MessageText, Twemoji } from './Twemoji';
 import { expandCustomEmojiShortcodes, extractSharedPack, stripPackLinks, hasPackLink } from '../utils/custom-emoji';
 import { recordRecentEmoji } from '../utils/recent-emoji';
 import { QUICK_REACTIONS, ReactionEmoji, ReplyQuote, ReplyComposerBar, ForwardedCard, MenuReplyIcon, MenuForwardIcon, MenuPinIcon, MenuDeleteIcon, MenuEditIcon, MenuTranslateIcon, MenuCopyIcon, MenuCutIcon, MenuPasteIcon } from './MessageActions';
@@ -37,6 +38,9 @@ import { GameEmbed, parseGameBody } from './GameEmbed';
 import { PollCreateModal } from './PollCreateModal';
 import { applySlashCommand, SLASH_COMMANDS } from '../utils/slash-commands';
 import { copyImageToClipboard, MediaLightbox, type MediaLightboxItem } from './MediaLightbox';
+import { assetUrl } from '../utils/assets';
+
+const AI_ASSISTANT_AVATAR = assetUrl('Icons/ai.png');
 
 import {
   CHANNEL_PANEL_MAX,
@@ -84,7 +88,7 @@ import {
   savePanelWidth
 } from './group-chat/group-cache';
 import { GroupChatGifAttachment } from './group-chat/GroupChatGifAttachment';
-import { GroupSettingsModal } from './group-chat/GroupSettingsModal';
+import { GroupSettingsModal, type GroupSettingsTab } from './group-chat/GroupSettingsModal';
 import { ChannelSettingsModal } from './group-chat/ChannelSettingsModal';
 import { FolderSettingsModal } from './group-chat/FolderSettingsModal';
 import { GroupChannelsPanel } from './group-chat/GroupChannelsPanel';
@@ -168,6 +172,7 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
   const [pinnedPanelOpen, setPinnedPanelOpen] = useState(false);
   const [groupMembersHidden, setGroupMembersHidden] = useState(false);
   const [messageMenu, setMessageMenu] = useState<{ x: number; y: number; message: GroupMessage; imageSrc?: string } | null>(null);
+  const [replyingWithAiId, setReplyingWithAiId] = useState<string | null>(null);
   const [channelMenu, setChannelMenu] = useState<{ x: number; y: number; kind: 'channel' | 'folder'; id: string; name: string } | null>(null);
   // Ephemeral, per-message translations keyed by message id. Reset on channel
   // switch and when the chat view unmounts (close/reopen messenger).
@@ -278,6 +283,10 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
   const [editSlowmodeDraft, setEditSlowmodeDraft] = useState('0');
   const [editNsfwDraft, setEditNsfwDraft] = useState(false);
   const [editBitrateDraft, setEditBitrateDraft] = useState('64000');
+  const [extrasDraft, setExtrasDraft] = useState<ChannelExtraSettings>(DEFAULT_CHANNEL_EXTRA_SETTINGS);
+  const [extrasFolderId, setExtrasFolderId] = useState('');
+  const [signPostsDraft, setSignPostsDraft] = useState(false);
+  const [channelEffectivePerms, setChannelEffectivePerms] = useState<string[] | null>(null);
   const [channelSettingsTab, setChannelSettingsTab] = useState<ChannelSettingsTab>('overview');
   const [channelRoleDraft, setChannelRoleDraft] = useState<string[]>([]);
   const [selectedChannelPermissionRoleId, setSelectedChannelPermissionRoleId] = useState<string | null>(null);
@@ -322,7 +331,7 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
   const [defaultRoleId, setDefaultRoleId] = useState<string | null>(group.defaultRoleId ?? null);
   const [everyonePermissions, setEveryonePermissions] = useState<string[]>(group.everyonePermissions ?? []);
   const [defaultRoleMenuOpen, setDefaultRoleMenuOpen] = useState(false);
-  const [settingsTab, setSettingsTab] = useState<'overview' | 'invite' | 'roles' | 'members' | 'customization' | 'posts' | 'audit'>('overview');
+  const [settingsTab, setSettingsTab] = useState<GroupSettingsTab>('overview');
   // Server profile customization: admin-defined categories, the caller's
   // selected option ids, whether a required onboarding flow is pending, and
   // whether the member-facing "Настроить профиль" modal is open.
@@ -772,35 +781,58 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
     () => currentUser.id === group.ownerId || currentRoles.some((r) => r.isOwner) || currentMember?.role === 'Owner',
     [currentUser.id, group.ownerId, currentRoles, currentMember]
   );
-  const canManageRoles = useMemo(() => isOwner || currentPermissionSet.has('ManageRoles'), [isOwner, currentPermissionSet]);
-  const canManageChannels = useMemo(() => isOwner || currentPermissionSet.has('ManageChannels'), [isOwner, currentPermissionSet]);
-  const canKickMembers = useMemo(() => isOwner || currentPermissionSet.has('KickMembers'), [isOwner, currentPermissionSet]);
-  const canDeleteAny = useMemo(() => isOwner || currentPermissionSet.has('DeleteAnyMessage'), [isOwner, currentPermissionSet]);
-  const canManageInvites = useMemo(() => isOwner || currentPermissionSet.has('ManageInvites'), [isOwner, currentPermissionSet]);
+  const hasAdministrator = useMemo(() => isOwner || currentPermissionSet.has('Administrator'), [isOwner, currentPermissionSet]);
+  const canManageRoles = useMemo(() => hasAdministrator || currentPermissionSet.has('ManageRoles'), [hasAdministrator, currentPermissionSet]);
+  const canManageServer = useMemo(() => hasAdministrator || currentPermissionSet.has('ManageServer'), [hasAdministrator, currentPermissionSet]);
+  const canManageChannels = useMemo(() => hasAdministrator || currentPermissionSet.has('ManageChannels'), [hasAdministrator, currentPermissionSet]);
+  const canKickMembers = useMemo(() => hasAdministrator || currentPermissionSet.has('KickMembers'), [hasAdministrator, currentPermissionSet]);
+  const canBanMembers = useMemo(() => hasAdministrator || currentPermissionSet.has('BanMembers'), [hasAdministrator, currentPermissionSet]);
+  const canTimeoutMembers = useMemo(() => hasAdministrator || currentPermissionSet.has('TimeoutMembers'), [hasAdministrator, currentPermissionSet]);
+  const canDeleteAny = useMemo(() => hasAdministrator || currentPermissionSet.has('DeleteAnyMessage'), [hasAdministrator, currentPermissionSet]);
+  const canManageInvites = useMemo(() => hasAdministrator || currentPermissionSet.has('ManageInvites'), [hasAdministrator, currentPermissionSet]);
   const canUseGroupIdentity = useMemo(
     () => isOwner || GROUP_IDENTITY_PERMISSIONS.some((permission) => currentPermissionSet.has(permission)),
     [isOwner, currentPermissionSet]
   );
   const canMentionEveryone = useMemo(() => isOwner || currentPermissionSet.has(MENTION_EVERYONE_PERMISSION) || currentRoles.some((r) => r.isOwner), [isOwner, currentPermissionSet, currentRoles]);
   const activeChannelPermissionSet = useMemo(() => {
+    if (channelEffectivePerms) return new Set(channelEffectivePerms);
     const permissions = new Set<string>();
     for (const permission of currentPermissionSet) permissions.add(permission);
     return permissions;
-  }, [currentPermissionSet]);
+  }, [channelEffectivePerms, currentPermissionSet]);
   const canPublishInActiveFeed = activeChannelObj?.type !== 'feed' || canUseGroupIdentity;
-  const canSendInActiveChannel = useMemo(
-    () => Boolean(activeChannelObj && (activeChannelObj.type === 'text' || activeChannelObj.type === 'feed') && canPublishInActiveFeed && (isOwner || activeChannelPermissionSet.has('SendMessages'))),
-    [activeChannelObj, canPublishInActiveFeed, isOwner, activeChannelPermissionSet]
-  );
+  const canSendInActiveChannel = useMemo(() => {
+    if (!activeChannelObj || (activeChannelObj.type !== 'text' && activeChannelObj.type !== 'feed') || !canPublishInActiveFeed) return false;
+    if (isOwner) return true;
+    if (activeChannelObj.settings?.locked && !activeChannelPermissionSet.has('ManageMessages')) return false;
+    if (activeChannelObj.settings?.announcement && !activeChannelPermissionSet.has('ManageMessages')) return false;
+    return activeChannelPermissionSet.has('SendMessages');
+  }, [activeChannelObj, canPublishInActiveFeed, isOwner, activeChannelPermissionSet]);
   const canAttachInActiveChannel = useMemo(() => isOwner || activeChannelPermissionSet.has('AttachFiles'), [isOwner, activeChannelPermissionSet]);
   const canSendVoiceMessagesInActiveChannel = useMemo(() => isOwner || activeChannelPermissionSet.has('SendVoiceMessages'), [isOwner, activeChannelPermissionSet]);
   const canSendVideoCirclesInActiveChannel = useMemo(() => isOwner || activeChannelPermissionSet.has('SendVideoCircles'), [isOwner, activeChannelPermissionSet]);
-  const canReactInActiveChannel = useMemo(() => isOwner || activeChannelPermissionSet.has('AddReactions'), [isOwner, activeChannelPermissionSet]);
+  const canReactInActiveChannel = useMemo(
+    () => (isOwner || activeChannelPermissionSet.has('AddReactions')) && !activeChannelObj?.settings?.disableReactions,
+    [isOwner, activeChannelPermissionSet, activeChannelObj]
+  );
   const canCreatePollsInActiveChannel = useMemo(() => isOwner || activeChannelPermissionSet.has('CreatePolls'), [isOwner, activeChannelPermissionSet]);
   const canUseExternalEmojisInActiveChannel = useMemo(() => isOwner || activeChannelPermissionSet.has('UseExternalEmojis'), [isOwner, activeChannelPermissionSet]);
   const canPinInActiveChannel = useMemo(() => isOwner || activeChannelPermissionSet.has('PinMessages'), [isOwner, activeChannelPermissionSet]);
   const canManageMessagesInActiveChannel = useMemo(() => isOwner || activeChannelPermissionSet.has('ManageMessages') || canDeleteAny, [isOwner, activeChannelPermissionSet, canDeleteAny]);
   const canBypassActiveSlowmode = useMemo(() => isOwner || activeChannelPermissionSet.has('BypassSlowmode'), [isOwner, activeChannelPermissionSet]);
+
+  useEffect(() => {
+    if (!activeChannel) {
+      setChannelEffectivePerms(null);
+      return;
+    }
+    let cancelled = false;
+    api.getMyChannelPermissions(token, group.id, activeChannel)
+      .then((payload) => { if (!cancelled) setChannelEffectivePerms(payload.permissions); })
+      .catch(() => { if (!cancelled) setChannelEffectivePerms(null); });
+    return () => { cancelled = true; };
+  }, [activeChannel, group.id, token]);
 
   useEffect(() => {
     if (!canUseGroupIdentity) setSendAsGroupIdentity(false);
@@ -881,8 +913,8 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
   // group or hold any management permission. Plain members instead get a
   // "Copy group link" action.
   const isGroupAdmin = useMemo(
-    () => isOwner || canManageRoles || canManageChannels || canKickMembers,
-    [isOwner, canManageRoles, canManageChannels, canKickMembers]
+    () => isOwner || canManageRoles || canManageChannels || canKickMembers || canBanMembers || canManageServer,
+    [isOwner, canManageRoles, canManageChannels, canKickMembers, canBanMembers, canManageServer]
   );
   function getHeldRoleIds(member: GroupMember) {
     return member.roleIds?.length ? member.roleIds : member.roleId ? [member.roleId] : [];
@@ -1361,7 +1393,7 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
     function handleChannelUpdated(payload: { channel: GroupChannel }) {
       if (payload.channel.groupId !== group.id) return;
       setChannels((current) => {
-        const next = current.map((c) => c.id === payload.channel.id ? payload.channel : c);
+        const next = current.map((c) => c.id === payload.channel.id ? { ...payload.channel, settings: normalizeChannelExtraSettings(payload.channel.settings) } : c);
         return [...next].sort((a, b) => a.position - b.position);
       });
     }
@@ -1388,9 +1420,21 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
       void api.getGroupRoles(token, group.id).then((p) => setRoles(p.roles));
       void api.getGroupMembers(token, group.id).then((p) => setMembers(p.members));
     }
-    function handleMemberJoined(payload: { groupId: string }) {
+    function handleMemberJoined(payload: { groupId: string; members?: GroupMember[]; user?: PublicUser }) {
       if (payload.groupId !== group.id) return;
-      void api.getGroupMembers(token, group.id).then((p) => setMembers(p.members));
+      if (payload.members && Array.isArray(payload.members)) {
+        setMembers(payload.members);
+      } else {
+        void api.getGroupMembers(token, group.id).then((p) => setMembers(p.members)).catch(() => undefined);
+      }
+    }
+    function handleMemberLeft(payload: { groupId: string; userId: string; members?: GroupMember[] }) {
+      if (payload.groupId !== group.id) return;
+      if (payload.members && Array.isArray(payload.members)) {
+        setMembers(payload.members);
+      } else {
+        setMembers((current) => current.filter((m) => m.user.id !== payload.userId));
+      }
     }
     function handleMemberRoleChanged(payload: { groupId: string; members: GroupMember[] }) {
       if (payload.groupId !== group.id) return;
@@ -1432,6 +1476,7 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
     socket.on('messenger:groupRolesChanged', handleRolesChanged);
     socket.on('messenger:groupMemberRoleChanged', handleMemberRoleChanged);
     socket.on('messenger:groupMemberJoined', handleMemberJoined);
+    socket.on('messenger:groupMemberLeft', handleMemberLeft);
     socket.on('messenger:groupCustomizationChanged', handleCustomizationChanged);
     socket.on('messenger:groupCustomizationApplied', handleCustomizationApplied);
     // Only detach our own listeners; never disconnect the shared session socket
@@ -1451,6 +1496,7 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
       socket.off('messenger:groupRolesChanged', handleRolesChanged);
       socket.off('messenger:groupMemberRoleChanged', handleMemberRoleChanged);
       socket.off('messenger:groupMemberJoined', handleMemberJoined);
+      socket.off('messenger:groupMemberLeft', handleMemberLeft);
       socket.off('messenger:groupCustomizationChanged', handleCustomizationChanged);
       socket.off('messenger:groupCustomizationApplied', handleCustomizationApplied);
     };
@@ -1725,13 +1771,13 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
   }
 
   function formatTime(value: string) {
-    return new Intl.DateTimeFormat(language === 'ru' ? 'ru-RU' : language === 'uk' ? 'uk-UA' : 'en-US', {
+    return new Intl.DateTimeFormat(LOCALES[language], {
       hour: '2-digit', minute: '2-digit', hour12: getSavedTimeFormat() === '12h'
     }).format(new Date(value));
   }
 
   function formatShortDate(value: string) {
-    return new Intl.DateTimeFormat(language === 'ru' ? 'ru-RU' : language === 'uk' ? 'uk-UA' : 'en-US', {
+    return new Intl.DateTimeFormat(LOCALES[language], {
       day: '2-digit',
       month: 'short',
       year: 'numeric'
@@ -1852,7 +1898,7 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
       clientKey,
       pending: true
     };
-    setMessages((current) => [...current, optimistic]);
+    if (!sendOptions?.scheduledAt) setMessages((current) => [...current, optimistic]);
 
     try {
       const uploadedBatchImages = recordingOverride ? batchImages : await uploadPendingChatImages(batchImages);
@@ -2038,16 +2084,39 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
   }
 
   async function deleteMessage(message: GroupMessage) {
-    try {
-      const payload = await api.deleteGroupMessage(token, message.id);
-      setMessages((current) => current.map((m) => m.id === payload.message.id ? payload.message : m));
-      if (editingMessage?.id === message.id) {
-        setEditingMessage(null);
-        setEditingMediaItems([]);
-        setDraft('');
+    if (editingMessage?.id === message.id) {
+      setEditingMessage(null);
+      setEditingMediaItems([]);
+      setDraft('');
+    }
+    setMessageMenu(null);
+    setDeleteMessageConfirm(null);
+
+    const nowIso = new Date().toISOString();
+    const deletedReplyId = message.feedSourceId ?? message.id;
+    const prevMessages = messages;
+
+    if (message.channelId) {
+      const entry = getGroupCache(group.id);
+      const cached = entry.messages.get(message.channelId);
+      if (cached) {
+        entry.messages.set(message.channelId, cached
+          .filter((m) => m.id !== message.id)
+          .map((m) => markDeletedReplyInGroup(m, deletedReplyId, nowIso))
+        );
       }
-      setMessageMenu(null);
-    } catch { }
+    }
+    setMessages((current) => current
+      .filter((m) => m.id !== message.id)
+      .map((m) => markDeletedReplyInGroup(m, deletedReplyId, nowIso))
+    );
+    setChannelPinnedMessages((current) => current.filter((m) => m.id !== message.id));
+
+    try {
+      await api.deleteGroupMessage(token, message.id);
+    } catch {
+      setMessages(prevMessages);
+    }
   }
 
   // Toggle an emoji reaction on a message. Optimistically updates the local
@@ -2112,6 +2181,9 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
       id: message.feedSourceId ?? message.id,
       senderId: message.senderId,
       senderGroup: message.senderGroup,
+      aiGenerated: message.aiGenerated,
+      aiName: message.aiName,
+      aiAvatarData: message.aiAvatarData,
       body: message.body,
       imageData: message.imageData,
       imageName: message.imageName,
@@ -2139,6 +2211,9 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
       id: message.feedSourceId ?? message.id,
       senderId: message.senderId,
       senderGroup: message.senderGroup,
+      aiGenerated: message.aiGenerated,
+      aiName: message.aiName,
+      aiAvatarData: message.aiAvatarData,
       body: message.body,
       imageData: message.imageData,
       imageName: message.imageName,
@@ -2163,6 +2238,18 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
     if (isVoiceAttachment(message.imageData, message.imageName)) return language === 'ru' ? 'Голосовое сообщение' : 'Voice message';
     if (message.imageData) return message.imageName || t(language, 'imageMessage');
     return '';
+  }
+
+  async function handleReplyWithAi(message: GroupMessage) {
+    if (replyingWithAiId) return;
+    setReplyingWithAiId(message.id);
+    try {
+      await api.replyWithAiGroup(token, group.id, message.id);
+    } catch (err: any) {
+      console.error('Failed to reply with AI in group', err);
+    } finally {
+      setReplyingWithAiId(null);
+    }
   }
 
   // Translate the message body into the user's chosen target language and keep
@@ -2526,6 +2613,9 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
     setEditSlowmodeDraft(String(channel.slowmodeSeconds ?? 0));
     setEditNsfwDraft(Boolean(channel.nsfw));
     setEditBitrateDraft(String(channel.bitrate ?? 64000));
+    setExtrasDraft(normalizeChannelExtraSettings(channel.settings));
+    setExtrasFolderId(channel.folderId ?? '');
+    setSignPostsDraft(Boolean(channel.signPosts));
     setChannelRoleDraft(channel.requiredRoleIds ?? []);
     setSelectedChannelPermissionRoleId(null);
     setChannelPermissionDraft({});
@@ -2562,21 +2652,37 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
         const limit = editLimitDraft.trim() === '' ? null : Math.max(1, Math.min(99, Number(editLimitDraft) || 1));
         const slowmode = Math.max(0, Math.min(21600, Number(editSlowmodeDraft) || 0));
         const bitrate = Math.max(8000, Math.min(384000, Number(editBitrateDraft) || 64000));
-        const updates: { name?: string; userLimit?: number | null; topic?: string; slowmodeSeconds?: number; nsfw?: boolean; bitrate?: number } = {};
+        const updates: {
+          name?: string;
+          userLimit?: number | null;
+          topic?: string;
+          slowmodeSeconds?: number;
+          nsfw?: boolean;
+          bitrate?: number;
+          folderId?: string | null;
+          signPosts?: boolean;
+          settings?: ChannelExtraSettings;
+        } = {};
         updates.name = name;
         updates.topic = editTopicDraft.trim();
         updates.slowmodeSeconds = slowmode;
         updates.nsfw = editNsfwDraft;
-        if (channel?.type === 'voice') updates.userLimit = limit;
-        if (channel?.type === 'voice') updates.bitrate = bitrate;
+        updates.folderId = extrasFolderId || null;
+        updates.settings = extrasDraft;
+        if (channel.type === 'feed') updates.signPosts = signPostsDraft;
+        if (channel.type === 'voice') updates.userLimit = limit;
+        if (channel.type === 'voice') updates.bitrate = bitrate;
         const payload = await api.updateGroupChannel(token, group.id, editTarget.id, updates);
-        setChannels((current) => current.map((c) => c.id === payload.channel.id ? payload.channel : c));
+        setChannels((current) => current.map((c) => c.id === payload.channel.id ? { ...payload.channel, settings: normalizeChannelExtraSettings(payload.channel.settings) } : c));
         setEditNameDraft(payload.channel.name);
         setEditLimitDraft(payload.channel.userLimit != null ? String(payload.channel.userLimit) : '');
         setEditTopicDraft(payload.channel.topic ?? '');
         setEditSlowmodeDraft(String(payload.channel.slowmodeSeconds ?? 0));
         setEditNsfwDraft(Boolean(payload.channel.nsfw));
         setEditBitrateDraft(String(payload.channel.bitrate ?? 64000));
+        setExtrasDraft(normalizeChannelExtraSettings(payload.channel.settings));
+        setExtrasFolderId(payload.channel.folderId ?? '');
+        setSignPostsDraft(Boolean(payload.channel.signPosts));
         setChannelRoleDraft(payload.channel.requiredRoleIds ?? channelRoleDraft);
         setSettingsError('');
       } else {
@@ -2586,6 +2692,40 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
         }
         setEditTarget(null);
       }
+    } catch {
+      setSettingsError(t(language, 'unknownError'));
+    }
+  }
+
+  async function handleCloneChannel() {
+    if (!editTarget || editTarget.kind !== 'channel' || !canManageChannels) return;
+    try {
+      const payload = await api.cloneGroupChannel(token, group.id, editTarget.id);
+      setChannels((current) => current.some((channel) => channel.id === payload.channel.id)
+        ? current
+        : [...current, { ...payload.channel, settings: normalizeChannelExtraSettings(payload.channel.settings) }]);
+      setSettingsError('');
+    } catch {
+      setSettingsError(t(language, 'unknownError'));
+    }
+  }
+
+  async function handleResetChannelPermissions() {
+    if (!editTarget || editTarget.kind !== 'channel' || !canManageRoles) return;
+    try {
+      await api.resetChannelPermissions(token, group.id, editTarget.id);
+      setChannelPermissionDraft({});
+      setSavedChannelPermissionDraft({});
+      setSettingsError('');
+    } catch {
+      setSettingsError(t(language, 'unknownError'));
+    }
+  }
+
+  async function handleCopyChannelId() {
+    if (!editTarget || editTarget.kind !== 'channel') return;
+    try {
+      await navigator.clipboard.writeText(editTarget.id);
     } catch {
       setSettingsError(t(language, 'unknownError'));
     }
@@ -2623,7 +2763,10 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
       const slowmodeChanged = String(Number(editSlowmodeDraft) || 0) !== String(channel.slowmodeSeconds ?? 0);
       const nsfwChanged = editNsfwDraft !== Boolean(channel.nsfw);
       const bitrateChanged = channel.type === 'voice' && String(Number(editBitrateDraft) || 64000) !== String(channel.bitrate ?? 64000);
-      return nameChanged || limitChanged || topicChanged || slowmodeChanged || nsfwChanged || bitrateChanged;
+      const folderChanged = extrasFolderId !== (channel.folderId ?? '');
+      const extrasChanged = JSON.stringify(extrasDraft) !== JSON.stringify(normalizeChannelExtraSettings(channel.settings));
+      const signPostsChanged = channel.type === 'feed' && signPostsDraft !== Boolean(channel.signPosts);
+      return nameChanged || limitChanged || topicChanged || slowmodeChanged || nsfwChanged || bitrateChanged || folderChanged || extrasChanged || signPostsChanged;
     }
     const folder = folders.find((f) => f.id === editTarget.id);
     return !!folder && editNameDraft.trim() !== folder.name;
@@ -2650,6 +2793,9 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
       setEditSlowmodeDraft(String(channel.slowmodeSeconds ?? 0));
       setEditNsfwDraft(Boolean(channel.nsfw));
       setEditBitrateDraft(String(channel.bitrate ?? 64000));
+      setExtrasDraft(normalizeChannelExtraSettings(channel.settings));
+      setExtrasFolderId(channel.folderId ?? '');
+      setSignPostsDraft(Boolean(channel.signPosts));
       setChannelRoleDraft(channel.requiredRoleIds ?? []);
       setChannelPermissionDraft(savedChannelPermissionDraft);
     } else {
@@ -2688,7 +2834,13 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
     if (voiceRoom.activeChannelId === channelId) {
       setVoiceStageOpen(true);
     } else {
-      void voiceRoom.join(channelId);
+      const voiceChannel = channels.find((item) => item.id === channelId);
+      void voiceRoom.join(channelId, {
+        bitrate: voiceChannel?.bitrate,
+        voiceMode: voiceChannel?.settings?.voiceMode,
+        streamEnabled: voiceChannel?.settings?.streamEnabled !== false,
+        videoQuality: voiceChannel?.settings?.videoQuality
+      });
     }
   }
 
@@ -2831,6 +2983,50 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
       if (roleEditorId === roleId) closeRoleEditor();
     } catch {
       setSettingsError(language === 'ru' ? 'Не удалось удалить роль' : 'Could not delete role');
+    }
+  }
+
+  async function handleDuplicateRole(roleId: string) {
+    if (!canManageRoles) return;
+    try {
+      const { role } = await api.duplicateGroupRole(token, group.id, roleId);
+      const rolePayload = await api.getGroupRoles(token, group.id);
+      setRoles(rolePayload.roles);
+      setRoleMenuOpen(null);
+      openRoleEditor(rolePayload.roles.find((item) => item.id === role.id) ?? role);
+    } catch {
+      setSettingsError(language === 'ru' ? 'Не удалось скопировать роль' : 'Could not duplicate role');
+    }
+  }
+
+  async function handleReorderRoles(roleIds: string[]) {
+    if (!canManageRoles) return;
+    try {
+      const payload = await api.reorderGroupRoles(token, group.id, roleIds);
+      setRoles(payload.roles);
+    } catch {
+      setSettingsError(language === 'ru' ? 'Не удалось изменить порядок ролей' : 'Could not reorder roles');
+    }
+  }
+
+  async function handleBanMember(userId: string) {
+    if (!canBanMembers) return;
+    try {
+      await api.banGroupMember(token, group.id, userId);
+      const memPayload = await api.getGroupMembers(token, group.id);
+      setMembers(memPayload.members);
+    } catch {
+      setSettingsError(language === 'ru' ? 'Не удалось забанить' : 'Could not ban member');
+    }
+  }
+
+  async function handleTimeoutMember(userId: string, minutes: number) {
+    if (!canTimeoutMembers) return;
+    try {
+      const payload = await api.timeoutGroupMember(token, group.id, userId, minutes);
+      setMembers(payload.members);
+    } catch {
+      setSettingsError(language === 'ru' ? 'Не удалось выдать тайм-аут' : 'Could not timeout member');
     }
   }
 
@@ -3395,7 +3591,7 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
                       }}
                     >
                       <strong>{pinnedMessage.senderGroup ? pinnedMessage.senderGroup.name : sender?.nickname ?? senderName(pinnedMessage.senderId)}</strong>
-                      <span>{pinnedMessage.body || (pinnedMessage.imageData ? '📷' : '')}</span>
+                      <span>{pinnedMessage.body ? <MessagePreviewText text={pinnedMessage.body} size={15} /> : (pinnedMessage.imageData ? '📷' : '')}</span>
                       <time>{formatShortDate(pinnedMessage.createdAt)}</time>
                     </button>
                   );
@@ -3421,7 +3617,7 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
           >
             <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/></svg>
             <span className="feed-pinned-label">{t(language, 'pinnedPost')}</span>
-            <span className="feed-pinned-body">{feedPinnedBanner.body || '📷'}</span>
+            <span className="feed-pinned-body">{feedPinnedBanner.body ? <MessagePreviewText text={feedPinnedBanner.body} size={15} /> : '📷'}</span>
           </button>
         ) : null}
         {feedViewers ? (
@@ -3564,7 +3760,7 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
               </div>
               <div className="messenger-pinned-message">
                 {current.senderGroup ? <strong>{current.senderGroup.name}</strong> : sender ? <UserName user={sender} as="strong" /> : <strong>{senderName(current.senderId)}</strong>}
-                <span>{current.body || (isVoiceAttachment(current.imageData, current.imageName) ? '🎤' : isVideoCircleAttachment(current.imageData, current.imageName) ? '📹' : current.imageData ? '📷' : '')}</span>
+                <span>{current.body ? <MessagePreviewText text={current.body} size={15} /> : (isVoiceAttachment(current.imageData, current.imageName) ? '🎤' : isVideoCircleAttachment(current.imageData, current.imageName) ? '📹' : current.imageData ? '📷' : '')}</span>
               </div>
             </div>
           );
@@ -3669,9 +3865,13 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
               message.feedMirror ? 'feed-mirror' : '',
               message.pending ? 'pending' : ''
             ].filter(Boolean).join(' ');
-            const senderUser = message.senderGroup ? null : knownSenders.get(message.senderId);
-            const senderAvatar = message.senderGroup?.avatarData || senderUser?.avatarData || currentUser.avatarData;
-            const senderName = message.senderGroup?.name || senderUser?.nickname || currentUser.nickname;
+            const senderUser = message.senderGroup || message.aiGenerated ? null : knownSenders.get(message.senderId);
+            const senderAvatar = message.aiGenerated
+              ? (message.aiAvatarData || AI_ASSISTANT_AVATAR)
+              : (message.senderGroup?.avatarData || senderUser?.avatarData || currentUser.avatarData);
+            const senderName = message.aiGenerated
+              ? (message.aiName || 'NotAI')
+              : (message.senderGroup?.name || senderUser?.nickname || currentUser.nickname);
             return (
               <Fragment key={message.clientKey ?? message.id}>
               {showDateDivider ? (
@@ -3689,7 +3889,7 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
                   setMessageMenu({ x: event.clientX, y: event.clientY, message });
                 }}
               >
-                <img className="message-avatar" src={senderAvatar} alt="" draggable={false} style={{ cursor: message.senderGroup ? 'default' : 'pointer' }} onClick={(event) => { if (message.senderGroup) return; const r = event.currentTarget.getBoundingClientRect(); onViewProfile?.(knownSenders.get(message.senderId) as PublicUser, group, buildProfilePreload(message.senderId), { left: r.left, top: r.top, right: r.right, bottom: r.bottom }); }} />
+                <img className="message-avatar" src={senderAvatar} alt="" draggable={false} style={{ cursor: (message.senderGroup || message.aiGenerated) ? 'default' : 'pointer' }} onClick={(event) => { if (message.senderGroup || message.aiGenerated) return; const r = event.currentTarget.getBoundingClientRect(); onViewProfile?.(knownSenders.get(message.senderId) as PublicUser, group, buildProfilePreload(message.senderId), { left: r.left, top: r.top, right: r.right, bottom: r.bottom }); }} />
                 <div className="message-body">
                   {isFeedPost ? (
                     <div className="feed-post-head">
@@ -3731,7 +3931,12 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
                   ) : null}
                   {isStartOfGroup ? (
                     <div className="message-meta">
-                      {senderUser
+                      {message.aiGenerated ? (
+                        <span className="message-author-wrap">
+                          <strong className="message-author">{senderName}</strong>
+                          <span className="ai-message-badge">{language === 'ru' ? 'ИИ' : language === 'uk' ? 'ШІ' : 'AI'}</span>
+                        </span>
+                      ) : senderUser
                         ? <UserName user={senderUser} as="strong" className="message-author" />
                         : <strong className="message-author">{senderName}</strong>}
                       <time className="message-time">
@@ -4436,6 +4641,29 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
               <MenuReplyIcon />
             </button>
           ) : null}
+          {!messageMenu.message.deletedAt && !messageMenu.message.pending && activeChannelObj?.type === 'text' ? (
+            <button
+              type="button"
+              className="context-menu-action"
+              disabled={Boolean(replyingWithAiId)}
+              onClick={() => {
+                const target = messageMenu.message;
+                setMessageMenu(null);
+                void handleReplyWithAi(target);
+              }}
+            >
+              <span className="context-menu-action-text">
+                {replyingWithAiId === messageMenu.message.id ? t(language, 'aiReplying') : t(language, 'replyWithAi')}
+              </span>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z" />
+                <path d="M5 3v4" />
+                <path d="M19 17v4" />
+                <path d="M3 5h4" />
+                <path d="M17 19h4" />
+              </svg>
+            </button>
+          ) : null}
           {!messageMenu.message.deletedAt ? (
             <button type="button" className="context-menu-action" onClick={() => void forwardMessage(messageMenu.message)}>
               <span className="context-menu-action-text">{t(language, 'forward')}</span>
@@ -4633,6 +4861,13 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
           canManageRoles={canManageRoles}
           canManageInvites={canManageInvites}
           canKickMembers={canKickMembers}
+          canBanMembers={canBanMembers}
+          canTimeoutMembers={canTimeoutMembers}
+          canManageServer={canManageServer}
+          handleDuplicateRole={handleDuplicateRole}
+          handleReorderRoles={handleReorderRoles}
+          handleBanMember={handleBanMember}
+          handleTimeoutMember={handleTimeoutMember}
           otherMembersCount={otherMembersCount}
           copied={copied}
           newAvatar={newAvatar}
@@ -4750,6 +4985,7 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
           group={group}
           channelId={editTarget.id}
           channels={channels}
+          folders={folders}
           roles={roles}
           everyonePermissions={everyonePermissions}
           groupInvites={groupInvites}
@@ -4772,6 +5008,16 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
           setEditBitrateDraft={setEditBitrateDraft}
           editLimitDraft={editLimitDraft}
           setEditLimitDraft={setEditLimitDraft}
+          extrasDraft={extrasDraft}
+          setExtrasDraft={setExtrasDraft}
+          extrasFolderId={extrasFolderId}
+          setExtrasFolderId={setExtrasFolderId}
+          signPostsDraft={signPostsDraft}
+          setSignPostsDraft={setSignPostsDraft}
+          canManageChannels={canManageChannels}
+          onCloneChannel={handleCloneChannel}
+          onResetPermissions={handleResetChannelPermissions}
+          onCopyChannelId={handleCopyChannelId}
           editBarShake={editBarShake}
           selectedChannelPermissionRoleId={selectedChannelPermissionRoleId}
           setSelectedChannelPermissionRoleId={setSelectedChannelPermissionRoleId}
