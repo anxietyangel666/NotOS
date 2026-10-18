@@ -5,12 +5,18 @@
 // most-recently-used list. The emoji picker renders a "Recent" category from
 // this list and every selection (regular or custom) records into it.
 
-const RECENT_KEY = 'notoc.emoji.recent';
+import { loadCachedCurrentUser } from '../api/user-cache';
+
+function getRecentKey(): string {
+  const uid = loadCachedCurrentUser()?.id;
+  return uid ? `notoc.emoji.recent.${encodeURIComponent(uid)}` : 'notoc.emoji.recent';
+}
+
 const MAX_RECENT = 36;
 
 function readRecent(): string[] {
   try {
-    const raw = localStorage.getItem(RECENT_KEY);
+    const raw = localStorage.getItem(getRecentKey());
     if (!raw) return [];
     const parsed = JSON.parse(raw) as string[];
     return Array.isArray(parsed) ? parsed.filter((item) => typeof item === 'string' && item.length > 0) : [];
@@ -46,7 +52,7 @@ export function recordRecentEmoji(value: string): void {
   const current = readRecent();
   const next = [trimmed, ...current.filter((item) => item !== trimmed)].slice(0, MAX_RECENT);
   try {
-    localStorage.setItem(RECENT_KEY, JSON.stringify(next));
+    localStorage.setItem(getRecentKey(), JSON.stringify(next));
   } catch {
     /* ignore quota errors */
   }

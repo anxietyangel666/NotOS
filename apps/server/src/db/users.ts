@@ -46,6 +46,7 @@ export type UserRecord = {
   hide_desktop_icons: boolean;
   desktop_sort: string;
   status: string;
+  voice_bio: string | null;
   pinned_image_data: string;
   pinned_cards: PinnedCard[];
   name_style: NameStyle | null;
@@ -77,6 +78,7 @@ export type PublicUser = {
   hideDesktopIcons: boolean;
   desktopSort: string;
   status: string;
+  voiceBio: string | null;
   pinnedImageData: string;
   pinnedCards: PinnedCard[];
   nameStyle: NameStyle | null;
@@ -113,6 +115,7 @@ export function toPublicUser(user: UserRecord): PublicUser {
     hideDesktopIcons: user.hide_desktop_icons,
     desktopSort: user.desktop_sort,
     status: user.status,
+    voiceBio: user.voice_bio ?? null,
     pinnedImageData: user.pinned_image_data,
     pinnedCards: Array.isArray(user.pinned_cards) ? user.pinned_cards : [],
     nameStyle: user.name_style ?? null,
@@ -145,7 +148,7 @@ export function toPublicUser(user: UserRecord): PublicUser {
 const LITE_USER_FIELDS = [
   'id', 'nickname', 'role', 'avatar_data', 'language_code', 'theme', 'accent_color',
   'transparency_enabled', 'desktop_icon_size', 'hide_desktop_icons', 'desktop_sort',
-  'status', 'name_style', 'profile_primary_color', 'profile_accent_color', 'nameplate',
+  'status', 'voice_bio', 'name_style', 'profile_primary_color', 'profile_accent_color', 'nameplate',
   'allow_group_identity_messages', 'xp', 'created_at', 'updated_at'
 ];
 
@@ -171,6 +174,7 @@ export function toPublicUserLite(user: UserRecord): PublicUser {
     hideDesktopIcons: user.hide_desktop_icons,
     desktopSort: user.desktop_sort,
     status: user.status,
+    voiceBio: user.voice_bio ?? null,
     pinnedImageData: '',
     pinnedCards: [],
     nameStyle: user.name_style ?? null,
@@ -316,6 +320,7 @@ export async function updateUserSettings(
     profileAccentColor?: string;
     nameplate?: NamePlate | null;
     allowGroupIdentityMessages?: boolean;
+    voiceBio?: string | null;
   }
 ) {
   // `nameStyle` is special: `undefined` means "leave unchanged", while an
@@ -325,6 +330,8 @@ export async function updateUserSettings(
   const nameStyleValue = input.nameStyle == null ? null : JSON.stringify(input.nameStyle);
   const nameplateProvided = Object.prototype.hasOwnProperty.call(input, 'nameplate');
   const nameplateValue = input.nameplate == null ? null : JSON.stringify(input.nameplate);
+  const voiceBioProvided = Object.prototype.hasOwnProperty.call(input, 'voiceBio');
+  const voiceBioValue = input.voiceBio ?? null;
 
   const result = await pool.query<UserRecord>(
     `
@@ -350,6 +357,7 @@ export async function updateUserSettings(
         nameplate = CASE WHEN $20 = TRUE THEN $21::jsonb ELSE nameplate END,
         pinned_cards = COALESCE($22::jsonb, pinned_cards),
         allow_group_identity_messages = COALESCE($23, allow_group_identity_messages),
+        voice_bio = CASE WHEN $24 = TRUE THEN $25 ELSE voice_bio END,
         updated_at = NOW()
       WHERE id = $1
       RETURNING *
@@ -378,6 +386,8 @@ export async function updateUserSettings(
       nameplateValue,
       input.pinnedCards === undefined ? undefined : JSON.stringify(input.pinnedCards),
       input.allowGroupIdentityMessages,
+      voiceBioProvided,
+      voiceBioValue
     ]
   );
 

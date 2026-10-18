@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { Language, PublicUser } from '../api/types';
+import type { Language, NameStyle, PublicUser, WatchQueueItem } from '../api/types';
+import { api } from '../api/client';
 import { t } from '../i18n';
 import { WindowFrame } from './WindowFrame';
 import { EmojiPicker } from './EmojiPicker';
 import { EmojiInlineInput, type EmojiInlineInputHandle } from './EmojiInlineInput';
 import { EmojiToggleIcon, GifIcon } from './ChatComposeIcons';
 import { MessageText } from './Twemoji';
+import { UserName } from './UserName';
 import { useSocket } from '../hooks/use-socket';
 import type { TenorGif } from '../utils/tenor';
 import { loadYouTubeApi, YT_STATE, type YTPlayer } from '../utils/youtube';
@@ -71,6 +73,7 @@ type WatchChatMessage = {
   senderId: string;
   senderNickname: string;
   senderAvatar: string;
+  senderNameStyle?: NameStyle;
   body: string;
   gifUrl?: string;
   createdAt: string;
@@ -86,6 +89,7 @@ type RoomSnapshot = {
   controlMode: ControlMode;
   members: WatchMemberView[];
   player: PlayerState;
+  queue?: WatchQueueItem[];
   chat: WatchChatMessage[];
 };
 
@@ -116,6 +120,7 @@ type Props = {
   onClose: () => void;
   onMinimize: () => void;
   onToggleMaximize: () => void;
+  onOpenProfile?: (user: PublicUser, anchorRect?: { left: number; top: number; right: number; bottom: number } | null) => void;
 };
 
 const YT_PATTERNS = [
@@ -140,6 +145,28 @@ function parseSource(input: string): WatchSource | null {
     const match = value.match(pattern);
     if (match) return { kind: 'youtube', value: match[1], title: '', addedBy: '' };
   }
+  // VK Video
+  const vkMatch = value.match(/(?:vk\.com|vkvideo\.ru)\/(?:[^\/]*[?&]z=video|video|clip)?(-?\d+)_(\d+)/i);
+  if (vkMatch) {
+    const hashMatch = value.match(/[?&]hash=([a-zA-Z0-9]+)/i);
+    const hashPart = hashMatch ? `&hash=${hashMatch[1]}` : '';
+    return {
+      kind: 'embed',
+      value: `https://vk.com/video_ext.php?oid=${vkMatch[1]}&id=${vkMatch[2]}${hashPart}&hd=2&autoplay=1`,
+      title: 'VK Video',
+      addedBy: ''
+    };
+  }
+  // Rutube
+  const rutubeMatch = value.match(/rutube\.ru\/video\/([a-zA-Z0-9]+)/i);
+  if (rutubeMatch) {
+    return {
+      kind: 'embed',
+      value: `https://rutube.ru/play/embed/${rutubeMatch[1]}/?autoplay=1`,
+      title: 'Rutube Video',
+      addedBy: ''
+    };
+  }
   if (/^https?:\/\//i.test(value)) {
     if (/\.(mp4|webm|ogg|ogv|mov|m4v)(\?|$)/i.test(value)) {
       return { kind: 'url', value, title: '', addedBy: '' };
@@ -148,6 +175,30 @@ function parseSource(input: string): WatchSource | null {
     return { kind: 'embed', value, title: '', addedBy: '' };
   }
   return null;
+}
+
+function getShortenedUrl(source: WatchSource): { display: string; full: string } {
+  if (source.kind === 'youtube') {
+    return {
+      display: `youtu.be/${source.value}`,
+      full: `https://youtu.be/${source.value}`
+    };
+  }
+  const full = source.value;
+  try {
+    const parsed = new URL(source.value);
+    const host = parsed.hostname.replace(/^www\./, '');
+    const pathname = parsed.pathname.length > 18 ? parsed.pathname.slice(0, 18) + '…' : parsed.pathname;
+    return {
+      display: `${host}${pathname}`,
+      full
+    };
+  } catch {
+    return {
+      display: full.length > 25 ? full.slice(0, 25) + '…' : full,
+      full
+    };
+  }
 }
 
 // Matches http(s) URLs anywhere in a chat body.
@@ -162,12 +213,14 @@ function WatchChatBody({
   text,
   language,
   canControl,
-  onPlay
+  onPlay,
+  onAddToQueue
 }: {
   text: string;
   language: Language;
   canControl: boolean;
   onPlay: (url: string) => void;
+  onAddToQueue?: (url: string) => void;
 }) {
   const parts: Array<{ type: 'text' | 'url' | 'custom-emoji'; value: string }> = [];
   splitCustomEmoji(text).forEach((customPart) => {
@@ -205,7 +258,7 @@ function WatchChatBody({
         )}
       </p>
       {firstPlayable ? (
-        <WatchLinkEmbed url={firstPlayable.value} language={language} canControl={canControl} onPlay={onPlay} />
+        <WatchLinkEmbed url={firstPlayable.value} language={language} canControl={canControl} onPlay={onPlay} onAddToQueue={onAddToQueue} />
       ) : null}
     </>
   );
@@ -218,12 +271,14 @@ function WatchLinkEmbed({
   url,
   language,
   canControl,
-  onPlay
+  onPlay,
+  onAddToQueue
 }: {
   url: string;
   language: Language;
   canControl: boolean;
   onPlay: (url: string) => void;
+  onAddToQueue?: (url: string) => void;
 }) {
   const source = parseSource(url);
   if (!source) return null;
@@ -245,9 +300,16 @@ function WatchLinkEmbed({
         </span>
         <a className="watch-link-embed-host" href={url} target="_blank" rel="noreferrer noopener">{host}</a>
         {canControl ? (
-          <button type="button" className="watch-link-embed-play" onClick={() => onPlay(url)}>
-            ▶ {t(language, 'watchLoadVideo')}
-          </button>
+          <div className="watch-link-embed-actions">
+            <button type="button" className="watch-link-embed-play" onClick={() => onPlay(url)}>
+              ▶ {t(language, 'watchLoadVideo')}
+            </button>
+            {onAddToQueue ? (
+              <button type="button" className="watch-link-embed-queue" onClick={() => onAddToQueue(url)}>
+                + {t(language, 'watchAddToQueue')}
+              </button>
+            ) : null}
+          </div>
         ) : null}
       </div>
     </div>
@@ -270,14 +332,47 @@ export function WatchTogetherWindow({
   onFocus,
   onClose,
   onMinimize,
-  onToggleMaximize
+  onToggleMaximize,
+  onOpenProfile
 }: Props) {
   const socket = useSocket();
+
+  async function openUserProfile(userId: string, anchorEl?: HTMLElement | null, fallbackUser?: Partial<PublicUser>) {
+    const member = room?.members.find((m) => m.userId === userId);
+    const targetUser: PublicUser = member?.user || (userId === currentUser.id ? currentUser : null) || ({
+      id: userId,
+      nickname: fallbackUser?.nickname || userId,
+      avatarData: fallbackUser?.avatarData || '',
+      nameStyle: fallbackUser?.nameStyle ?? null,
+      profilePrimaryColor: '',
+      profileAccentColor: '',
+      online: true,
+    } as unknown as PublicUser);
+
+    const rect = anchorEl ? anchorEl.getBoundingClientRect() : null;
+    const anchor = rect ? { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom } : null;
+
+    if (onOpenProfile) {
+      onOpenProfile(targetUser, anchor);
+    } else {
+      window.dispatchEvent(new CustomEvent('open-profile', { detail: targetUser }));
+    }
+
+    try {
+      const full = await api.getPublicUser(token, userId);
+      if (full?.user) {
+        if (onOpenProfile) onOpenProfile(full.user, anchor);
+        else window.dispatchEvent(new CustomEvent('open-profile', { detail: full.user }));
+      }
+    } catch {}
+  }
 
   const [watchNav, setWatchNav] = useState<{ entries: WatchView[]; index: number }>({ entries: ['home'], index: 0 });
   const [lobbyRooms, setLobbyRooms] = useState<LobbyRoom[]>([]);
   const [room, setRoom] = useState<RoomSnapshot | null>(null);
   const [player, setPlayer] = useState<PlayerState | null>(null);
+  const [queue, setQueue] = useState<WatchQueueItem[]>([]);
+  const [queueOpen, setQueueOpen] = useState(false);
   const [chat, setChat] = useState<WatchChatMessage[]>([]);
   // Live playback position of every member (keyed by userId), used by the sync panel.
   const [memberPositions, setMemberPositions] = useState<Record<string, MemberPosition>>({});
@@ -348,6 +443,8 @@ export function WatchTogetherWindow({
     if (socketRef.current && id) socketRef.current.emit('watch:leave', { roomId: id });
     setRoom(null);
     setPlayer(null);
+    setQueue([]);
+    setQueueOpen(false);
     setChat([]);
     setMemberPositions({});
     setSettingsOpen(false);
@@ -407,6 +504,7 @@ export function WatchTogetherWindow({
     function onJoined(payload: { room: RoomSnapshot }) {
       setRoom(payload.room);
       setPlayer(payload.room.player);
+      setQueue(payload.room.queue || []);
       setChat(payload.room.chat);
       pushWatchView('room');
       setError(null);
@@ -431,6 +529,9 @@ export function WatchTogetherWindow({
     }
     function onPlayer(payload: { roomId: string; player: PlayerState }) {
       setPlayer(payload.player);
+    }
+    function onQueue(payload: { roomId: string; queue: WatchQueueItem[] }) {
+      setQueue(payload.queue || []);
     }
     function onPositions(payload: { roomId: string; positions: MemberPosition[] }) {
       const next: Record<string, MemberPosition> = {};
@@ -467,6 +568,7 @@ export function WatchTogetherWindow({
     socket.on('watch:joined', onJoined);
     socket.on('watch:members', onMembers);
     socket.on('watch:player', onPlayer);
+    socket.on('watch:queue', onQueue);
     socket.on('watch:positions', onPositions);
     socket.on('watch:chatMessage', onChatMessage);
     socket.on('watch:chatDeleted', onChatDeleted);
@@ -478,6 +580,7 @@ export function WatchTogetherWindow({
       socket.off('watch:joined', onJoined);
       socket.off('watch:members', onMembers);
       socket.off('watch:player', onPlayer);
+      socket.off('watch:queue', onQueue);
       socket.off('watch:positions', onPositions);
       socket.off('watch:chatMessage', onChatMessage);
       socket.off('watch:chatDeleted', onChatDeleted);
@@ -638,13 +741,9 @@ export function WatchTogetherWindow({
           controls: canControlRef.current ? 1 : 0,
           disablekb: canControlRef.current ? 0 : 1,
           enablejsapi: 1,
-          // YouTube returns player error 153 in packaged Electron when the
-          // embed has no HTTP referrer. Electron supplies the headers in the
-          // main process; this keeps the IFrame API config consistent too.
-          widget_referrer: youtubeWidgetReferrer(),
-          ...(typeof window !== 'undefined' && /^https?:\/\//i.test(window.location.origin)
-            ? { origin: window.location.origin }
-            : {})
+          // YouTube embed requires a valid external HTTP referrer (e.g. google.com).
+          // Supplying https://www.youtube.com or loopback origins triggers error 152-4.
+          widget_referrer: 'https://google.com'
         },
         events: {
           onReady: (event) => {
@@ -663,6 +762,11 @@ export function WatchTogetherWindow({
             const time = event.target.getCurrentTime();
             if (event.data === YT_STATE.PLAYING) emitControl(true, time);
             else if (event.data === YT_STATE.PAUSED) emitControl(false, time);
+            else if (event.data === YT_STATE.ENDED) {
+              const sock = socketRef.current;
+              const id = roomIdRef.current;
+              if (sock && id) sock.emit('watch:playNextInQueue', { roomId: id });
+            }
           }
         }
       });
@@ -774,8 +878,32 @@ export function WatchTogetherWindow({
     pushWatchView('rooms');
   };
 
-  const loadSource = () => {
+  const loadSource = async () => {
     if (!socket || !roomId || !canControl) return;
+    const trimmed = sourceInput.trim();
+    if (!trimmed) return;
+
+    // Check if it's a website URL that might contain an embedded player/video
+    if (/^https?:\/\//i.test(trimmed) && !YT_PATTERNS.some((p) => p.test(trimmed)) && !/\.(mp4|webm|ogg|ogv|mov|m4v)(\?|$)/i.test(trimmed)) {
+      try {
+        const res = await api.detectPlayer(token, trimmed);
+        if (res.result && res.result.detected) {
+          const detectedSource: WatchSource = {
+            kind: res.result.kind,
+            value: res.result.value,
+            title: res.result.title || trimmed,
+            addedBy: currentUser.nickname
+          };
+          socket.emit('watch:setSource', { roomId, source: detectedSource });
+          setSourceInput('');
+          showToast(res.result.title ? `Плеер найден: ${res.result.title}` : 'Плеер обнаружен и запущен');
+          return;
+        }
+      } catch (err) {
+        console.warn('Player detection failed, falling back to direct parse:', err);
+      }
+    }
+
     const source = parseSource(sourceInput);
     if (!source) {
       setError(t(language, 'watchRoomNotFound'));
@@ -786,11 +914,84 @@ export function WatchTogetherWindow({
   };
 
   // Load a link shared in chat directly into the room (from an embed card).
-  const playUrlInRoom = (url: string) => {
+  const playUrlInRoom = async (url: string) => {
     if (!socket || !roomId || !canControl) return;
+    const trimmed = url.trim();
+    if (/^https?:\/\//i.test(trimmed) && !YT_PATTERNS.some((p) => p.test(trimmed)) && !/\.(mp4|webm|ogg|ogv|mov|m4v)(\?|$)/i.test(trimmed)) {
+      try {
+        const res = await api.detectPlayer(token, trimmed);
+        if (res.result && res.result.detected) {
+          const detectedSource: WatchSource = {
+            kind: res.result.kind,
+            value: res.result.value,
+            title: res.result.title || trimmed,
+            addedBy: currentUser.nickname
+          };
+          socket.emit('watch:setSource', { roomId, source: detectedSource });
+          showToast(res.result.title ? `Плеер найден: ${res.result.title}` : 'Плеер обнаружен и запущен');
+          return;
+        }
+      } catch {}
+    }
     const source = parseSource(url);
     if (!source) return;
     socket.emit('watch:setSource', { roomId, source });
+  };
+
+  const addToQueue = async (url?: string) => {
+    if (!socket || !roomId) return;
+    const target = (url ?? sourceInput).trim();
+    if (!target) return;
+
+    if (/^https?:\/\//i.test(target) && !YT_PATTERNS.some((p) => p.test(target)) && !/\.(mp4|webm|ogg|ogv|mov|m4v)(\?|$)/i.test(target)) {
+      try {
+        const res = await api.detectPlayer(token, target);
+        if (res.result && res.result.detected) {
+          const detectedSource: WatchSource = {
+            kind: res.result.kind,
+            value: res.result.value,
+            title: res.result.title || target,
+            addedBy: currentUser.nickname
+          };
+          socket.emit('watch:addToQueue', { roomId, source: detectedSource });
+          if (!url) setSourceInput('');
+          showToast(res.result.title ? `Добавлено в очередь: ${res.result.title}` : t(language, 'watchAddToQueue'));
+          return;
+        }
+      } catch {
+        /* fallback to parseSource */
+      }
+    }
+
+    const source = parseSource(target);
+    if (!source) {
+      setError(t(language, 'watchRoomNotFound'));
+      return;
+    }
+    source.addedBy = currentUser.nickname;
+    socket.emit('watch:addToQueue', { roomId, source });
+    if (!url) setSourceInput('');
+    showToast(t(language, 'watchAddToQueue'));
+  };
+
+  const playQueueItem = (itemId: string) => {
+    if (!socket || !roomId || !canControl) return;
+    socket.emit('watch:playQueueItem', { roomId, itemId });
+  };
+
+  const removeFromQueue = (itemId: string) => {
+    if (!socket || !roomId) return;
+    socket.emit('watch:removeFromQueue', { roomId, itemId });
+  };
+
+  const copyShortLink = async (source: WatchSource) => {
+    const { full } = getShortenedUrl(source);
+    try {
+      await navigator.clipboard.writeText(full);
+      showToast(t(language, 'linkCopied'));
+    } catch {
+      /* clipboard blocked */
+    }
   };
 
   const updateControlMode = (mode: ControlMode) => {
@@ -958,6 +1159,32 @@ export function WatchTogetherWindow({
                 title={canControl ? undefined : t(language, 'watchHostOnly')}
               />
               <button type="button" className="primary-action watch-load" onClick={loadSource} disabled={!canControl}>{t(language, 'watchLoadVideo')}</button>
+              <button
+                type="button"
+                className="secondary-action watch-add-queue-btn"
+                onClick={() => void addToQueue()}
+                disabled={!sourceInput.trim()}
+                title={t(language, 'watchAddToQueue')}
+              >
+                + {t(language, 'watchAddToQueue')}
+              </button>
+              <button
+                type="button"
+                className={`watch-queue-toggle-btn ${queueOpen ? 'active' : ''}`}
+                onClick={() => setQueueOpen((o) => !o)}
+                title={t(language, 'watchQueue')}
+              >
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <line x1="8" y1="6" x2="21" y2="6"></line>
+                  <line x1="8" y1="12" x2="21" y2="12"></line>
+                  <line x1="8" y1="18" x2="21" y2="18"></line>
+                  <line x1="3" y1="6" x2="3.01" y2="6"></line>
+                  <line x1="3" y1="12" x2="3.01" y2="12"></line>
+                  <line x1="3" y1="18" x2="3.01" y2="18"></line>
+                </svg>
+                <span>{t(language, 'watchQueue')}</span>
+                {queue.length > 0 ? <span className="watch-queue-badge">{queue.length}</span> : null}
+              </button>
             </div>
 
             <div className="watch-player">
@@ -972,6 +1199,9 @@ export function WatchTogetherWindow({
                   onPlay={() => canControl && emitControl(true, videoRef.current?.currentTime ?? 0)}
                   onPause={() => canControl && emitControl(false, videoRef.current?.currentTime ?? 0)}
                   onSeeked={() => canControl && emitControl(!videoRef.current?.paused, videoRef.current?.currentTime ?? 0)}
+                  onEnded={() => {
+                    if (canControl && roomId) socket?.emit('watch:playNextInQueue', { roomId });
+                  }}
                 />
               ) : player?.source?.kind === 'embed' ? (
                 <iframe
@@ -984,6 +1214,109 @@ export function WatchTogetherWindow({
                 <div className="watch-player-empty">{t(language, 'watchNothingPlaying')}</div>
               )}
             </div>
+
+            {queueOpen ? (
+              <div className="watch-queue-drawer" onMouseDown={(e) => e.stopPropagation()}>
+                <div className="watch-queue-drawer-head">
+                  <div className="watch-queue-drawer-title-group">
+                    <h4>{t(language, 'watchQueue')}</h4>
+                    <span className="watch-queue-drawer-count">{t(language, 'watchQueueCount', { count: String(queue.length) })}</span>
+                  </div>
+                  <button
+                    type="button"
+                    className="watch-queue-drawer-close"
+                    onClick={() => setQueueOpen(false)}
+                    aria-label="Close"
+                  >
+                    ✕
+                  </button>
+                </div>
+
+                <div className="watch-queue-list">
+                  {queue.length === 0 ? (
+                    <div className="watch-queue-empty">
+                      <p className="watch-queue-empty-title">{t(language, 'watchQueueEmpty')}</p>
+                      <p className="watch-queue-empty-hint">{t(language, 'watchQueueEmptyHint')}</p>
+                    </div>
+                  ) : (
+                    queue.map((item, index) => {
+                      const short = getShortenedUrl(item.source);
+                      const thumb = item.thumbnailUrl
+                        || (item.source.kind === 'youtube' ? `https://img.youtube.com/vi/${item.source.value}/mqdefault.jpg` : null);
+                      const title = item.source.title?.trim() || short.display;
+                      const canDelete = isHost || canControl || item.addedByUserId === currentUser.id;
+
+                      return (
+                        <div key={item.id} className="watch-queue-item">
+                          <span className="watch-queue-index">{index + 1}</span>
+                          <div className="watch-queue-thumb-wrap">
+                            {thumb ? (
+                              <img className="watch-queue-thumb" src={thumb} alt="" loading="lazy" />
+                            ) : (
+                              <div className="watch-queue-thumb placeholder">▶</div>
+                            )}
+                          </div>
+                          <div className="watch-queue-details">
+                            <span className="watch-queue-title" title={title}>{title}</span>
+                            <div className="watch-queue-sub">
+                              <button
+                                type="button"
+                                className="watch-queue-short-link"
+                                onClick={() => copyShortLink(item.source)}
+                                title={t(language, 'linkCopied')}
+                              >
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                  <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+                                  <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+                                </svg>
+                                <span>{short.display}</span>
+                              </button>
+                              {item.addedByNickname ? (
+                                <span className="watch-queue-added-by">
+                                  {t(language, 'watchAddedBy')}:{' '}
+                                  <button
+                                    type="button"
+                                    className="watch-clickable-author"
+                                    onClick={(e) => {
+                                      const member = room?.members.find((mem) => mem.userId === item.addedByUserId);
+                                      void openUserProfile(item.addedByUserId, e.currentTarget, member?.user || { nickname: item.addedByNickname, nameStyle: item.addedByNameStyle });
+                                    }}
+                                  >
+                                    <UserName user={{ nickname: item.addedByNickname, nameStyle: item.addedByNameStyle ?? (room?.members.find((mem) => mem.userId === item.addedByUserId)?.user.nameStyle ?? null) }} />
+                                  </button>
+                                </span>
+                              ) : null}
+                            </div>
+                          </div>
+                          <div className="watch-queue-item-actions">
+                            {canControl ? (
+                              <button
+                                type="button"
+                                className="watch-queue-item-btn play"
+                                onClick={() => playQueueItem(item.id)}
+                                title={t(language, 'watchPlayNow')}
+                              >
+                                ▶
+                              </button>
+                            ) : null}
+                            {canDelete ? (
+                              <button
+                                type="button"
+                                className="watch-queue-item-btn delete"
+                                onClick={() => removeFromQueue(item.id)}
+                                title={t(language, 'watchRemoveFromQueue')}
+                              >
+                                ✕
+                              </button>
+                            ) : null}
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+            ) : null}
 
             <div className="watch-stage-bottom">
               <div className="watch-room-title">
@@ -1042,11 +1375,18 @@ export function WatchTogetherWindow({
                     const inSync = m.isHost || drift <= 2;
                     return (
                       <div key={m.userId} className="watch-sync-row">
-                        <img className="watch-sync-avatar" src={m.user.avatarData} alt="" />
-                        <span className="watch-sync-name" title={m.user.nickname}>
-                          {m.user.nickname}
-                          {m.isHost ? <span className="watch-sync-host-tag">{t(language, 'watchHost')}</span> : null}
-                        </span>
+                        <button
+                          type="button"
+                          className="watch-sync-user-btn"
+                          title={m.user.nickname}
+                          onClick={(e) => void openUserProfile(m.userId, e.currentTarget, m.user)}
+                        >
+                          <img className="watch-sync-avatar" src={m.user.avatarData} alt="" />
+                          <span className="watch-sync-name">
+                            <UserName user={m.user} />
+                            {m.isHost ? <span className="watch-sync-host-tag">{t(language, 'watchHost')}</span> : null}
+                          </span>
+                        </button>
                         <span className={inSync ? 'watch-sync-time ok' : 'watch-sync-time off'}>{formatClock(memberLive)}</span>
                         {isHost && !m.isHost ? (
                           <button
@@ -1074,72 +1414,103 @@ export function WatchTogetherWindow({
               </div>
             </div>
             <div className="watch-chat-thread" ref={chatScrollRef}>
-              {chat.map((m) => (
-                <div key={m.id} className={m.senderId === currentUser.id ? 'watch-msg own' : 'watch-msg'}>
-                  <img className="watch-msg-avatar" src={m.senderAvatar} alt="" />
-                  <div className="watch-msg-body">
-                    <span className="watch-msg-author">{m.senderNickname}</span>
-                    {m.body ? (
-                      <WatchChatBody text={m.body} language={language} canControl={canControl} onPlay={playUrlInRoom} />
-                    ) : null}
-                    {m.gifUrl ? <img className="watch-msg-gif" src={m.gifUrl} alt="gif" /> : null}
+              {chat.map((m) => {
+                const senderMember = room?.members.find((mem) => mem.userId === m.senderId);
+                const nameStyle = m.senderNameStyle ?? senderMember?.user.nameStyle ?? (m.senderId === currentUser.id ? currentUser.nameStyle : null);
+                const senderUser: Pick<PublicUser, 'nickname' | 'nameStyle'> = {
+                  nickname: m.senderNickname,
+                  nameStyle
+                };
+                const fallbackProfile: Partial<PublicUser> = senderMember?.user || {
+                  id: m.senderId,
+                  nickname: m.senderNickname,
+                  avatarData: m.senderAvatar,
+                  nameStyle
+                };
+
+                return (
+                  <div key={m.id} className={m.senderId === currentUser.id ? 'watch-msg own' : 'watch-msg'}>
+                    <button
+                      type="button"
+                      className="watch-msg-avatar-btn"
+                      title={m.senderNickname}
+                      onClick={(e) => void openUserProfile(m.senderId, e.currentTarget, fallbackProfile)}
+                    >
+                      <img className="watch-msg-avatar" src={m.senderAvatar} alt="" />
+                    </button>
+                    <div className="watch-msg-body">
+                      <button
+                        type="button"
+                        className="watch-msg-author-btn"
+                        title={m.senderNickname}
+                        onClick={(e) => void openUserProfile(m.senderId, e.currentTarget, fallbackProfile)}
+                      >
+                        <UserName user={senderUser} className="watch-msg-author" />
+                      </button>
+                      {m.body ? (
+                        <WatchChatBody text={m.body} language={language} canControl={canControl} onPlay={playUrlInRoom} onAddToQueue={(url) => void addToQueue(url)} />
+                      ) : null}
+                      {m.gifUrl ? <img className="watch-msg-gif" src={m.gifUrl} alt="gif" /> : null}
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
             <form
               className="watch-chat-composer"
               onSubmit={(e) => { e.preventDefault(); sendChat(draft); }}
             >
-              <EmojiInlineInput
-                ref={chatInputRef}
-                className="emoji-inline-input watch-chat-input"
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                placeholder={t(language, 'watchChatPlaceholder')}
-                previewSize={17}
-              />
-              <div ref={emojiAnchorRef} className="emoji-host inline">
-                <button
-                  type="button"
-                  className="emoji-toggle inline chat-gif-toggle"
-                  aria-label="GIF"
-                  onMouseDown={(e) => e.stopPropagation()}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    if (emojiOpen && pickerTab === 'gif') setEmojiOpen(false);
-                    else { setPickerTab('gif'); setEmojiOpen(true); }
-                  }}
-                >
-                  <GifIcon />
-                </button>
-                <button
-                  type="button"
-                  className="emoji-toggle inline"
-                  aria-label={t(language, 'emoji')}
-                  onMouseDown={(e) => e.stopPropagation()}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    if (emojiOpen && pickerTab === 'emoji') setEmojiOpen(false);
-                    else { setPickerTab('emoji'); setEmojiOpen(true); }
-                  }}
-                >
-                  <EmojiToggleIcon />
-                </button>
-                {emojiOpen ? (
-                  <EmojiPicker
-                    language={language}
-                    enlarged
-                    initialTab={pickerTab}
-                    anchorRef={emojiAnchorRef}
-                    placement="top-end"
-                    onSelect={insertEmoji}
-                    onSelectGif={sendGif}
-                    onClose={() => setEmojiOpen(false)}
-                    token={token}
-                    currentUser={currentUser}
-                  />
-                ) : null}
+              <div className="watch-chat-input-shell">
+                <EmojiInlineInput
+                  ref={chatInputRef}
+                  className="emoji-inline-input watch-chat-input"
+                  value={draft}
+                  onChange={(e) => setDraft(e.target.value)}
+                  placeholder={t(language, 'watchChatPlaceholder')}
+                  previewSize={17}
+                />
+                <div ref={emojiAnchorRef} className="emoji-host inline watch-chat-emoji-host">
+                  <button
+                    type="button"
+                    className="emoji-toggle inline chat-gif-toggle"
+                    aria-label="GIF"
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (emojiOpen && pickerTab === 'gif') setEmojiOpen(false);
+                      else { setPickerTab('gif'); setEmojiOpen(true); }
+                    }}
+                  >
+                    <GifIcon />
+                  </button>
+                  <button
+                    type="button"
+                    className="emoji-toggle inline"
+                    aria-label={t(language, 'emoji')}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (emojiOpen && pickerTab === 'emoji') setEmojiOpen(false);
+                      else { setPickerTab('emoji'); setEmojiOpen(true); }
+                    }}
+                  >
+                    <EmojiToggleIcon />
+                  </button>
+                  {emojiOpen ? (
+                    <EmojiPicker
+                      language={language}
+                      enlarged
+                      initialTab={pickerTab}
+                      anchorRef={emojiAnchorRef}
+                      placement="top-end"
+                      onSelect={insertEmoji}
+                      onSelectGif={sendGif}
+                      onClose={() => setEmojiOpen(false)}
+                      token={token}
+                      currentUser={currentUser}
+                    />
+                  ) : null}
+                </div>
               </div>
             </form>
           </div>

@@ -21,6 +21,7 @@ import {
 import type { PublicUser } from '../api/types';
 import { getAllEmojiItems } from '../utils/emoji-data';
 import { expandCustomEmojiShortcodes, customEmojiToShortcodes, splitCustomEmoji } from '../utils/custom-emoji';
+import { tokenizeForSpellcheck, subscribeSpellcheck, requestSpellcheck } from '../utils/spellcheck';
 
 export type EmojiInlineInputHandle = {
   focus: () => void;
@@ -28,6 +29,8 @@ export type EmojiInlineInputHandle = {
   replaceSelection: (text: string) => void;
   getSelection: () => { start: number; end: number };
   setSelection: (start: number, end?: number) => void;
+  getOffsetAtPoint?: (x: number, y: number) => number | null;
+  replaceRange?: (start: number, end: number, text: string) => void;
 };
 
 type EmojiInlineInputProps = Omit<
@@ -195,7 +198,18 @@ function renderEditorDom(root: HTMLElement, parts: EditorPart[], size: number) {
 
   for (const part of parts) {
     if (part.type === 'text') {
-      root.appendChild(document.createTextNode(part.value));
+      const tokens = tokenizeForSpellcheck(part.value);
+      for (const tok of tokens) {
+        if (tok.isMisspelled) {
+          const span = document.createElement('span');
+          span.className = 'spelling-error';
+          span.dataset.spellingWord = tok.text;
+          span.appendChild(document.createTextNode(tok.text));
+          root.appendChild(span);
+        } else {
+          root.appendChild(document.createTextNode(tok.text));
+        }
+      }
       continue;
     }
 
@@ -266,6 +280,7 @@ export const EmojiInlineInput = forwardRef<EmojiInlineInputHandle, EmojiInlineIn
   const [activeQuery, setActiveQuery] = useState<ActiveQuery | null>(null);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [customVersion, setCustomVersion] = useState(0);
+  const [spellcheckVersion, setSpellcheckVersion] = useState(0);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const selectionRef = useRef<SelectionOffsets>({ start: 0, end: 0 });
   const pendingSelectionRef = useRef<SelectionOffsets | null>(null);
@@ -284,6 +299,10 @@ export const EmojiInlineInput = forwardRef<EmojiInlineInputHandle, EmojiInlineIn
   }, [localValue, value, syncKey]);
 
   useEffect(() => subscribeCustomEmoji(() => setCustomVersion((version) => version + 1)), []);
+  useEffect(() => subscribeSpellcheck(() => setSpellcheckVersion((version) => version + 1)), []);
+  useEffect(() => {
+    requestSpellcheck(displayValue);
+  }, [displayValue]);
 
   useLayoutEffect(() => {
     const root = rootRef.current;
@@ -299,7 +318,7 @@ export const EmojiInlineInput = forwardRef<EmojiInlineInputHandle, EmojiInlineIn
     restoreSelection(root, bounded.start, bounded.end);
     selectionRef.current = bounded;
     pendingSelectionRef.current = null;
-  }, [displayValue, editorParts, _previewSize]);
+  }, [displayValue, editorParts, _previewSize, spellcheckVersion]);
 
   const suggestions = useMemo<Suggestion[]>(() => {
     if (!activeQuery) return [];
@@ -433,6 +452,25 @@ export const EmojiInlineInput = forwardRef<EmojiInlineInputHandle, EmojiInlineIn
         root.focus();
         restoreSelection(root, start, end);
       });
+    },
+    getOffsetAtPoint(x: number, y: number) {
+      const root = rootRef.current;
+      if (!root) return null;
+      if (document.caretRangeFromPoint) {
+        const range = document.caretRangeFromPoint(x, y);
+        if (range && root.contains(range.startContainer)) {
+          return offsetFromPosition(root, range.startContainer, range.startOffset);
+        }
+      } else if ((document as unknown as { caretPositionFromPoint?: (px: number, py: number) => { offsetNode: Node; offset: number } | null }).caretPositionFromPoint) {
+        const pos = (document as unknown as { caretPositionFromPoint: (px: number, py: number) => { offsetNode: Node; offset: number } | null }).caretPositionFromPoint(x, y);
+        if (pos && root.contains(pos.offsetNode)) {
+          return offsetFromPosition(root, pos.offsetNode, pos.offset);
+        }
+      }
+      return null;
+    },
+    replaceRange(start: number, end: number, text: string) {
+      replaceRange(start, end, text);
     }
   }), [displayValue]);
 

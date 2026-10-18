@@ -414,9 +414,9 @@ export function RailFolders({ scope, language, items, previewCount = 4 }: RailFo
         onMouseEnter={(e) => showTooltip(e, item.name)}
         onMouseLeave={() => setTooltip(null)}
         onContextMenu={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
           if (inFolder) {
-            e.preventDefault();
-            e.stopPropagation();
             ejectFromFolder(item.id, inFolder);
             return;
           }

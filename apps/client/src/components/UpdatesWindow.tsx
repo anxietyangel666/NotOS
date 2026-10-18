@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { Language } from '../api/types';
 import { LOCALES, t } from '../i18n';
-import { UPDATES, type AppUpdate } from '../utils/updates';
+import { UPDATES, getLocalizedUpdateText, type AppUpdate } from '../utils/updates';
 
 type UpdatesWindowProps = {
   language: Language;
@@ -31,7 +31,7 @@ export function UpdatesWindow({ language, initialUpdateId = null, onClose }: Upd
         >
           <div className="updates-header-overlay">
             <p className="eyebrow">{t(language, 'whatsNew')}</p>
-            <h2>{selected ? selected.title : t(language, 'updates')}</h2>
+            <h2>{selected ? getLocalizedUpdateText(selected.title, language) : t(language, 'updates')}</h2>
           </div>
           <button className="icon-action updates-close" type="button" aria-label={t(language, 'close')} onClick={onClose}>
             ✕
@@ -45,7 +45,7 @@ export function UpdatesWindow({ language, initialUpdateId = null, onClose }: Upd
                 <span className="updates-version">v{selected.version}</span>
                 <time>{formatUpdateDate(selected.date, language)}</time>
               </div>
-              {selected.body.split('\n\n').map((paragraph, index) => (
+              {getLocalizedUpdateText(selected.body, language).split('\n\n').map((paragraph, index) => (
                 <p key={index}>{paragraph}</p>
               ))}
               <button className="secondary-action" type="button" onClick={() => setSelected(null)}>
@@ -59,10 +59,10 @@ export function UpdatesWindow({ language, initialUpdateId = null, onClose }: Upd
               {UPDATES.map((update) => (
                 <button key={update.id} className="updates-list-item" type="button" onClick={() => setSelected(update)}>
                   <div className="updates-list-item-head">
-                    <strong>{update.title}</strong>
+                    <strong>{getLocalizedUpdateText(update.title, language)}</strong>
                     <span className="updates-version">v{update.version}</span>
                   </div>
-                  <small>{update.summary}</small>
+                  <small>{getLocalizedUpdateText(update.summary, language)}</small>
                   <time>{formatUpdateDate(update.date, language)}</time>
                 </button>
               ))}

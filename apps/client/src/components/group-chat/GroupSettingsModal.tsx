@@ -15,10 +15,11 @@ import { CustomizationConstructor } from '../CustomizationConstructor';
 import { SaveBar } from '../SaveBar';
 import { Tooltip } from '../Tooltip';
 import { UserName } from '../UserName';
-import { EVERYONE_ROLE_ID, MENTIONABLE_PERMISSION, MENTION_EVERYONE_PERMISSION } from './constants';
+import { EVERYONE_ROLE_ID, MENTIONABLE_PERMISSION, ROLE_COLOR_PRESETS, ROLE_PERMISSION_GROUPS } from './constants';
+import type { GroupBan } from '../../api/types';
 import { rolePermissionLabel } from './permissions';
 
-export type GroupSettingsTab = 'overview' | 'invite' | 'roles' | 'members' | 'customization' | 'posts' | 'audit';
+export type GroupSettingsTab = 'overview' | 'invite' | 'roles' | 'members' | 'bans' | 'customization' | 'posts' | 'audit';
 
 // Admin toolbox for feed channels: per-channel stats, the sign-posts toggle
 // and the scheduled-posts queue. Self-contained (fetches its own data).
@@ -55,6 +56,51 @@ function AutomodSection({ token, language, group }: { token: string; language: L
       >
         {saved ? t(language, 'saved') : t(language, 'save')}
       </button>
+    </div>
+  );
+}
+
+function BansView({
+  token,
+  language,
+  group,
+  formatShortDate
+}: {
+  token: string;
+  language: Language;
+  group: Group;
+  formatShortDate: (value: string) => string;
+}) {
+  const [bans, setBans] = useState<GroupBan[] | null>(null);
+  useEffect(() => {
+    let alive = true;
+    api.getGroupBans(token, group.id)
+      .then((payload) => { if (alive) setBans(payload.bans); })
+      .catch(() => { if (alive) setBans([]); });
+    return () => { alive = false; };
+  }, [token, group.id]);
+  return (
+    <div className="group-settings-section">
+      <h3>{t(language, 'tabBans')}</h3>
+      {bans === null ? <small className="muted-line">…</small> : bans.length === 0 ? (
+        <small className="muted-line">{t(language, 'auditEmpty')}</small>
+      ) : (
+        <div className="group-audit-list">
+          {bans.map((ban) => (
+            <div className="group-audit-row" key={ban.userId}>
+              <div className="group-audit-main">
+                <strong>{ban.user?.nickname ?? ban.userId}</strong>
+                {ban.reason ? <span>{ban.reason}</span> : null}
+              </div>
+              <time>{formatShortDate(ban.createdAt)}</time>
+              <button type="button" className="secondary-action" onClick={() => {
+                void api.unbanGroupMember(token, group.id, ban.userId)
+                  .then(() => setBans((current) => (current ?? []).filter((item) => item.userId !== ban.userId)));
+              }}>{t(language, 'unbanMember')}</button>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -97,6 +143,13 @@ function AuditLogView({
       case 'automod_blocked': return t(language, 'auditAutomodBlocked');
       case 'automod_updated': return t(language, 'auditAutomodUpdated');
       case 'reaction_roles_updated': return t(language, 'auditReactionRoles');
+      case 'member_banned': return t(language, 'banMember');
+      case 'member_unbanned': return t(language, 'unbanMember');
+      case 'member_timeout': return t(language, 'timeoutMember');
+      case 'member_timeout_clear': return t(language, 'clearTimeout');
+      case 'role_created': return t(language, 'auditRoleCreated');
+      case 'role_updated': return t(language, 'auditRoleUpdated');
+      case 'role_deleted': return t(language, 'auditRoleDeleted');
       default: return action;
     }
   };
@@ -113,13 +166,16 @@ function AuditLogView({
           {entries.map((entry) => {
             const actor = entry.actorId ? users[entry.actorId] : null;
             const targetUser = users[entry.target];
+            const roleName = typeof entry.details?.name === 'string' && entry.details.name
+              ? entry.details.name
+              : (entry.action.startsWith('role_') && entry.action !== 'role_assigned' && entry.action !== 'role_removed' ? entry.target : null);
             const detailWord = entry.action === 'automod_blocked' && entry.target ? entry.target : null;
             return (
               <div className="group-audit-row" key={entry.id}>
                 <div className="group-audit-main">
                   <strong>{actor?.nickname ?? '—'}</strong>
                   <span>{actionLabel(entry.action)}</span>
-                  {targetUser ? <strong>{targetUser.nickname}</strong> : detailWord ? <code>{detailWord}</code> : null}
+                  {targetUser ? <strong>{targetUser.nickname}</strong> : roleName ? <strong>{roleName}</strong> : detailWord ? <code>{detailWord}</code> : null}
                 </div>
                 <time>{formatShortDate(entry.createdAt)}</time>
               </div>
@@ -281,6 +337,13 @@ type GroupSettingsModalProps = {
   canManageRoles: boolean;
   canManageInvites: boolean;
   canKickMembers: boolean;
+  canBanMembers: boolean;
+  canTimeoutMembers: boolean;
+  canManageServer: boolean;
+  handleDuplicateRole: (roleId: string) => Promise<void>;
+  handleReorderRoles: (roleIds: string[]) => Promise<void>;
+  handleBanMember: (userId: string) => Promise<void>;
+  handleTimeoutMember: (userId: string, minutes: number) => Promise<void>;
   otherMembersCount: number;
   copied: boolean;
   newAvatar: string | null;
@@ -386,6 +449,13 @@ export function GroupSettingsModal({
   canManageRoles,
   canManageInvites,
   canKickMembers,
+  canBanMembers,
+  canTimeoutMembers,
+  canManageServer,
+  handleDuplicateRole,
+  handleReorderRoles,
+  handleBanMember,
+  handleTimeoutMember,
   otherMembersCount,
   copied,
   newAvatar,
@@ -505,9 +575,14 @@ export function GroupSettingsModal({
                 {t(language, 'roles')}
               </button>
             ) : null}
-            {canManageRoles ? (
+            {canManageRoles || canKickMembers ? (
               <button type="button" className={'group-settings-tab' + (settingsTab === 'members' ? ' active' : '')} onClick={() => setSettingsTab('members')}>
                 {t(language, 'members')}
+              </button>
+            ) : null}
+            {canBanMembers ? (
+              <button type="button" className={'group-settings-tab' + (settingsTab === 'bans' ? ' active' : '')} onClick={() => setSettingsTab('bans')}>
+                {t(language, 'tabBans')}
               </button>
             ) : null}
             {canManageRoles ? (
@@ -551,12 +626,12 @@ export function GroupSettingsModal({
                     <span className="group-settings-avatar-fallback">{(group.name[0] ?? '?').toUpperCase()}</span>
                   )}
                   <input id="group-avatar-file" className="hidden-file" type="file" accept="image/*" onChange={(e) => void handleAvatarUpload(e.currentTarget.files?.[0])} />
-                  {isOwner ? (
+                  {canManageServer ? (
                     <button type="button" className="secondary-action" onClick={() => document.getElementById('group-avatar-file')?.click()}>{t(language, 'uploadAvatar')}</button>
                   ) : null}
                 </div>
                 <label>{t(language, 'groupName')}</label>
-                <input type="text" className="messenger-input" value={newName} onChange={(e) => setNewName(e.target.value)} />
+                <input type="text" className="messenger-input" value={newName} readOnly={!canManageServer} onChange={(e) => setNewName(e.target.value)} />
                 <label style={{ marginTop: 12 }}>{t(language, 'groupDescription')}</label>
                 <textarea
                   className="messenger-input"
@@ -564,13 +639,13 @@ export function GroupSettingsModal({
                   maxLength={200}
                   value={newDescription}
                   style={{ resize: 'vertical' }}
-                  readOnly={!isOwner}
+                  readOnly={!canManageServer}
                   placeholder={t(language, 'groupDescriptionHint')}
                   onChange={(e) => setNewDescription(e.target.value.slice(0, 200))}
                 />
                 <small className="muted-line" style={{ alignSelf: 'flex-end' }}>{newDescription.length}/200</small>
               </div>
-              {isOwner ? (
+              {canManageServer ? (
                 <AutomodSection token={token} language={language} group={group} />
               ) : null}
               <div className="group-settings-section">
@@ -584,7 +659,7 @@ export function GroupSettingsModal({
                     <img src={newAvatar ?? group.avatarData} alt="" />
                     <strong>{newName || group.name}</strong>
                   </div>
-                  {isOwner ? (
+                  {canManageServer ? (
                     <>
                       <div className="nameplate-types">
                         {(['none', 'color', 'gradient', 'image'] as const).map((type) => (
@@ -787,7 +862,27 @@ export function GroupSettingsModal({
                   const roleRow = (role: typeof filtered[number]) => {
                     const memberCount = countRoleMembers(role.id);
                     return (
-                      <div className="group-roles-row" key={role.id}>
+                      <div
+                        className="group-roles-row"
+                        key={role.id}
+                        draggable={roleSort === 'position' && !role.isOwner}
+                        onDragStart={(event) => { event.dataTransfer.setData('text/role-id', role.id); }}
+                        onDragOver={(event) => event.preventDefault()}
+                        onDrop={(event) => {
+                          event.preventDefault();
+                          const sourceId = event.dataTransfer.getData('text/role-id');
+                          if (!sourceId || sourceId === role.id) return;
+                          const ordered = roles.filter((item) => !item.isOwner).sort((a, b) => a.position - b.position).map((item) => item.id);
+                          const from = ordered.indexOf(sourceId);
+                          const to = ordered.indexOf(role.id);
+                          if (from < 0 || to < 0) return;
+                          const next = [...ordered];
+                          next.splice(from, 1);
+                          next.splice(to, 0, sourceId);
+                          void handleReorderRoles(next);
+                        }}
+                      >
+                        {roleSort === 'position' && !role.isOwner ? <span className="group-roles-drag" title={t(language, 'dragToReorder')}>⋮⋮</span> : null}
                         <span className="group-settings-role-dot" style={{ backgroundColor: role.color }} />
                         <span className="group-roles-row-name">{role.name}</span>
                         <span className="group-roles-row-count">{memberCount} {t(language, 'members')}</span>
@@ -804,10 +899,11 @@ export function GroupSettingsModal({
                               </Tooltip>
                               {roleMenuOpen === role.id ? (
                                 <div className="group-roles-menu">
-                                  <button type="button" className="group-roles-menu-item danger" onClick={() => void handleDeleteRole(role.id)}>{t(language, 'deleteRole')}</button>
+                                  <button type="button" className="group-roles-menu-item" onClick={() => void handleDuplicateRole(role.id)}>{t(language, 'duplicateRole')}</button>
                                   <button type="button" className="group-roles-menu-item" onClick={() => void handleCopyRoleId(role.id)}>
                                     {roleIdCopied === role.id ? t(language, 'copied') : t(language, 'copyRoleId')}
                                   </button>
+                                  <button type="button" className="group-roles-menu-item danger" onClick={() => void handleDeleteRole(role.id)}>{t(language, 'deleteRole')}</button>
                                 </div>
                               ) : null}
                             </div>
@@ -967,31 +1063,10 @@ export function GroupSettingsModal({
                       : roles.find((r) => r.id === roleEditorId);
                     if (!role) return null;
                     const isEveryoneRole = role.id === EVERYONE_ROLE_ID;
-                    const permissionKeys = [
-                      'ManageRoles',
-                      'DeleteAnyMessage',
-                      'ManageChannels',
-                      'ManageInvites',
-                      'KickMembers',
-                      'ViewChannel',
-                      'SendMessages',
-                      'AttachFiles',
-                      'AddReactions',
-                      'UseExternalEmojis',
-                      MENTION_EVERYONE_PERMISSION,
-                      'ManageMessages',
-                      'PinMessages',
-                      'BypassSlowmode',
-                      'ReadMessageHistory',
-                      'SendVoiceMessages',
-                      'SendVideoCircles',
-                      'CreatePolls',
-                      MENTIONABLE_PERMISSION
-                    ];
-                    const visiblePermissions = permissionKeys.filter((perm) => {
-                      const query = rolePermissionSearch.trim().toLowerCase();
-                      if (!query) return true;
-                      return perm.toLowerCase().includes(query) || rolePermissionLabel(perm, language).toLowerCase().includes(query);
+                    const permissionQuery = rolePermissionSearch.trim().toLowerCase();
+                    const visiblePermissions = ROLE_PERMISSION_GROUPS.flatMap((groupDef) => groupDef.permissions).filter((perm) => {
+                      if (!permissionQuery) return true;
+                      return perm.toLowerCase().includes(permissionQuery) || rolePermissionLabel(perm, language).toLowerCase().includes(permissionQuery);
                     });
                     const roleMembers = members
                       .filter((member) => memberHasRole(member, role.id))
@@ -1005,20 +1080,47 @@ export function GroupSettingsModal({
                     return (
                       <>
                         <div className="group-role-editor-tabs">
-                          {!isEveryoneRole ? <button type="button" className={roleEditorTab === 'display' ? 'active' : ''} onClick={() => setRoleEditorTab('display')}>Display</button> : null}
-                          <button type="button" className={roleEditorTab === 'permissions' ? 'active' : ''} onClick={() => setRoleEditorTab('permissions')}>Permissions</button>
-                          {!isEveryoneRole ? <button type="button" className={roleEditorTab === 'members' ? 'active' : ''} onClick={() => setRoleEditorTab('members')}>Members ({roleMembers.length})</button> : null}
+                          {!isEveryoneRole ? <button type="button" className={roleEditorTab === 'display' ? 'active' : ''} onClick={() => setRoleEditorTab('display')}>{t(language, 'roleTabDisplay')}</button> : null}
+                          <button type="button" className={roleEditorTab === 'permissions' ? 'active' : ''} onClick={() => setRoleEditorTab('permissions')}>{t(language, 'roleTabPermissions')}</button>
+                          {!isEveryoneRole ? <button type="button" className={roleEditorTab === 'members' ? 'active' : ''} onClick={() => setRoleEditorTab('members')}>{t(language, 'roleTabMembers')} ({roleMembers.length})</button> : null}
                         </div>
                         {roleEditorTab === 'display' && !isEveryoneRole ? (
                           <div className="group-role-editor-pane">
+                            <label className="group-role-field-label">{t(language, 'roles')}</label>
                             <div className="group-roles-editor-meta">
                               <input type="text" className="messenger-input" value={editingRoleMeta?.name ?? role.name} onChange={(e) => setEditingRoleMeta((prev) => ({ id: role.id, name: e.target.value, color: prev?.color ?? role.color }))} />
-                              <input type="color" value={editingRoleMeta?.color ?? role.color} onChange={(e) => setEditingRoleMeta((prev) => ({ id: role.id, name: prev?.name ?? role.name, color: e.target.value }))} />
+                            </div>
+                            <label className="group-role-field-label">{t(language, 'roleColor')}</label>
+                            <div className="group-role-color-presets">
+                              {ROLE_COLOR_PRESETS.map((color) => (
+                                <button
+                                  key={color}
+                                  type="button"
+                                  className={'group-role-color-swatch' + ((editingRoleMeta?.color ?? role.color).toLowerCase() === color ? ' active' : '')}
+                                  style={{ backgroundColor: color }}
+                                  onClick={() => setEditingRoleMeta((prev) => ({ id: role.id, name: prev?.name ?? role.name, color }))}
+                                />
+                              ))}
+                              <input type="color" className="group-role-color-custom" value={editingRoleMeta?.color ?? role.color} onChange={(e) => setEditingRoleMeta((prev) => ({ id: role.id, name: prev?.name ?? role.name, color: e.target.value }))} />
                             </div>
                             <Tooltip as="div" label={t(language, 'roleDisplayHint')}>
                               <label className="group-role-permission-item group-role-hoist">
                                 <input type="checkbox" checked={draftHoist} onChange={(e) => setDraftHoist(e.target.checked)} />
                                 {t(language, 'roleDisplaySeparately')}
+                              </label>
+                            </Tooltip>
+                            <Tooltip as="div" label={t(language, 'roleMentionableHint')}>
+                              <label className="group-role-permission-item group-role-hoist">
+                                <input
+                                  type="checkbox"
+                                  checked={draftPermissions.includes(MENTIONABLE_PERMISSION)}
+                                  onChange={(e) => {
+                                    setDraftPermissions((prev) => e.target.checked
+                                      ? [...prev.filter((p) => p !== MENTIONABLE_PERMISSION), MENTIONABLE_PERMISSION]
+                                      : prev.filter((p) => p !== MENTIONABLE_PERMISSION));
+                                  }}
+                                />
+                                {t(language, 'roleMentionable')}
                               </label>
                             </Tooltip>
                           </div>
@@ -1029,23 +1131,55 @@ export function GroupSettingsModal({
                               type="search"
                               className="messenger-input group-role-permission-search"
                               value={rolePermissionSearch}
-                              placeholder={language === 'ru' ? 'Поиск прав' : 'Search permissions'}
+                              placeholder={t(language, 'searchPermissions')}
                               onChange={(e) => setRolePermissionSearch(e.target.value)}
                             />
-                            {visiblePermissions.map((perm) => (
-                              <label key={perm} className="group-role-permission-item">
-                                <input type="checkbox" checked={draftPermissions.includes(perm)}
-                                  onChange={(e) => {
-                                    if (e.target.checked) {
-                                      setDraftPermissions((prev) => [...prev, perm]);
-                                    } else {
-                                      setDraftPermissions((prev) => prev.filter((p) => p !== perm));
-                                    }
-                                  }} />
-                                {rolePermissionLabel(perm, language)}
-                              </label>
-                            ))}
-                            {visiblePermissions.length === 0 ? <div className="group-role-empty-state">No permissions found</div> : null}
+                            {ROLE_PERMISSION_GROUPS.map((groupDef) => {
+                              const visible = groupDef.permissions.filter((perm) => {
+                                const query = rolePermissionSearch.trim().toLowerCase();
+                                if (!query) return true;
+                                return perm.toLowerCase().includes(query) || rolePermissionLabel(perm, language).toLowerCase().includes(query);
+                              });
+                              if (visible.length === 0) return null;
+                              const allOn = visible.every((perm) => draftPermissions.includes(perm));
+                              return (
+                                <div key={groupDef.id} className="group-role-perm-group">
+                                  <div className="group-role-perm-group-head">
+                                    <strong>{t(language, groupDef.titleKey)}</strong>
+                                    <button
+                                      type="button"
+                                      className="group-role-perm-toggle"
+                                      onClick={() => {
+                                        const visibleSet = new Set<string>(visible);
+                                        setDraftPermissions((prev) => {
+                                          if (allOn) return prev.filter((p) => !visibleSet.has(p));
+                                          return [...new Set([...prev, ...visible])] as (typeof prev[number])[];
+                                        });
+                                      }}
+                                    >
+                                      {allOn ? t(language, 'disableAll') : t(language, 'enableAll')}
+                                    </button>
+                                  </div>
+                                  {visible.map((perm) => (
+                                    <label key={perm} className="group-role-permission-item">
+                                      <input type="checkbox" checked={draftPermissions.includes(perm) || draftPermissions.includes('Administrator')}
+                                        onChange={(e) => {
+                                          if (e.target.checked) {
+                                            setDraftPermissions((prev) => [...prev, perm]);
+                                          } else {
+                                            setDraftPermissions((prev) => prev.filter((p) => p !== perm && p !== 'Administrator'));
+                                          }
+                                        }} />
+                                      <span>
+                                        <strong>{rolePermissionLabel(perm, language)}</strong>
+                                        {perm === 'Administrator' ? <small className="muted-line">{t(language, 'roleDisplayHint')}</small> : null}
+                                      </span>
+                                    </label>
+                                  ))}
+                                </div>
+                              );
+                            })}
+                            {visiblePermissions.length === 0 ? <div className="group-role-empty-state">{t(language, 'noPermissionsFound')}</div> : null}
                           </div>
                         ) : null}
                         {roleEditorTab === 'members' && !isEveryoneRole ? (
@@ -1058,26 +1192,26 @@ export function GroupSettingsModal({
                               onChange={(e) => setRoleMemberSearch(e.target.value)}
                             />
                             <div className="group-role-members-block">
-                              <div className="group-role-members-title">Has role ({visibleRoleMembers.length})</div>
+                              <div className="group-role-members-title">{t(language, 'hasRole')} ({visibleRoleMembers.length})</div>
                               {visibleRoleMembers.length > 0 ? visibleRoleMembers.map((member) => (
                                 <div key={member.user.id} className="group-role-member-row">
                                   <img src={member.user.avatarData} alt="" />
                                   <span><UserName user={member.user} /></span>
-                                  {!role.isOwner ? <button type="button" onClick={() => void handleRemoveMemberRole(member.user.id, role.id)}>Remove</button> : null}
+                                  {!role.isOwner ? <button type="button" onClick={() => void handleRemoveMemberRole(member.user.id, role.id)}>{t(language, 'remove')}</button> : null}
                                 </div>
-                              )) : <div className="group-role-empty-state">No members found</div>}
+                              )) : <div className="group-role-empty-state">{t(language, 'noMembersFound')}</div>}
                             </div>
                             {!role.isOwner ? (
                               <div className="group-role-members-block">
-                                <div className="group-role-members-title">Can add ({assignableRoleMembers.length})</div>
-                                {assignableRoleMembers.slice(0, 12).map((member) => (
+                                <div className="group-role-members-title">{t(language, 'canAdd')} ({assignableRoleMembers.length})</div>
+                                {assignableRoleMembers.map((member) => (
                                   <div key={member.user.id} className="group-role-member-row">
                                     <img src={member.user.avatarData} alt="" />
                                     <span><UserName user={member.user} /></span>
-                                    <button type="button" onClick={() => void handleAddMemberRole(member.user.id, role.id)}>Add</button>
+                                    <button type="button" onClick={() => void handleAddMemberRole(member.user.id, role.id)}>{t(language, 'add')}</button>
                                   </div>
                                 ))}
-                                {assignableRoleMembers.length === 0 ? <div className="group-role-empty-state">No members available</div> : null}
+                                {assignableRoleMembers.length === 0 ? <div className="group-role-empty-state">{t(language, 'noMembersAvailable')}</div> : null}
                               </div>
                             ) : null}
                           </div>
@@ -1100,7 +1234,7 @@ export function GroupSettingsModal({
             )
           ) : null}
 
-          {settingsTab === 'members' && canManageRoles ? (
+          {settingsTab === 'members' && (canManageRoles || canKickMembers) ? (
             <div className="group-settings-section group-settings-members-section">
               <div className="group-settings-members-topbar">
                 <h3>{t(language, 'members')}</h3>
@@ -1175,11 +1309,11 @@ export function GroupSettingsModal({
                     }}
                     onChange={toggleAllVisibleMembers}
                   />
-                  <span>Name</span>
+                  <span>{language === 'ru' ? 'Имя' : 'Name'}</span>
                 </label>
-                <span>Member Since</span>
-                <span>Joined Discord</span>
-                <span>Roles</span>
+                <span>{language === 'ru' ? 'В группе с' : 'Member Since'}</span>
+                <span>{language === 'ru' ? 'Регистрация' : 'Joined NotOS'}</span>
+                <span>{language === 'ru' ? 'Роли' : 'Roles'}</span>
                 <span />
               </div>
               <div className="group-settings-members-list">
@@ -1193,7 +1327,7 @@ export function GroupSettingsModal({
                   const assignableRoles = roles
                     .filter((role) => !role.isOwner && !memberRoleIds.has(role.id))
                     .sort((a, b) => a.position - b.position);
-                  const roleEditingDisabled = member.user.id === currentUser.id && isOwner;
+                  const roleEditingDisabled = !canManageRoles || (!isOwner && member.user.id === group.ownerId);
                   return (
                     <div key={member.user.id} className="group-settings-member">
                       <div className="group-settings-member-profile">
@@ -1293,16 +1427,32 @@ export function GroupSettingsModal({
                           </div>
                         ) : null}
                       </div>
-                      {canKickMembers && member.user.id !== currentUser.id ? (
-                        <Tooltip label={t(language, 'kickMember')}>
-                          <button type="button" className="group-settings-member-kick" onClick={() => void handleRemoveMember(member.user.id)}>✕</button>
-                        </Tooltip>
-                      ) : null}
+                      <div className="group-settings-member-actions">
+                        {canTimeoutMembers && member.user.id !== currentUser.id && member.user.id !== group.ownerId ? (
+                          <Tooltip label={member.timeoutUntil ? t(language, 'clearTimeout') : t(language, 'timeoutMember')}>
+                            <button type="button" className="group-settings-member-kick" onClick={() => void handleTimeoutMember(member.user.id, member.timeoutUntil ? 0 : 60)}>⏱</button>
+                          </Tooltip>
+                        ) : null}
+                        {canBanMembers && member.user.id !== currentUser.id && member.user.id !== group.ownerId ? (
+                          <Tooltip label={t(language, 'banMember')}>
+                            <button type="button" className="group-settings-member-kick" onClick={() => void handleBanMember(member.user.id)}>⛔</button>
+                          </Tooltip>
+                        ) : null}
+                        {canKickMembers && member.user.id !== currentUser.id && member.user.id !== group.ownerId ? (
+                          <Tooltip label={t(language, 'kickMember')}>
+                            <button type="button" className="group-settings-member-kick" onClick={() => void handleRemoveMember(member.user.id)}>✕</button>
+                          </Tooltip>
+                        ) : null}
+                      </div>
                     </div>
                   );
                 })}
               </div>
             </div>
+          ) : null}
+
+          {settingsTab === 'bans' && canBanMembers ? (
+            <BansView token={token} language={language} group={group} formatShortDate={formatShortDate} />
           ) : null}
 
           {settingsTab === 'posts' && canManageRoles ? (
@@ -1353,7 +1503,7 @@ export function GroupSettingsModal({
               <button className="secondary-action" type="button" onClick={() => setConfirmDeleteGroup(false)}>
                 {t(language, 'cancel')}
               </button>
-              <button className="primary-action danger-text" type="button" onClick={() => void handleDeleteGroup()}>
+              <button className="danger-action" type="button" onClick={() => void handleDeleteGroup()}>
                 {t(language, 'deleteGroup')}
               </button>
             </div>

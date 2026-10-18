@@ -28,7 +28,7 @@ const passwordSchema = z
 export const registerSchema = z.object({
   nickname: nicknameSchema,
   avatarData: avatarDataSchema,
-  language: z.enum(['en', 'ru', 'uk']).optional(),
+  language: z.enum(['en', 'ru', 'uk', 'zh', 'zh-TW']).optional(),
   theme: z.enum(['light', 'dark', 'system-black', 'mint', 'ocean']).optional()
 });
 

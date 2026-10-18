@@ -25,6 +25,9 @@ export type MessageRecord = {
   awaiting_online: boolean;
   view_once: boolean;
   view_once_seen_at: Date | null;
+  ai_generated?: boolean;
+  ai_name?: string | null;
+  ai_avatar_data?: string | null;
   created_at: Date;
 };
 
@@ -40,6 +43,9 @@ export type MessageReplySnippet = {
   id: string;
   senderId: string;
   senderGroup: { id: string; name: string; avatarData: string } | null;
+  aiGenerated?: boolean;
+  aiName?: string | null;
+  aiAvatarData?: string | null;
   body: string;
   imageData: string | null;
   imageName: string | null;
@@ -58,6 +64,9 @@ export type PublicMessage = {
   senderId: string;
   recipientId: string;
   senderGroup: { id: string; name: string; avatarData: string } | null;
+  aiGenerated?: boolean;
+  aiName?: string | null;
+  aiAvatarData?: string | null;
   body: string;
   imageData: string | null;
   imageName: string | null;
@@ -156,7 +165,10 @@ export function toPublicMessage(message: MessageRecord, reactions: MessageReacti
     scheduledAt: message.scheduled_at?.toISOString() ?? null,
     awaitingOnline: Boolean(message.awaiting_online),
     viewOnce: Boolean(message.view_once),
-    viewOnceSeenAt: message.view_once_seen_at?.toISOString() ?? null
+    viewOnceSeenAt: message.view_once_seen_at?.toISOString() ?? null,
+    aiGenerated: Boolean(message.ai_generated),
+    aiName: message.ai_name ?? null,
+    aiAvatarData: message.ai_avatar_data ?? null
   };
 }
 
@@ -203,6 +215,9 @@ export async function loadReplySnippets(replyIds: string[]): Promise<Map<string,
             name: row.sender_group_name ?? '',
             avatarData: row.sender_group_avatar_data ?? ''
           },
+      aiGenerated: Boolean(row.ai_generated),
+      aiName: row.ai_name ?? null,
+      aiAvatarData: row.ai_avatar_data ?? null,
       body: row.deleted_at ? '' : row.body,
       imageData: normalizeMediaItems(row)[0]?.dataUrl ?? null,
       imageName: normalizeMediaItems(row)[0]?.name ?? null,
@@ -831,7 +846,12 @@ export async function createMessage(
   senderGroup?: { id: string; name: string; avatarData: string } | null,
   mediaItems?: Array<{ dataUrl: string; name?: string | null; spoiler?: boolean }>,
   expiresInSeconds?: number | null,
-  options?: { scheduledAt?: Date | null; viewOnce?: boolean; awaitingOnline?: boolean }
+  options?: {
+    scheduledAt?: Date | null;
+    viewOnce?: boolean;
+    awaitingOnline?: boolean;
+    ai?: { generated?: boolean; name?: string | null; avatarData?: string | null };
+  }
 ) {
   // Parked "send when online" messages use a sentinel far-future timestamp so
   // every `scheduled_at IS NULL` filter hides them and the time sweeper never
@@ -842,10 +862,14 @@ export async function createMessage(
   const first = items[0];
   const result = await pool.query<MessageRecord>(
     `
-      INSERT INTO messages (id, sender_id, recipient_id, sender_group_id, sender_group_name, sender_group_avatar_data, body, image_data, image_name, image_spoiler, media_items, reply_to, expires_at, scheduled_at, view_once, awaiting_online)
+      INSERT INTO messages (
+        id, sender_id, recipient_id, sender_group_id, sender_group_name, sender_group_avatar_data,
+        body, image_data, image_name, image_spoiler, media_items, reply_to, expires_at, scheduled_at,
+        view_once, awaiting_online, ai_generated, ai_name, ai_avatar_data
+      )
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12,
         CASE WHEN $13::int IS NULL OR $13::int <= 0 THEN NULL ELSE NOW() + make_interval(secs => $13::int) END,
-        $14, $15, $16)
+        $14, $15, $16, $17, $18, $19)
       RETURNING *
     `,
     [
@@ -864,7 +888,10 @@ export async function createMessage(
       expiresInSeconds ?? null,
       scheduledAt,
       Boolean(options?.viewOnce),
-      Boolean(options?.awaitingOnline)
+      Boolean(options?.awaitingOnline),
+      Boolean(options?.ai?.generated),
+      options?.ai?.name ?? null,
+      options?.ai?.avatarData ?? null
     ]
   );
 
@@ -962,10 +989,25 @@ export async function sweepDueScheduledMessages(): Promise<MessageRecord[]> {
       WHERE scheduled_at IS NOT NULL
         AND scheduled_at <= NOW()
         AND deleted_at IS NULL
+        AND awaiting_online IS NOT TRUE
       RETURNING *
     `
   );
-  return result.rows;
+  const released = result.rows;
+  if (released.length === 0) return released;
+  await pool.query(
+    `
+      UPDATE messages m
+      SET expires_at = NOW() + make_interval(secs => cs.message_ttl_seconds)
+      FROM conversation_settings cs
+      WHERE m.id = ANY($1::uuid[])
+        AND cs.user_a = LEAST(m.sender_id, m.recipient_id)
+        AND cs.user_b = GREATEST(m.sender_id, m.recipient_id)
+        AND cs.message_ttl_seconds > 0
+    `,
+    [released.map((row) => row.id)]
+  );
+  return released;
 }
 
 // ── View-once media ────────────────────────────────────────────────────────

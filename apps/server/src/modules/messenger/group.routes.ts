@@ -7,7 +7,8 @@ import { createPoll, pollMarker, toPublicPoll } from './polls.js';
 import { resolveGameCommand } from './games.js';
 import { callGroq } from '../ai/groq.js';
 import { transcribeAudioDataUrl } from '../ai/transcribe.js';
-import { consumeAiQuota } from '../../db/ai-quota.js';
+import { consumeAiQuota, getAiQuotaStatus } from '../../db/ai-quota.js';
+import { getAiSettings } from '../../db/ai-settings.js';
 import { config } from '../../config.js';
 import { pool } from '../../db/pool.js';
 import {
@@ -27,6 +28,15 @@ import {
   createGroupInvite,
   deleteGroupInvite,
   incrementGroupInviteUse,
+  isInviteUsable,
+  reorderGroupRoles,
+  isGroupBanned,
+  listGroupBans,
+  banGroupMember,
+  unbanGroupMember,
+  setGroupMemberTimeout,
+  setGroupMemberNickname,
+  getGroupMemberTimeout,
   listGroupConversationPreviews,
   listGroupMessages,
   listThreadMessages,
@@ -72,7 +82,11 @@ import {
   updateGroupFolder,
   deleteGroupFolder,
   listChannelPermissionOverrides,
-  replaceChannelPermissionOverrides
+  replaceChannelPermissionOverrides,
+  upsertChannelPermissionOverride,
+  deleteChannelPermissionOverride,
+  cloneGroupChannel,
+  parseChannelSettings
 } from '../../db/groups.js';
 import type { GroupMessageRecord, PublicGroupMessage } from '../../db/groups.js';
 import {
@@ -124,17 +138,38 @@ const updateGroupSchema = z.object({
         })
     })
     .nullable()
-    .optional()
+    .optional(),
+  ownerId: z.string().uuid().optional()
 });
 
 // Owner-tier permission set, granted to the group creator and the Owner role.
 const OWNER_PERMISSIONS = [
-  'ManageRoles', 'DeleteAnyMessage', 'ManageChannels', 'ManageInvites', 'KickMembers',
+  'Administrator', 'ManageServer', 'ManageRoles', 'ManageNicknames', 'DeleteAnyMessage', 'ManageChannels',
+  'ManageInvites', 'KickMembers', 'BanMembers', 'TimeoutMembers', 'MuteMembers',
   'MentionEveryone', 'ViewChannel', 'ManageChannel', 'ManagePermissions', 'ManageWebhooks',
   'CreateInvite', 'SendMessages', 'AttachFiles', 'AddReactions', 'UseExternalEmojis',
   'ManageMessages', 'PinMessages', 'BypassSlowmode', 'ReadMessageHistory',
-  'SendVoiceMessages', 'SendVideoCircles', 'CreatePolls'
+  'SendVoiceMessages', 'SendVideoCircles', 'CreatePolls', 'Connect', 'Speak', 'Stream',
+  'UseCamera', 'PrioritySpeaker', 'DeafenMembers', 'EmbedLinks', 'CreatePublicThreads',
+  'UseApplicationCommands', 'Mentionable'
 ];
+
+function hasPermission(perms: { isOwner: boolean; permissions: string[] } | null | undefined, name: string) {
+  if (!perms) return false;
+  if (perms.isOwner) return true;
+  if (perms.permissions.includes('Administrator')) return true;
+  return perms.permissions.includes(name);
+}
+
+function memberRank(roles: Array<{ id: string; position: number; isOwner?: boolean }>, roleIds: string[]) {
+  let rank = Number.POSITIVE_INFINITY;
+  for (const role of roles) {
+    if (!roleIds.includes(role.id)) continue;
+    if (role.isOwner) return -1;
+    rank = Math.min(rank, role.position);
+  }
+  return rank;
+}
 const FEED_PUBLISH_PERMISSIONS = ['ManageRoles', 'DeleteAnyMessage', 'ManageChannels', 'ManageInvites', 'KickMembers', 'ManageMessages'];
 
 const CUSTOM_EMOJI_TOKEN_RE = /<ce:[^:>]+:(?:https?:\/\/|data:image\/(?:png|gif|jpe?g|webp);base64,)[^\s<>]+>/i;
@@ -183,7 +218,7 @@ async function getMemberPermissions(groupId: string, userId: string) {
   if (member.owner_id === userId) return { isOwner: true, permissions: OWNER_PERMISSIONS };
   if (member.role === 'Owner') return { isOwner: true, permissions: OWNER_PERMISSIONS };
   const basePermissions = new Set<string>(member.everyone_permissions ?? []);
-  const roleIds = Array.from(new Set((member.role_ids?.length ? member.role_ids : member.role_id ? [member.role_id] : []).filter(Boolean)));
+  const roleIds = Array.from(new Set([member.role_id, ...(member.role_ids ?? [])].filter(Boolean)));
   if (roleIds.length === 0) return { isOwner: false, permissions: [...basePermissions] };
   const roleRows = await pool.query<{ is_owner: boolean; permissions: string[] }>(
     'SELECT gr.is_owner, gr.permissions FROM group_roles gr WHERE gr.group_id = $1 AND gr.id = ANY($2::uuid[])',
@@ -192,6 +227,9 @@ async function getMemberPermissions(groupId: string, userId: string) {
   const permissions = new Set<string>(basePermissions);
   for (const row of roleRows.rows) {
     for (const permission of row.permissions ?? []) permissions.add(permission);
+  }
+  if (permissions.has('Administrator')) {
+    for (const permission of OWNER_PERMISSIONS) permissions.add(permission);
   }
   return { isOwner: roleRows.rows.some((row) => row.is_owner), permissions: [...permissions] };
 }
@@ -209,6 +247,8 @@ function mapMember(m: Awaited<ReturnType<typeof listGroupMembers>>[number]) {
     role: m.role,
     roleId: m.role_id,
     roleIds: m.role_ids ?? [],
+    nickname: m.nickname ?? '',
+    timeoutUntil: m.timeout_until ? m.timeout_until.toISOString() : null,
     joinedAt: m.joined_at.toISOString()
   };
 }
@@ -222,6 +262,8 @@ async function mapInvite(invite: Awaited<ReturnType<typeof listGroupInvites>>[nu
     code: invite.code,
     creator: creator ? toPublicUserLite(creator) : null,
     usesCount: invite.uses_count,
+    maxUses: invite.max_uses ?? null,
+    expiresAt: invite.expires_at ? invite.expires_at.toISOString() : null,
     createdAt: invite.created_at.toISOString()
   };
 }
@@ -286,13 +328,18 @@ export async function visibleChannels(groupId: string, userId: string) {
 
 export async function visibleGroupConversationPreviews(userId: string) {
   const groups = await getUserGroups(userId);
-  const channelIds: string[] = [];
-  for (const group of groups) {
-    const visible = await visibleChannels(group.id, userId);
-    for (const channel of visible) {
-      if (channel.type === 'text' || channel.type === 'feed') channelIds.push(channel.id);
-    }
-  }
+  if (!groups.length) return [];
+  const channelResults = await Promise.all(
+    groups.map(async (group) => {
+      try {
+        const visible = await visibleChannels(group.id, userId);
+        return visible.filter((c) => c.type === 'text' || c.type === 'feed').map((c) => c.id);
+      } catch {
+        return [];
+      }
+    })
+  );
+  const channelIds = channelResults.flat();
   return listGroupConversationPreviews(userId, channelIds);
 }
 
@@ -343,7 +390,7 @@ function channelPermissionAlias(permission: string) {
   return [];
 }
 
-async function getChannelPermissionSet(groupId: string, channelId: string, userId: string) {
+export async function getChannelPermissionSet(groupId: string, channelId: string, userId: string) {
   const [memberPerms, roleIds, overrides] = await Promise.all([
     getMemberPermissions(groupId, userId),
     getMemberRoleIds(groupId, userId),
@@ -376,7 +423,7 @@ async function getChannelPermissionSet(groupId: string, channelId: string, userI
   return { isOwner: false, permissions };
 }
 
-function hasChannelPermission(
+export function hasChannelPermission(
   effective: Awaited<ReturnType<typeof getChannelPermissionSet>>,
   permission: string
 ) {
@@ -569,6 +616,17 @@ export function createGroupRouter(io: Server) {
     asyncHandler<AuthenticatedRequest>(async (req, res) => {
       const groupId = z.string().uuid().parse(req.params.groupId);
       const input = updateGroupSchema.parse(req.body);
+      const perms = await getMemberPermissions(groupId, req.auth.userId);
+      const canManageServer = hasPermission(perms, 'ManageServer');
+      if (!canManageServer) throw new HttpError(403, 'Only admins can update the group', 'GROUP_UPDATE_FORBIDDEN');
+      if (input.ownerId) {
+        if (perms?.isOwner !== true && req.auth.userId !== (await getGroupById(groupId))?.owner_id) {
+          throw new HttpError(403, 'Only the owner can transfer ownership', 'GROUP_TRANSFER_FORBIDDEN');
+        }
+        if (!(await isGroupMember(groupId, input.ownerId))) {
+          throw new HttpError(404, 'Member not found', 'GROUP_MEMBER_NOT_FOUND');
+        }
+      }
       const updated = await updateGroup(groupId, req.auth.userId, input);
 
       if (!updated) throw new HttpError(403, 'Only admins can update the group', 'GROUP_UPDATE_FORBIDDEN');
@@ -698,7 +756,14 @@ export function createGroupRouter(io: Server) {
       io.to(input.userId).emit('messenger:groupInvited', { group: toPublicGroup(group) });
 
       const members = await listGroupMembers(groupId);
-      res.json({ members: members.map(mapMember) });
+      const membersList = members.map(mapMember);
+      const publicUser = toPublicUser(user);
+      await Promise.all(members.map(async (m) => io.to(m.user_id).emit('messenger:groupMemberJoined', {
+        groupId,
+        user: publicUser,
+        members: membersList
+      })));
+      res.json({ members: membersList });
     })
   );
 
@@ -711,15 +776,32 @@ export function createGroupRouter(io: Server) {
 
       if (req.auth.userId !== targetUserId) {
         const perms = await getMemberPermissions(groupId, req.auth.userId);
-        if (!perms?.isOwner && !perms?.permissions?.includes('KickMembers'))
+        if (!hasPermission(perms, 'KickMembers'))
           throw new HttpError(403, 'Cannot remove member', 'GROUP_REMOVE_FORBIDDEN');
+        const group = await getGroupById(groupId);
+        if (group?.owner_id === targetUserId) throw new HttpError(403, 'Cannot kick the group owner', 'GROUP_KICK_OWNER');
+        const roles = await listGroupRoles(groupId);
+        const members = await listGroupMembers(groupId);
+        const actor = members.find((m) => m.user_id === req.auth.userId);
+        const target = members.find((m) => m.user_id === targetUserId);
+        const actorRank = perms?.isOwner ? -1 : memberRank(roles, actor?.role_ids ?? []);
+        const targetRank = memberRank(roles, target?.role_ids ?? []);
+        if (actorRank >= targetRank) throw new HttpError(403, 'Cannot kick a member with an equal or higher role', 'GROUP_HIERARCHY');
       }
 
-      const removed = await removeGroupMember(groupId, targetUserId, req.auth.userId);
+      const removed = await removeGroupMember(groupId, targetUserId);
       if (!removed) throw new HttpError(403, 'Cannot remove member', 'GROUP_REMOVE_FORBIDDEN');
 
       void logGroupAction(groupId, req.auth.userId, req.auth.userId === targetUserId ? 'member_left' : 'member_kicked', targetUserId);
       io.to(targetUserId).emit('messenger:groupRemoved', { groupId });
+
+      const remainingMembers = await listGroupMembers(groupId);
+      const remainingMembersList = remainingMembers.map(mapMember);
+      await Promise.all(remainingMembers.map(async (m) => io.to(m.user_id).emit('messenger:groupMemberLeft', {
+        groupId,
+        userId: targetUserId,
+        members: remainingMembersList
+      })));
 
       res.json({ success: true });
     })
@@ -742,7 +824,7 @@ export function createGroupRouter(io: Server) {
         isGroupMember(groupId, targetUserId)
       ]);
       if (!perms || !targetIsMember) throw new HttpError(404, 'Member not found', 'GROUP_MEMBER_NOT_FOUND');
-      const canManageRoles = perms?.isOwner || perms?.permissions?.includes('ManageRoles');
+      const canManageRoles = hasPermission(perms, 'ManageRoles');
       if (!canManageRoles) throw new HttpError(403, 'Not allowed to manage roles', 'ROLE_FORBIDDEN');
 
       const roleIdToValidate = input.roleId ?? input.addRoleId ?? input.removeRoleId ?? null;
@@ -807,7 +889,7 @@ export function createGroupRouter(io: Server) {
         getMemberPermissions(groupId, req.auth.userId),
         listGroupMembers(groupId)
       ]);
-      const canManageRoles = perms?.isOwner || perms?.permissions?.includes('ManageRoles');
+      const canManageRoles = hasPermission(perms, 'ManageRoles');
       if (!canManageRoles) throw new HttpError(403, 'Not allowed to manage roles', 'ROLE_FORBIDDEN');
 
       const currentMemberIds = new Set(currentMembers.map((member) => member.user_id));
@@ -845,7 +927,7 @@ export function createGroupRouter(io: Server) {
       const groupId = z.string().uuid().parse(req.params.groupId);
       const channelId = req.query.channelId === undefined ? undefined : z.string().uuid().nullable().parse(req.query.channelId || null);
       const perms = await getMemberPermissions(groupId, req.auth.userId);
-      const canManageInvites = perms?.isOwner || perms?.permissions?.includes('ManageInvites');
+      const canManageInvites = hasPermission(perms, 'ManageInvites');
       if (!canManageInvites) throw new HttpError(403, 'Not allowed to manage invites', 'INVITE_FORBIDDEN');
       const invites = await listGroupInvites(groupId, channelId);
       res.json({ invites: await Promise.all(invites.map(mapInvite)) });
@@ -857,16 +939,24 @@ export function createGroupRouter(io: Server) {
     requireAuth,
     asyncHandler<AuthenticatedRequest>(async (req, res) => {
       const groupId = z.string().uuid().parse(req.params.groupId);
-      const input = z.object({ channelId: z.string().uuid().nullable().optional() }).parse(req.body ?? {});
+      const input = z.object({
+        channelId: z.string().uuid().nullable().optional(),
+        maxUses: z.number().int().min(1).max(1000).nullable().optional(),
+        expiresInHours: z.number().int().min(1).max(24 * 30).nullable().optional()
+      }).parse(req.body ?? {});
       const perms = await getMemberPermissions(groupId, req.auth.userId);
-      const canManageInvites = perms?.isOwner || perms?.permissions?.includes('ManageInvites');
+      const canManageInvites = hasPermission(perms, 'ManageInvites');
       if (input.channelId) {
         const { effective } = await requireChannelPermission(groupId, input.channelId, req.auth.userId, 'CreateInvite', 'INVITE_FORBIDDEN');
         if (!canManageInvites && !hasChannelPermission(effective, 'CreateInvite')) throw new HttpError(403, 'Not allowed to manage invites', 'INVITE_FORBIDDEN');
       } else if (!canManageInvites) {
         throw new HttpError(403, 'Not allowed to manage invites', 'INVITE_FORBIDDEN');
       }
-      const invite = await createGroupInvite(groupId, req.auth.userId, input.channelId ?? null);
+      const expiresAt = input.expiresInHours ? new Date(Date.now() + input.expiresInHours * 3600_000) : null;
+      const invite = await createGroupInvite(groupId, req.auth.userId, input.channelId ?? null, {
+        maxUses: input.maxUses ?? null,
+        expiresAt
+      });
       res.json({ inviteCode: invite.code, invite: await mapInvite(invite) });
     })
   );
@@ -878,7 +968,7 @@ export function createGroupRouter(io: Server) {
       const groupId = z.string().uuid().parse(req.params.groupId);
       const inviteId = z.string().uuid().parse(req.params.inviteId);
       const perms = await getMemberPermissions(groupId, req.auth.userId);
-      const canManageInvites = perms?.isOwner || perms?.permissions?.includes('ManageInvites');
+      const canManageInvites = hasPermission(perms, 'ManageInvites');
       if (!canManageInvites) throw new HttpError(403, 'Not allowed to manage invites', 'INVITE_FORBIDDEN');
       const deleted = await deleteGroupInvite(groupId, inviteId);
       if (!deleted) throw new HttpError(404, 'Invite not found', 'INVITE_NOT_FOUND');
@@ -918,16 +1008,25 @@ export function createGroupRouter(io: Server) {
       const trackedInvite = await getGroupInviteByCode(inviteCode);
 
       if (!group) throw new HttpError(404, 'Invite link is invalid or expired', 'INVITE_INVALID');
+      if (trackedInvite && !isInviteUsable(trackedInvite)) throw new HttpError(404, 'Invite link is invalid or expired', 'INVITE_INVALID');
+      if (await isGroupBanned(group.id, req.auth.userId)) throw new HttpError(403, 'You are banned from this group', 'GROUP_BANNED');
 
-      await addGroupMember(group.id, req.auth.userId);
+      try {
+        await addGroupMember(group.id, req.auth.userId);
+      } catch (error) {
+        if (error instanceof Error && error.message === 'GROUP_BANNED') throw new HttpError(403, 'You are banned from this group', 'GROUP_BANNED');
+        throw error;
+      }
       if (trackedInvite) await incrementGroupInviteUse(inviteCode);
       io.to(req.auth.userId).emit('messenger:groupInvited', { group: toPublicGroup(group) });
 
       const members = await listGroupMembers(group.id);
+      const membersList = members.map(mapMember);
       const publicUser = toPublicUser(await findUserById(req.auth.userId));
       await Promise.all(members.map(async (m) => io.to(m.user_id).emit('messenger:groupMemberJoined', {
         groupId: group.id,
-        user: publicUser
+        user: publicUser,
+        members: membersList
       })));
 
       res.json({ group: toPublicGroup(group) });
@@ -945,6 +1044,7 @@ export function createGroupRouter(io: Server) {
       if (!group) throw new HttpError(404, 'Group not found', 'GROUP_NOT_FOUND');
 
       const wasMember = await isGroupMember(group.id, req.auth.userId);
+      if (!wasMember) throw new HttpError(403, 'Join this group with an invite link', 'GROUP_INVITE_REQUIRED');
       await addGroupMember(group.id, req.auth.userId);
       if (!wasMember) io.to(req.auth.userId).emit('messenger:groupInvited', { group: toPublicGroup(group) });
 
@@ -1035,16 +1135,98 @@ export function createGroupRouter(io: Server) {
         slowmodeSeconds: z.number().int().min(0).max(21600).optional(),
         nsfw: z.boolean().optional(),
         bitrate: z.number().int().min(8000).max(384000).optional(),
-        signPosts: z.boolean().optional()
+        signPosts: z.boolean().optional(),
+        settings: z.object({
+          privateChannel: z.boolean().optional(),
+          locked: z.boolean().optional(),
+          announcement: z.boolean().optional(),
+          defaultNotifications: z.enum(['all', 'mentions', 'nothing']).optional(),
+          videoQuality: z.enum(['auto', '720', '1080']).optional(),
+          rtcRegion: z.string().trim().max(40).optional(),
+          defaultAutoArchiveMinutes: z.number().int().optional(),
+          newMemberSlowmodeSeconds: z.number().int().min(0).max(604800).optional(),
+          disableReactions: z.boolean().optional(),
+          voiceMode: z.enum(['voice_activity', 'ptt']).optional(),
+          videoEnabled: z.boolean().optional(),
+          streamEnabled: z.boolean().optional(),
+          hideInactive: z.boolean().optional(),
+          defaultThreadSlowmodeSeconds: z.number().int().min(0).max(21600).optional()
+        }).optional()
       }).parse(req.body);
       if (!(await isGroupMember(groupId, req.auth.userId))) throw new HttpError(403, 'Not a member', 'NOT_GROUP_MEMBER');
       await requireChannelPermission(groupId, channelId, req.auth.userId, 'ManageChannel', 'CHANNEL_UPDATE_FORBIDDEN');
-      const updated = await updateGroupChannel(channelId, groupId, input);
+      const current = await getGroupChannelById(channelId);
+      if (!current || current.group_id !== groupId) throw new HttpError(404, 'Channel not found', 'CHANNEL_NOT_FOUND');
+      const nextSettings = input.settings
+        ? parseChannelSettings({ ...parseChannelSettings(current.settings), ...input.settings })
+        : undefined;
+      const updated = await updateGroupChannel(channelId, groupId, { ...input, settings: nextSettings });
       if (!updated) throw new HttpError(404, 'Channel not found', 'CHANNEL_NOT_FOUND');
-      const channel = toPublicGroupChannel(updated);
+      if (nextSettings) {
+        if (nextSettings.privateChannel) await upsertChannelPermissionOverride(channelId, '@everyone', 'ViewChannel', 'deny');
+        else if (input.settings?.privateChannel === false) await deleteChannelPermissionOverride(channelId, '@everyone', 'ViewChannel');
+        if (nextSettings.locked) await upsertChannelPermissionOverride(channelId, '@everyone', 'SendMessages', 'deny');
+        else if (input.settings?.locked === false) await deleteChannelPermissionOverride(channelId, '@everyone', 'SendMessages');
+      }
+      const gates = await getChannelRoleGates(groupId);
+      const channel = toPublicGroupChannel(updated, Array.from(gates.get(updated.id) ?? []));
       const members = await listGroupMembers(groupId);
       await Promise.all(members.map((m) => io.to(m.user_id).emit('messenger:groupChannelUpdated', { channel })));
       res.json({ channel });
+    })
+  );
+
+  router.get(
+    '/groups/:groupId/channels/:channelId/permissions/me',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      const channelId = z.string().uuid().parse(req.params.channelId);
+      if (!(await isGroupMember(groupId, req.auth.userId))) throw new HttpError(403, 'Not a member', 'NOT_GROUP_MEMBER');
+      const effective = await getChannelPermissionSet(groupId, channelId, req.auth.userId);
+      if (!effective) throw new HttpError(403, 'Not a member', 'NOT_GROUP_MEMBER');
+      res.json({ permissions: [...effective.permissions] });
+    })
+  );
+
+  router.post(
+    '/groups/:groupId/channels/:channelId/clone',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      const channelId = z.string().uuid().parse(req.params.channelId);
+      if (!(await isGroupMember(groupId, req.auth.userId))) throw new HttpError(403, 'Not a member', 'NOT_GROUP_MEMBER');
+      await requireChannelPermission(groupId, channelId, req.auth.userId, 'ManageChannel', 'CHANNEL_UPDATE_FORBIDDEN');
+      const source = await getGroupChannelById(channelId);
+      if (!source || source.group_id !== groupId) throw new HttpError(404, 'Channel not found', 'CHANNEL_NOT_FOUND');
+      if (source.type === 'feed' || source.feed_parent_channel_id) throw new HttpError(400, 'This channel cannot be cloned', 'CHANNEL_CLONE_FORBIDDEN');
+      const copyName = `${source.name}-copy`.replace(/[^a-z0-9_-]/gi, '-').toLowerCase().slice(0, 50);
+      const cloned = await cloneGroupChannel(source, copyName || 'copy');
+      const channel = toPublicGroupChannel(cloned);
+      const members = await listGroupMembers(groupId);
+      await Promise.all(members.map((m) => io.to(m.user_id).emit('messenger:groupChannelCreated', { channel, groupId })));
+      res.json({ channel });
+    })
+  );
+
+  router.post(
+    '/groups/:groupId/channels/:channelId/permissions/reset',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      const channelId = z.string().uuid().parse(req.params.channelId);
+      if (!(await isGroupMember(groupId, req.auth.userId))) throw new HttpError(403, 'Not a member', 'NOT_GROUP_MEMBER');
+      await requireChannelPermission(groupId, channelId, req.auth.userId, 'ManagePermissions', 'CHANNEL_PERMISSIONS_FORBIDDEN');
+      await replaceChannelPermissionOverrides(channelId, []);
+      await setChannelRoleGates(channelId, []);
+      const overrides = await listChannelPermissionOverrides(channelId);
+      res.json({
+        overrides: overrides.map((row) => ({
+          roleId: row.target_id,
+          permission: row.permission,
+          value: row.value
+        }))
+      });
     })
   );
 
@@ -1169,7 +1351,7 @@ export function createGroupRouter(io: Server) {
       if (!requester) throw new HttpError(403, 'Not a member', 'NOT_GROUP_MEMBER');
 
       const perms = await getMemberPermissions(groupId, req.auth.userId);
-      const canManageRoles = perms?.isOwner || perms?.permissions?.includes('ManageRoles');
+      const canManageRoles = hasPermission(perms, 'ManageRoles');
       if (!canManageRoles) throw new HttpError(403, 'Not allowed to manage roles', 'ROLE_FORBIDDEN');
 
       const updated = await setGroupDefaultRole(groupId, input.roleId);
@@ -1192,10 +1374,11 @@ export function createGroupRouter(io: Server) {
       if (!requester) throw new HttpError(403, 'Not a member', 'NOT_GROUP_MEMBER');
 
       const perms = await getMemberPermissions(groupId, req.auth.userId);
-      const canManageRoles = perms?.isOwner || perms?.permissions?.includes('ManageRoles');
+      const canManageRoles = hasPermission(perms, 'ManageRoles');
       if (!canManageRoles) throw new HttpError(403, 'Not allowed to manage roles', 'ROLE_FORBIDDEN');
 
       const role = toPublicGroupRole(await createGroupRole(groupId, input.name, input.color ?? '#8a8a8a', input.permissions ?? []));
+      void logGroupAction(groupId, req.auth.userId, 'role_created', role.name, { roleId: role.id, name: role.name });
       const members = await listGroupMembers(groupId);
       await Promise.all(members.map((m) => io.to(m.user_id).emit('messenger:groupRolesChanged', { groupId })));
       res.json({ role });
@@ -1209,10 +1392,11 @@ export function createGroupRouter(io: Server) {
       const groupId = z.string().uuid().parse(req.params.groupId);
       const input = z.object({ permissions: z.array(z.string()) }).parse(req.body);
       const perms = await getMemberPermissions(groupId, req.auth.userId);
-      const canManageRoles = perms?.isOwner || perms?.permissions?.includes('ManageRoles');
+      const canManageRoles = hasPermission(perms, 'ManageRoles');
       if (!canManageRoles) throw new HttpError(403, 'Not allowed to manage roles', 'ROLE_FORBIDDEN');
       const group = await updateGroupEveryonePermissions(groupId, input.permissions);
       if (!group) throw new HttpError(404, 'Group not found', 'GROUP_NOT_FOUND');
+      void logGroupAction(groupId, req.auth.userId, 'role_updated', '@everyone', { roleId: '@everyone', name: '@everyone' });
       const members = await listGroupMembers(groupId);
       await Promise.all(members.map((m) => io.to(m.user_id).emit('messenger:groupRolesChanged', { groupId })));
       res.json({ group: toPublicGroup(group) });
@@ -1225,12 +1409,12 @@ export function createGroupRouter(io: Server) {
     asyncHandler<AuthenticatedRequest>(async (req, res) => {
       const groupId = z.string().uuid().parse(req.params.groupId);
       const roleId = z.string().uuid().parse(req.params.roleId);
-      const input = z.object({ name: z.string().trim().min(1).max(50).optional(), color: z.string().max(20).optional(), permissions: z.array(z.string()).optional(), hoist: z.boolean().optional() }).parse(req.body);
+      const input = z.object({ name: z.string().trim().min(1).max(50).optional(), color: z.string().max(20).optional(), permissions: z.array(z.string()).optional(), hoist: z.boolean().optional(), position: z.number().int().min(0).max(10_000).optional() }).parse(req.body);
       const requester = (await listGroupMembers(groupId)).find((m) => m.user_id === req.auth.userId);
       if (!requester) throw new HttpError(403, 'Not a member', 'NOT_GROUP_MEMBER');
 
       const perms = await getMemberPermissions(groupId, req.auth.userId);
-      const canManageRoles = perms?.isOwner || perms?.permissions?.includes('ManageRoles');
+      const canManageRoles = hasPermission(perms, 'ManageRoles');
       if (!canManageRoles) throw new HttpError(403, 'Not allowed to manage roles', 'ROLE_FORBIDDEN');
 
       const targetRole = await pool.query('SELECT is_owner FROM group_roles WHERE id = $1 AND group_id = $2', [roleId, groupId]);
@@ -1239,6 +1423,7 @@ export function createGroupRouter(io: Server) {
 
       const role = await updateGroupRole(roleId, groupId, input);
       if (!role) throw new HttpError(404, 'Role not found', 'ROLE_NOT_FOUND');
+      void logGroupAction(groupId, req.auth.userId, 'role_updated', role.name, { roleId: role.id, name: role.name });
 
       const members = await listGroupMembers(groupId);
       await Promise.all(members.map((m) => io.to(m.user_id).emit('messenger:groupRolesChanged', { groupId })));
@@ -1256,14 +1441,148 @@ export function createGroupRouter(io: Server) {
       if (!requester) throw new HttpError(403, 'Not a member', 'NOT_GROUP_MEMBER');
 
       const perms = await getMemberPermissions(groupId, req.auth.userId);
-      const canManageRoles = perms?.isOwner || perms?.permissions?.includes('ManageRoles');
+      const canManageRoles = hasPermission(perms, 'ManageRoles');
       if (!canManageRoles) throw new HttpError(403, 'Not allowed to manage roles', 'ROLE_FORBIDDEN');
 
+      const existingRole = (await listGroupRoles(groupId)).find((role) => role.id === roleId);
       const deleted = await deleteGroupRole(roleId, groupId);
       if (!deleted) throw new HttpError(403, 'Cannot delete owner role', 'ROLE_DELETE_FORBIDDEN');
+      void logGroupAction(groupId, req.auth.userId, 'role_deleted', existingRole?.name ?? roleId, { roleId, name: existingRole?.name ?? '' });
       const members = await listGroupMembers(groupId);
       await Promise.all(members.map((m) => io.to(m.user_id).emit('messenger:groupRolesChanged', { groupId })));
       res.json({ success: true });
+    })
+  );
+
+  router.post(
+    '/groups/:groupId/roles/reorder',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      const input = z.object({ roleIds: z.array(z.string().uuid()).min(1).max(200) }).parse(req.body ?? {});
+      const perms = await getMemberPermissions(groupId, req.auth.userId);
+      if (!hasPermission(perms, 'ManageRoles')) throw new HttpError(403, 'Not allowed to manage roles', 'ROLE_FORBIDDEN');
+      const roles = (await reorderGroupRoles(groupId, input.roleIds)).map(toPublicGroupRole);
+      const members = await listGroupMembers(groupId);
+      await Promise.all(members.map((m) => io.to(m.user_id).emit('messenger:groupRolesChanged', { groupId })));
+      res.json({ roles });
+    })
+  );
+
+  router.post(
+    '/groups/:groupId/roles/:roleId/duplicate',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      const roleId = z.string().uuid().parse(req.params.roleId);
+      const perms = await getMemberPermissions(groupId, req.auth.userId);
+      if (!hasPermission(perms, 'ManageRoles')) throw new HttpError(403, 'Not allowed to manage roles', 'ROLE_FORBIDDEN');
+      const source = (await listGroupRoles(groupId)).find((role) => role.id === roleId);
+      if (!source || source.is_owner) throw new HttpError(404, 'Role not found', 'ROLE_NOT_FOUND');
+      const role = toPublicGroupRole(await createGroupRole(groupId, `${source.name} copy`.slice(0, 50), source.color, source.permissions ?? []));
+      if (source.hoist) await updateGroupRole(role.id, groupId, { hoist: true });
+      void logGroupAction(groupId, req.auth.userId, 'role_created', role.name, { roleId: role.id, name: role.name, duplicatedFrom: source.id });
+      const members = await listGroupMembers(groupId);
+      await Promise.all(members.map((m) => io.to(m.user_id).emit('messenger:groupRolesChanged', { groupId })));
+      res.json({ role });
+    })
+  );
+
+  router.get(
+    '/groups/:groupId/bans',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      const perms = await getMemberPermissions(groupId, req.auth.userId);
+      if (!hasPermission(perms, 'BanMembers')) throw new HttpError(403, 'Not allowed to ban members', 'BAN_FORBIDDEN');
+      const bans = await listGroupBans(groupId);
+      const users = Object.fromEntries((await Promise.all(bans.map(async (ban) => {
+        const user = await findUserById(ban.user_id);
+        return user ? [ban.user_id, toPublicUserLite(user)] as const : null;
+      }))).filter(Boolean) as Array<readonly [string, ReturnType<typeof toPublicUserLite>]>);
+      res.json({
+        bans: bans.map((ban) => ({
+          userId: ban.user_id,
+          user: users[ban.user_id] ?? null,
+          reason: ban.reason,
+          bannedBy: ban.banned_by,
+          createdAt: ban.created_at.toISOString()
+        }))
+      });
+    })
+  );
+
+  router.post(
+    '/groups/:groupId/members/:userId/ban',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      const targetUserId = z.string().uuid().parse(req.params.userId);
+      const input = z.object({ reason: z.string().trim().max(200).optional() }).parse(req.body ?? {});
+      const perms = await getMemberPermissions(groupId, req.auth.userId);
+      if (!hasPermission(perms, 'BanMembers')) throw new HttpError(403, 'Not allowed to ban members', 'BAN_FORBIDDEN');
+      const group = await getGroupById(groupId);
+      if (group?.owner_id === targetUserId || targetUserId === req.auth.userId) {
+        throw new HttpError(403, 'Cannot ban this member', 'BAN_FORBIDDEN');
+      }
+      await banGroupMember(groupId, targetUserId, req.auth.userId, input.reason ?? '');
+      void logGroupAction(groupId, req.auth.userId, 'member_banned', targetUserId, { reason: input.reason ?? '' });
+      io.to(targetUserId).emit('messenger:groupRemoved', { groupId });
+      res.json({ success: true });
+    })
+  );
+
+  router.delete(
+    '/groups/:groupId/members/:userId/ban',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      const targetUserId = z.string().uuid().parse(req.params.userId);
+      const perms = await getMemberPermissions(groupId, req.auth.userId);
+      if (!hasPermission(perms, 'BanMembers')) throw new HttpError(403, 'Not allowed to ban members', 'BAN_FORBIDDEN');
+      await unbanGroupMember(groupId, targetUserId);
+      void logGroupAction(groupId, req.auth.userId, 'member_unbanned', targetUserId);
+      res.json({ success: true });
+    })
+  );
+
+  router.patch(
+    '/groups/:groupId/members/:userId/timeout',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      const targetUserId = z.string().uuid().parse(req.params.userId);
+      const input = z.object({ minutes: z.number().int().min(0).max(60 * 24 * 28) }).parse(req.body ?? {});
+      const perms = await getMemberPermissions(groupId, req.auth.userId);
+      if (!hasPermission(perms, 'TimeoutMembers')) throw new HttpError(403, 'Not allowed to timeout members', 'TIMEOUT_FORBIDDEN');
+      const group = await getGroupById(groupId);
+      if (group?.owner_id === targetUserId) throw new HttpError(403, 'Cannot timeout the group owner', 'TIMEOUT_FORBIDDEN');
+      const until = input.minutes > 0 ? new Date(Date.now() + input.minutes * 60_000) : null;
+      await setGroupMemberTimeout(groupId, targetUserId, until);
+      void logGroupAction(groupId, req.auth.userId, until ? 'member_timeout' : 'member_timeout_clear', targetUserId, { minutes: input.minutes });
+      const members = await listGroupMembers(groupId);
+      const membersList = members.map(mapMember);
+      await Promise.all(members.map((m) => io.to(m.user_id).emit('messenger:groupMemberRoleChanged', { groupId, members: membersList })));
+      res.json({ members: membersList });
+    })
+  );
+
+  router.patch(
+    '/groups/:groupId/members/:userId/nickname',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      const targetUserId = z.string().uuid().parse(req.params.userId);
+      const input = z.object({ nickname: z.string().trim().max(32) }).parse(req.body ?? {});
+      const perms = await getMemberPermissions(groupId, req.auth.userId);
+      const self = req.auth.userId === targetUserId;
+      if (!self && !hasPermission(perms, 'ManageNicknames') && !hasPermission(perms, 'ManageServer')) {
+        throw new HttpError(403, 'Not allowed to change nicknames', 'NICKNAME_FORBIDDEN');
+      }
+      await setGroupMemberNickname(groupId, targetUserId, input.nickname);
+      const members = await listGroupMembers(groupId);
+      await Promise.all(members.map((m) => io.to(m.user_id).emit('messenger:groupMemberRoleChanged', { groupId, members: members.map(mapMember) })));
+      res.json({ members: members.map(mapMember) });
     })
   );
 
@@ -1637,7 +1956,35 @@ export function createGroupRouter(io: Server) {
       let senderCanMentionEveryoneInChannel = false;
       const { channel, effective } = await requireChannelPermission(groupId, input.channelId, req.auth.userId, 'SendMessages', 'GROUP_SEND_FORBIDDEN');
       await requireChannelPermission(groupId, input.channelId, req.auth.userId, 'ViewChannel', 'CHANNEL_VIEW_FORBIDDEN');
+      const timeoutUntil = await getGroupMemberTimeout(groupId, req.auth.userId);
+      if (timeoutUntil && timeoutUntil.getTime() > Date.now()) {
+        throw new HttpError(403, 'You are timed out in this group', 'GROUP_TIMEOUT');
+      }
       if (channel.type !== 'text' && channel.type !== 'feed') throw new HttpError(403, 'Cannot send text messages in this channel', 'GROUP_SEND_FORBIDDEN');
+      const channelSettings = parseChannelSettings(channel.settings);
+      if (channelSettings.announcement && !hasChannelPermission(effective, 'ManageMessages')) {
+        throw new HttpError(403, 'Only moderators can post in announcement channels', 'ANNOUNCEMENT_FORBIDDEN');
+      }
+      if (channelSettings.locked && !hasChannelPermission(effective, 'ManageMessages')) {
+        throw new HttpError(403, 'This channel is locked', 'CHANNEL_LOCKED');
+      }
+      if (channelSettings.newMemberSlowmodeSeconds > 0 && !hasChannelPermission(effective, 'BypassSlowmode')) {
+        const joined = await pool.query<{ joined_at: Date }>(
+          'SELECT joined_at FROM group_members WHERE group_id = $1 AND user_id = $2',
+          [groupId, req.auth.userId]
+        );
+        const joinedAt = joined.rows[0]?.joined_at?.getTime() ?? 0;
+        const waitMs = channelSettings.newMemberSlowmodeSeconds * 1000 - (Date.now() - joinedAt);
+        if (waitMs > 0) {
+          res.status(429).json({
+            code: 'NEW_MEMBER_SLOWMODE',
+            message: 'New members cannot send yet',
+            retryAfterMs: waitMs,
+            retryAfterSeconds: Math.ceil(waitMs / 1000)
+          });
+          return;
+        }
+      }
       if (channel.type === 'feed') {
         const perms = await getMemberPermissions(groupId, req.auth.userId);
         const canPublishFeed = Boolean(perms?.isOwner || perms?.permissions?.some((permission) => FEED_PUBLISH_PERMISSIONS.includes(permission)));
@@ -1756,6 +2103,124 @@ export function createGroupRouter(io: Server) {
         );
         await emitFeedLinkedMessages('messenger:groupMessageUpdated', groupId, message.id);
       })().catch(() => undefined);
+
+      // If replying to an AI-generated message, trigger the AI follow-up response
+      if (input.replyTo) {
+        void (async () => {
+          try {
+            const targetRes = await pool.query<GroupMessageRecord>(
+              'SELECT * FROM group_messages WHERE id = $1 AND group_id = $2 AND deleted_at IS NULL',
+              [input.replyTo, groupId]
+            );
+            const targetMsg = targetRes.rows[0];
+            if (!targetMsg || !targetMsg.ai_generated) return;
+
+            const replierUserId = req.auth.userId;
+            const replierUser = await findUserById(replierUserId);
+            if (!replierUser) return;
+
+            const isDev = replierUser.role === 'dev';
+            const quota = await getAiQuotaStatus(replierUserId, isDev);
+            if (!isDev && (quota.remaining ?? 0) <= 0) return;
+
+            const aiOwnerId = targetMsg.sender_id;
+            const aiOwner = await findUserById(aiOwnerId);
+            const aiOwnerNickname = aiOwner?.nickname || 'владелец';
+
+            const aiSettings = await getAiSettings(aiOwnerId);
+            const assistantName = targetMsg.ai_name || aiSettings.assistant_name?.trim() || 'NotAI';
+            const assistantAvatarData = targetMsg.ai_avatar_data || aiSettings.assistant_avatar_data || '';
+
+            const isOwner = replierUserId === aiOwnerId;
+            const ownerContextText = isOwner
+              ? `Твой создатель и единственный владелец — @${aiOwnerNickname}. Сейчас твой создатель @${aiOwnerNickname} обратился к тебе в ответ на твою предыдущую реплику.`
+              : `Твой создатель и владелец — @${aiOwnerNickname}. Ты — персональный ИИ-ассистент пользователя @${aiOwnerNickname}. Сейчас в канале #${channel.name} к тебе обратился другой участник @${replierUser.nickname} с ответом на твою реплику.`;
+
+            const recentMessages = await pool.query<GroupMessageRecord>(
+              `
+                SELECT sender_id, body, ai_generated, ai_name FROM group_messages
+                WHERE group_id = $1 AND channel_id = $2
+                  AND deleted_at IS NULL AND scheduled_at IS NULL
+                  AND created_at <= $3
+                ORDER BY created_at DESC
+                LIMIT 10
+              `,
+              [groupId, channel.id, message.created_at]
+            );
+            const conversationHistory = recentMessages.rows.reverse().map((m) => {
+              const author = m.ai_generated ? (m.ai_name || 'AI') : (m.sender_id === replierUserId ? replierUser.nickname : (m.sender_id === aiOwnerId ? aiOwnerNickname : 'member'));
+              return `${author}: ${m.body || '[attachment]'}`;
+            }).join('\n');
+
+            const systemPrompt = [
+              `You are ${assistantName}, a personal AI assistant participating in a group chat channel #${channel.name}.`,
+              ownerContextText,
+              `Persona: ${aiSettings.persona || 'friendly'}, Tone: ${aiSettings.tone || 'balanced'}, Response length: ${aiSettings.response_length || 'concise'}.`,
+              aiSettings.custom_instructions ? `Owner custom instructions: ${aiSettings.custom_instructions}` : '',
+              `You are replying to the message from @${replierUser.nickname}: "${message.body || '[attachment]'}"`,
+              `Recent channel context:\n${conversationHistory}`,
+              'STRICT RULES:',
+              `1. Your reply MUST begin with @${replierUser.nickname} followed by a space.`,
+              '2. Keep your answer natural, human, conversational, and direct (1 to 3 short sentences). Do not use markdown titles, asterisks for bold headers, or bullet points.',
+              '3. Match the language of the conversation (Russian if Russian, Ukrainian if Ukrainian, English if English, etc.).',
+              '4. Do not wrap the message in quotes.',
+              '5. Be aware of who your owner is and who is currently talking to you.'
+            ].filter(Boolean).join('\n');
+
+            const replyText = await callGroq(systemPrompt, [
+              { role: 'user', content: `Reply to @${replierUser.nickname}'s message: "${message.body || '[attachment]'}"` }
+            ]);
+
+            let cleanReply = replyText.trim();
+            if (!cleanReply.startsWith(`@${replierUser.nickname}`)) {
+              cleanReply = `@${replierUser.nickname} ${cleanReply.replace(/^@\S+\s*/, '')}`;
+            }
+
+            await consumeAiQuota(replierUserId, isDev);
+
+            const aiReplyMsg = await createGroupMessage(
+              aiOwnerId,
+              groupId,
+              channel.id,
+              cleanReply,
+              undefined,
+              message.id,
+              null,
+              undefined,
+              undefined,
+              message.thread_root_id ?? null,
+              null,
+              {
+                generated: true,
+                name: assistantName,
+                avatarData: assistantAvatarData
+              }
+            );
+            if (!aiReplyMsg) return;
+
+            const publicAiMsg = await toPublicGroupMessageEnriched(aiReplyMsg);
+            const memberIds = await visibleMemberIdsForChannel(groupId, channel.id);
+            for (const id of memberIds) io.to(id).emit('messenger:groupMessage', { message: publicAiMsg });
+
+            if (replierUserId !== aiOwnerId && memberIds.includes(replierUserId)) {
+              const group = await getGroupById(groupId);
+              io.to(replierUserId).emit('messenger:mention', {
+                kind: 'group',
+                messageId: publicAiMsg.id,
+                createdAt: publicAiMsg.createdAt,
+                sender: toPublicUser(aiOwner || replierUser),
+                body: publicAiMsg.body,
+                imageData: null,
+                imageName: null,
+                group: group ? toPublicGroup(group) : undefined,
+                channelId: channel.id
+              });
+            }
+          } catch (err) {
+            console.error('[AI Auto-Reply Error in Group]', err);
+          }
+        })().catch(() => undefined);
+      }
 
       let feedChatChannelId = channel.feed_chat_channel_id;
       if (channel.type === 'feed' && !feedChatChannelId) {
@@ -1980,6 +2445,10 @@ export function createGroupRouter(io: Server) {
       }
       await requireChannelPermission(groupMessage.group_id, groupMessage.channel_id, req.auth.userId, 'ViewChannel', 'CHANNEL_VIEW_FORBIDDEN');
       await requireChannelPermission(groupMessage.group_id, groupMessage.channel_id, req.auth.userId, 'AddReactions', 'GROUP_REACTION_FORBIDDEN');
+      const reactionChannel = await getGroupChannelById(groupMessage.channel_id);
+      if (reactionChannel && parseChannelSettings(reactionChannel.settings).disableReactions) {
+        throw new HttpError(403, 'Reactions are disabled in this channel', 'REACTIONS_DISABLED');
+      }
       if (CUSTOM_EMOJI_TOKEN_RE.test(emoji)) {
         await requireChannelPermission(groupMessage.group_id, groupMessage.channel_id, req.auth.userId, 'UseExternalEmojis', 'EXTERNAL_EMOJI_FORBIDDEN');
       }
@@ -2046,7 +2515,7 @@ export function createGroupRouter(io: Server) {
       const input = reactionRoleBindingsSchema.parse(req.body);
 
       const perms = await getMemberPermissions(groupId, req.auth.userId);
-      const canManageRoles = perms?.isOwner || perms?.permissions?.includes('ManageRoles');
+      const canManageRoles = hasPermission(perms, 'ManageRoles');
       if (!canManageRoles) throw new HttpError(403, 'Not allowed to manage roles', 'ROLE_FORBIDDEN');
 
       const existing = await pool.query('SELECT feed_source_id FROM group_messages WHERE id = $1 AND group_id = $2 AND deleted_at IS NULL', [messageId, groupId]);
@@ -2245,6 +2714,10 @@ export function createGroupRouter(io: Server) {
       // admin-only, but any member who can view the feed may reply in-thread.
       if (channel.type !== 'feed') {
         await requireChannelPermission(groupId, root.channel_id, req.auth.userId, 'SendMessages', 'GROUP_SEND_FORBIDDEN');
+        const threadPerms = await getChannelPermissionSet(groupId, root.channel_id, req.auth.userId);
+        if (!hasChannelPermission(threadPerms, 'CreatePublicThreads') && !hasChannelPermission(threadPerms, 'SendMessages')) {
+          throw new HttpError(403, 'Missing thread permission', 'CREATE_THREADS_FORBIDDEN');
+        }
       }
 
       const message = await createGroupMessage(
@@ -2256,6 +2729,139 @@ export function createGroupRouter(io: Server) {
       const publicMessage = toPublicGroupMessage(message);
       const memberIds = await visibleMemberIdsForChannel(groupId, root.channel_id);
       for (const id of memberIds) io.to(id).emit('messenger:groupThreadMessage', { message: publicMessage });
+      res.json({ message: publicMessage });
+    })
+  );
+
+  router.post(
+    '/groups/:groupId/messages/:messageId/ai-reply',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const groupId = z.string().uuid().parse(req.params.groupId);
+      const messageId = z.string().uuid().parse(req.params.messageId);
+
+      const user = await findUserById(req.auth.userId);
+      if (!user) throw new HttpError(404, 'User not found', 'USER_NOT_FOUND');
+
+      const isDev = user.role === 'dev';
+      const quota = await getAiQuotaStatus(req.auth.userId, isDev);
+      if (!isDev && (quota.remaining ?? 0) <= 0) {
+        throw new HttpError(429, 'Daily AI request quota reached', 'AI_QUOTA_EXCEEDED');
+      }
+
+      const msgResult = await pool.query<GroupMessageRecord>(
+        'SELECT * FROM group_messages WHERE id = $1 AND group_id = $2 AND deleted_at IS NULL AND scheduled_at IS NULL',
+        [messageId, groupId]
+      );
+      const targetMessage = msgResult.rows[0];
+      if (!targetMessage) throw new HttpError(404, 'Message not found', 'MESSAGE_NOT_FOUND');
+      if (!targetMessage.channel_id) throw new HttpError(400, 'Message has no channel', 'INVALID_CHANNEL');
+
+      const { channel } = await requireChannelPermission(groupId, targetMessage.channel_id, req.auth.userId, 'SendMessages', 'GROUP_SEND_FORBIDDEN');
+
+      const timeout = await getGroupMemberTimeout(groupId, req.auth.userId);
+      if (timeout && timeout.getTime() > Date.now()) {
+        throw new HttpError(403, 'You are currently timed out', 'MEMBER_TIMED_OUT');
+      }
+
+      const targetAuthor = await findUserById(targetMessage.sender_id);
+      const targetNickname = targetAuthor?.nickname || 'user';
+
+      const aiSettings = await getAiSettings(req.auth.userId);
+      const assistantName = aiSettings.assistant_name?.trim() || 'NotAI';
+      const assistantAvatarData = aiSettings.assistant_avatar_data || '';
+
+      const recentMessages = await pool.query<GroupMessageRecord>(
+        `
+          SELECT sender_id, body FROM group_messages
+          WHERE group_id = $1 AND channel_id = $2
+            AND deleted_at IS NULL AND scheduled_at IS NULL
+            AND created_at <= $3
+          ORDER BY created_at DESC
+          LIMIT 8
+        `,
+        [groupId, channel.id, targetMessage.created_at]
+      );
+      const conversationHistory = recentMessages.rows.reverse().map((m) => {
+        const isCurrent = m.sender_id === req.auth.userId;
+        return `${isCurrent ? user.nickname : (m.sender_id === targetMessage.sender_id ? targetNickname : 'member')}: ${m.body || '[attachment]'}`;
+      }).join('\n');
+
+      const isOwnerReplyingToSelf = user.id === targetMessage.sender_id;
+      const ownerContextText = isOwnerReplyingToSelf
+        ? `Твой создатель и единственный владелец — @${user.nickname}. Он обратился к тебе напрямую или просит ответить на его сообщение: "${targetMessage.body}".`
+        : `Твой создатель и владелец — @${user.nickname}. Ты его личный ИИ-ассистент по имени ${assistantName}. Твой владелец попросил тебя ответить в группе #${channel.name} на сообщение от @${targetNickname}: "${targetMessage.body}". Ты представляешь своего владельца @${user.nickname}, но общаешься напрямую с @${targetNickname}.`;
+
+      const targetIsAiText = targetMessage.ai_generated
+        ? `Сообщение, на которое ты отвечаешь, было отправлено ИИ-ассистентом (${targetMessage.ai_name || 'AI'}), принадлежащим @${targetNickname}.`
+        : '';
+
+      const systemPrompt = [
+        `You are ${assistantName}, a personal AI assistant participating in a group chat channel #${channel.name}.`,
+        ownerContextText,
+        targetIsAiText,
+        `Persona: ${aiSettings.persona || 'friendly'}, Tone: ${aiSettings.tone || 'balanced'}, Response length: ${aiSettings.response_length || 'concise'}.`,
+        aiSettings.custom_instructions ? `Owner custom instructions: ${aiSettings.custom_instructions}` : '',
+        `You are replying to the message from @${targetNickname}: "${targetMessage.body || '[attachment]'}"`,
+        `Recent channel context:\n${conversationHistory}`,
+        'STRICT RULES:',
+        `1. Your reply MUST begin with @${targetNickname} followed by a space.`,
+        '2. Keep your answer natural, human, conversational, and direct (1 to 3 short sentences). Do not use markdown titles, asterisks for bold headers, or bullet points.',
+        '3. Match the language of the conversation (Russian if Russian, Ukrainian if Ukrainian, English if English, etc.).',
+        '4. Do not wrap the message in quotes.',
+        '5. Clearly understand who your owner is and who you are speaking with.'
+      ].filter(Boolean).join('\n');
+
+      const replyText = await callGroq(systemPrompt, [
+        { role: 'user', content: `Reply to @${targetNickname}'s message: "${targetMessage.body || '[attachment]'}"` }
+      ]);
+
+      let cleanReply = replyText.trim();
+      if (!cleanReply.startsWith(`@${targetNickname}`)) {
+        cleanReply = `@${targetNickname} ${cleanReply.replace(/^@\S+\s*/, '')}`;
+      }
+
+      await consumeAiQuota(req.auth.userId, isDev);
+
+      const created = await createGroupMessage(
+        req.auth.userId,
+        groupId,
+        channel.id,
+        cleanReply,
+        undefined,
+        targetMessage.id,
+        null,
+        undefined,
+        undefined,
+        targetMessage.thread_root_id ?? null,
+        null,
+        {
+          generated: true,
+          name: assistantName,
+          avatarData: assistantAvatarData
+        }
+      );
+      if (!created) throw new HttpError(403, 'Cannot send message', 'GROUP_SEND_FORBIDDEN');
+
+      const publicMessage = await toPublicGroupMessageEnriched(created);
+      const memberIds = await visibleMemberIdsForChannel(groupId, channel.id);
+      for (const id of memberIds) io.to(id).emit('messenger:groupMessage', { message: publicMessage });
+
+      if (targetMessage.sender_id !== req.auth.userId && memberIds.includes(targetMessage.sender_id)) {
+        const group = await getGroupById(groupId);
+        io.to(targetMessage.sender_id).emit('messenger:mention', {
+          kind: 'group',
+          messageId: publicMessage.id,
+          createdAt: publicMessage.createdAt,
+          sender: toPublicUser(user),
+          body: publicMessage.body,
+          imageData: null,
+          imageName: null,
+          group: group ? toPublicGroup(group) : undefined,
+          channelId: channel.id
+        });
+      }
+
       res.json({ message: publicMessage });
     })
   );
@@ -2338,7 +2944,12 @@ export function createGroupRouter(io: Server) {
         .map((row) => `[${row.created_at.toISOString().slice(5, 16).replace('T', ' ')}] ${row.nickname}: ${row.body.slice(0, 400)}`)
         .join('\n');
 
-      const languageName = user.language_code === 'ru' ? 'Russian' : user.language_code === 'uk' ? 'Ukrainian' : 'English';
+      const languageName =
+        user.language_code === 'ru' ? 'Russian'
+        : user.language_code === 'uk' ? 'Ukrainian'
+        : user.language_code === 'zh' ? 'Simplified Chinese'
+        : user.language_code === 'zh-TW' ? 'Traditional Chinese'
+        : 'English';
       const summary = await callGroq(
         [
           'You summarize a group chat transcript for a member who was away.',

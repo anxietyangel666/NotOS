@@ -71,16 +71,31 @@ export const config = {
       ? 'https://server-production-23e35.up.railway.app'
       : `http://localhost:${readNumber('PORT', 4000)}`)
   ),
-  jwtSecret: process.env.JWT_SECRET ?? 'dev-jwt-secret-change-me',
-  authFileSecret: process.env.AUTH_FILE_SECRET ?? 'dev-auth-file-secret-change-me',
+  // Both secrets are hard-fail in production: a leaked-by-default JWT secret
+  // lets anyone forge a session token, and a default auth-file secret makes
+  // every user's encrypted auth file decryptable by anyone with the source.
+  jwtSecret: readRequiredInProduction('JWT_SECRET', 'dev-jwt-secret-change-me'),
+  authFileSecret: readRequiredInProduction('AUTH_FILE_SECRET', 'dev-auth-file-secret-change-me'),
   bcryptRounds: readNumber('BCRYPT_ROUNDS', 12),
-  // Single shared Groq API key for the built-in AI Chat app. Keep this on the
-  // server only so it never reaches the client.
-  groqApiKey: process.env.GROQ_API_KEY ?? 'your_groq_api_key_here',
-  groqModel: process.env.GROQ_MODEL ?? 'llama-3.3-70b-versatile',
-  // Separate (lighter/faster) model used ONLY for the chat "Translate" feature,
-  // so message translation does not depend on the main AI Chat model.
-  groqTranslateModel: process.env.GROQ_TRANSLATE_MODEL ?? 'llama-3.1-8b-instant',
+  // AI Provider Configuration (AnyModel)
+  // Provider ID: anymodel, Base URL: https://anymodel.org/v1, Model: gcli/grok-4.7
+  aiProvider: process.env.AI_PROVIDER ?? 'anymodel',
+  aiApiKey: process.env.ANYMODEL_API_KEY ?? process.env.AI_API_KEY ?? 'sk-dc9d4b7df36ba555-q1c1pw-21b7fd37',
+  aiBaseUrl: normalizeUrl(process.env.ANYMODEL_BASE_URL ?? process.env.AI_BASE_URL ?? 'https://anymodel.org/v1'),
+  aiChatEndpoint: `${normalizeUrl(process.env.ANYMODEL_BASE_URL ?? process.env.AI_BASE_URL ?? 'https://anymodel.org/v1')}/chat/completions`,
+  aiModel: process.env.ANYMODEL_MODEL ?? process.env.AI_MODEL ?? 'gcli/grok-4.7',
+  aiTranslateModel: process.env.ANYMODEL_TRANSLATE_MODEL ?? process.env.AI_TRANSLATE_MODEL ?? 'ag/gemini-3.7-flash-low',
+
+  // Backward compatibility getters
+  get groqApiKey(): string {
+    return this.aiApiKey;
+  },
+  get groqModel(): string {
+    return this.aiModel;
+  },
+  get groqTranslateModel(): string {
+    return this.aiTranslateModel;
+  },
   // Speech-to-text model for voice message transcription.
   groqWhisperModel: process.env.GROQ_WHISPER_MODEL ?? 'whisper-large-v3-turbo',
   // Daily AI request quota for regular users (Dev users are unlimited).

@@ -64,6 +64,9 @@ const GROUP_CACHE_MAX_MESSAGES = 30;
 type PersistedGroupCache = {
   channels: GroupChannel[];
   folders: GroupFolder[];
+  roles?: GroupRole[];
+  customCategories?: CustomCategory[];
+  members?: GroupMember[];
   activeChannel: string | null;
   messages: Record<string, GroupMessage[]>;
   savedAt: number;
@@ -91,9 +94,16 @@ export function hydrateGroupCache(userId: string, groupId: string): GroupDataCac
     const data = JSON.parse(raw) as PersistedGroupCache;
     entry.channels = Array.isArray(data.channels) ? data.channels : [];
     entry.folders = Array.isArray(data.folders) ? data.folders : [];
+    entry.roles = Array.isArray(data.roles) ? data.roles : [];
+    entry.customCategories = Array.isArray(data.customCategories) ? data.customCategories : [];
+    entry.members = Array.isArray(data.members) ? data.members : [];
     entry.activeChannel = data.activeChannel ?? null;
+    entry.bootstrapLoadedAt = data.savedAt ?? 0;
     for (const [channelId, messages] of Object.entries(data.messages ?? {})) {
-      if (Array.isArray(messages) && messages.length > 0) entry.messages.set(channelId, messages);
+      if (Array.isArray(messages) && messages.length > 0) {
+        entry.messages.set(channelId, messages);
+        entry.messageLoadedAt.set(channelId, data.savedAt ?? 0);
+      }
     }
   } catch { /* corrupt snapshot — cold start as before */ }
   return entry;
@@ -110,15 +120,42 @@ export function persistGroupCache(userId: string, groupId: string) {
         .filter((message) => !message.pending && !hasInlineDataMedia(message));
       if (list.length > 0) messages[entry.activeChannel] = list;
     }
-    const payload = JSON.stringify({
+
+    const liteMembers = (entry.members ?? []).slice(0, 60).map((m) => ({
+      ...m,
+      user: {
+        ...m.user,
+        wallpaper: ''
+      }
+    }));
+
+    const fullPayload = JSON.stringify({
       channels: entry.channels,
       folders: entry.folders,
+      roles: entry.roles,
+      customCategories: entry.customCategories,
+      members: liteMembers,
       activeChannel: entry.activeChannel,
       messages,
       savedAt: Date.now()
     } satisfies PersistedGroupCache);
-    if (payload.length <= GROUP_CACHE_MAX_BYTES) {
-      localStorage.setItem(groupCacheStorageKey(userId, groupId), payload);
+
+    if (fullPayload.length <= GROUP_CACHE_MAX_BYTES) {
+      localStorage.setItem(groupCacheStorageKey(userId, groupId), fullPayload);
+    } else {
+      const slimPayload = JSON.stringify({
+        channels: entry.channels,
+        folders: entry.folders,
+        roles: entry.roles,
+        customCategories: entry.customCategories,
+        members: [],
+        activeChannel: entry.activeChannel,
+        messages,
+        savedAt: Date.now()
+      } satisfies PersistedGroupCache);
+      if (slimPayload.length <= GROUP_CACHE_MAX_BYTES) {
+        localStorage.setItem(groupCacheStorageKey(userId, groupId), slimPayload);
+      }
     }
   } catch { /* quota exceeded — skip silently */ }
 }

@@ -357,7 +357,23 @@ export function DesktopWall({ token, language, owner, currentUser, onOpenProfile
         }}
       >
         <div className="emoji-input-shell">
-          <EmojiInlineInput ref={inputRef} className="emoji-inline-input" value={draft} maxLength={260} placeholder={t(language, 'wallPlaceholder')} onChange={(event) => setDraft(event.target.value)} previewSize={17} />
+          <EmojiInlineInput
+            ref={inputRef}
+            className="emoji-inline-input"
+            value={draft}
+            maxLength={260}
+            placeholder={t(language, 'wallPlaceholder')}
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' && !event.shiftKey) {
+                event.preventDefault();
+                if (draft.trim() && !draftContainsEmbed) {
+                  void publishMessage();
+                }
+              }
+            }}
+            previewSize={17}
+          />
           <div ref={emojiAnchorRef} className="emoji-host inline">
             <button
               className="emoji-toggle inline"
@@ -388,12 +404,6 @@ export function DesktopWall({ token, language, owner, currentUser, onOpenProfile
             ) : null}
           </div>
         </div>
-        <button
-          type="submit"
-          className="primary-action"
-          aria-label={t(language, 'sendMessage')}
-          disabled={!draft.trim() || draftContainsEmbed}
-        />
         {draftContainsEmbed ? <div className="desktop-wall-compose-warning">{t(language, 'wallEmbedsNotAllowed')}</div> : null}
       </form>
 

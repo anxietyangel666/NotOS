@@ -18,6 +18,9 @@ import { InviteEmbed } from './InviteEmbed';
 import { MessagePreviewText, MessageText, Twemoji } from './Twemoji';
 import { expandCustomEmojiShortcodes, extractSharedPack, stripPackLinks, hasPackLink } from '../utils/custom-emoji';
 import { recordRecentEmoji } from '../utils/recent-emoji';
+import { getWordAtOffset, getWordSuggestions, ignoreWord, fetchWordSuggestionsAsync, type WordAtOffsetInfo } from '../utils/spellcheck';
+
+export type ActiveGroupChannelInfo = { name: string; type: string };
 import { QUICK_REACTIONS, ReactionEmoji, ReplyQuote, ReplyComposerBar, ForwardedCard, MenuReplyIcon, MenuForwardIcon, MenuPinIcon, MenuDeleteIcon, MenuEditIcon, MenuTranslateIcon, MenuCopyIcon, MenuCutIcon, MenuPasteIcon } from './MessageActions';
 import { parseForward } from '../utils/forward';
 import type { MessageReplySnippet } from '../api/types';
@@ -119,21 +122,30 @@ type GroupChatViewProps = {
   onForwardMessage?: (seed: { body: string; senderName: string; sourceId: string; imageData: string | null; imageName: string | null; imageSpoiler: boolean }) => void;
   deletedForwardSourceIds?: Set<string>;
   onForwardSourceDeleted?: (sourceId: string) => void;
+  onVoiceStateReport?: (state: { groupId: string; groupName: string; groupAvatar: string; rawGroup: Group; channelId: string; channelName: string; voiceStageOpen: boolean } | null) => void;
+  onActiveChannelNameChange?: (channelName: string | null) => void;
+  onActiveChannelInfoChange?: (channel: ActiveGroupChannelInfo | null) => void;
 };
 
-export function GroupChatView({ token, language, currentUser, group, initialChannelId = null, initialChannelRequestId = 0, onlineUserIds = [], presenceStatuses = {}, onClose, onViewProfile, onCloseProfile, onViewDesktop, onGroupJoin, memberGroupIds, onGroupNavigate, onGroupLeft, voiceRoom, onOpenWatchTogether, onForwardMessage, deletedForwardSourceIds: externalDeletedForwardSourceIds, onForwardSourceDeleted }: GroupChatViewProps) {
+export function GroupChatView({ token, language, currentUser, group, initialChannelId = null, initialChannelRequestId = 0, onlineUserIds = [], presenceStatuses = {}, onClose, onViewProfile, onCloseProfile, onViewDesktop, onGroupJoin, memberGroupIds, onGroupNavigate, onGroupLeft, voiceRoom, onOpenWatchTogether, onForwardMessage, deletedForwardSourceIds: externalDeletedForwardSourceIds, onForwardSourceDeleted, onVoiceStateReport, onActiveChannelNameChange, onActiveChannelInfoChange }: GroupChatViewProps) {
   const selfStatus = useUserStatus();
   // Reuse the single session-wide socket (SocketProvider) instead of opening a
   // second connection. A duplicate connection caused presence churn: opening a
   // group made other online members briefly flip to "offline" everywhere.
   const sharedSocket = useSocket();
-  const [members, setMembers] = useState<GroupMember[]>([]);
+  const initialCache = useMemo(() => hydrateGroupCache(currentUser.id, group.id), [currentUser.id, group.id]);
+  const initialActiveChannel = initialCache.activeChannel && initialCache.channels.some((c) => c.id === initialCache.activeChannel)
+    ? initialCache.activeChannel
+    : initialCache.channels.find((c) => c.type !== 'voice')?.id ?? initialCache.channels[0]?.id ?? null;
+  const initialMessages = initialActiveChannel ? (initialCache.messages.get(initialActiveChannel) ?? []) : [];
+
+  const [members, setMembers] = useState<GroupMember[]>(() => initialCache.members);
   const [groupInvites, setGroupInvites] = useState<GroupInvite[]>([]);
-  const [roles, setRoles] = useState<GroupRole[]>([]);
-  const [channels, setChannels] = useState<GroupChannel[]>([]);
-  const [activeChannel, setActiveChannel] = useState<string | null>(null);
-  const [messages, setMessages] = useState<GroupMessage[]>([]);
-  const [threadLoading, setThreadLoading] = useState(false);
+  const [roles, setRoles] = useState<GroupRole[]>(() => initialCache.roles);
+  const [channels, setChannels] = useState<GroupChannel[]>(() => initialCache.channels);
+  const [activeChannel, setActiveChannel] = useState<string | null>(() => initialActiveChannel);
+  const [messages, setMessages] = useState<GroupMessage[]>(() => initialMessages);
+  const [threadLoading, setThreadLoading] = useState(() => initialCache.channels.length === 0);
   // Pagination: whether an older page of the open channel exists, plus guards
   // so scroll-up only triggers one "load older" request at a time.
   const [hasMoreMessages, setHasMoreMessages] = useState(false);
@@ -297,7 +309,7 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
   // When the user is connected to a voice channel and clicks it again, the
   // voice stage (chat + screen share) opens inline above the chat.
   const [voiceStageOpen, setVoiceStageOpen] = useState(false);
-  const [folders, setFolders] = useState<GroupFolder[]>([]);
+  const [folders, setFolders] = useState<GroupFolder[]>(() => initialCache.folders);
   const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set());
   const [showCreateFolder, setShowCreateFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
@@ -335,13 +347,13 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
   // Server profile customization: admin-defined categories, the caller's
   // selected option ids, whether a required onboarding flow is pending, and
   // whether the member-facing "Настроить профиль" modal is open.
-  const [customCategories, setCustomCategories] = useState<CustomCategory[]>([]);
-  const [selectedOptionIds, setSelectedOptionIds] = useState<string[]>([]);
+  const [customCategories, setCustomCategories] = useState<CustomCategory[]>(() => initialCache.customCategories);
+  const [selectedOptionIds, setSelectedOptionIds] = useState<string[]>(() => initialCache.selectedOptionIds);
   // Monotonic counter of customization toggles in flight. Used to ignore stale
   // out-of-order server responses so rapid clicking doesn't make the checkmark
   // flicker on/off.
   const toggleSeqRef = useRef(0);
-  const [onboardingRequired, setOnboardingRequired] = useState(false);
+  const [onboardingRequired, setOnboardingRequired] = useState(() => initialCache.onboardingRequired);
   const [customizeOpen, setCustomizeOpen] = useState(false);
   // Bumped to shake the save bar (red) when the user tries to close settings
   // while there are unsaved changes in the role editor.
@@ -641,7 +653,7 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
   const inputRef = useRef<EmojiInlineInputHandle | null>(null);
   const consumedInitialChannelRef = useRef<string | null>(null);
   // Right-click menu for the channel composer.
-  const [composerMenu, setComposerMenu] = useState<{ x: number; y: number; start: number; end: number; hasSelection: boolean } | null>(null);
+  const [composerMenu, setComposerMenu] = useState<{ x: number; y: number; start: number; end: number; hasSelection: boolean; wordInfo?: WordAtOffsetInfo | null } | null>(null);
   const [imageCaptionMenu, setImageCaptionMenu] = useState<{ x: number; y: number } | null>(null);
   const composerMenuRef = useRef<HTMLDivElement | null>(null);
   // Clamp the composer menu inside the viewport so it never spills off-screen.
@@ -714,8 +726,42 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
   // Whether to show the dedicated voice view (stage + ephemeral chat) instead of
   // the text channel thread.
   const showVoiceView = Boolean(voiceStageOpen && voiceConnectedChannel);
+
+  useEffect(() => {
+    if (!onVoiceStateReport) return;
+    if (voiceConnectedChannel && group) {
+      onVoiceStateReport({
+        groupId: group.id,
+        groupName: group.name,
+        groupAvatar: group.avatarData,
+        rawGroup: group,
+        channelId: voiceConnectedChannel.id,
+        channelName: voiceConnectedChannel.name,
+        voiceStageOpen: showVoiceView
+      });
+    } else if (!voiceRoom?.activeChannelId) {
+      onVoiceStateReport(null);
+    }
+  }, [voiceConnectedChannel, group, showVoiceView, voiceRoom?.activeChannelId, onVoiceStateReport]);
+
   const activeChannelObj = channels.find((c) => c.id === activeChannel) ?? null;
   const activeChannelName = activeChannelObj?.name ?? 'general';
+
+  useEffect(() => {
+    const currentInfo: ActiveGroupChannelInfo | null = showVoiceView && voiceConnectedChannel
+      ? { name: voiceConnectedChannel.name, type: 'voice' }
+      : (activeChannelObj ? { name: activeChannelName, type: activeChannelObj.type || 'text' } : null);
+    onActiveChannelNameChange?.(currentInfo ? currentInfo.name : null);
+    onActiveChannelInfoChange?.(currentInfo);
+  }, [showVoiceView, voiceConnectedChannel, activeChannelObj, activeChannelName, onActiveChannelNameChange, onActiveChannelInfoChange]);
+
+  useEffect(() => {
+    return () => {
+      onActiveChannelNameChange?.(null);
+      onActiveChannelInfoChange?.(null);
+    };
+  }, [onActiveChannelNameChange, onActiveChannelInfoChange]);
+
   const activeChannelTopic = activeChannelObj?.type === 'text' || activeChannelObj?.type === 'feed' ? (activeChannelObj.topic ?? '').trim() : '';
   const groupSearchLabel = t(language, 'search');
   const groupMembersLabel = t(language, 'members');
@@ -1276,9 +1322,13 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
     if (!initialChannelId) return;
     const requestKey = `${initialChannelRequestId}:${initialChannelId}`;
     if (consumedInitialChannelRef.current === requestKey) return;
-    if (!channels.some((channel) => channel.id === initialChannelId)) return;
+    const targetChannel = channels.find((channel) => channel.id === initialChannelId);
+    if (!targetChannel) return;
     consumedInitialChannelRef.current = requestKey;
     setActiveChannel(initialChannelId);
+    if (targetChannel.type === 'voice') {
+      setVoiceStageOpen(true);
+    }
   }, [channels, initialChannelId, initialChannelRequestId]);
 
   // Listen for real-time group messages via the shared session socket.
@@ -2292,7 +2342,73 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
     const end = selection.end;
     const hasSelection = end > start && Boolean(draft.slice(start, end));
     event.preventDefault();
-    setComposerMenu({ x: event.clientX, y: event.clientY, start, end, hasSelection });
+    const targetEl = event.target as HTMLElement | null;
+    const spellingSpan = targetEl?.closest?.('.spelling-error') as HTMLElement | null;
+    let wordInfo: WordAtOffsetInfo | null = null;
+    if (spellingSpan) {
+      const spanWord = spellingSpan.dataset.spellingWord || spellingSpan.textContent || '';
+      if (spanWord) {
+        const offset = inputRef.current?.getOffsetAtPoint?.(event.clientX, event.clientY) ?? start;
+        wordInfo = getWordAtOffset(draft, offset);
+        if (!wordInfo || wordInfo.word !== spanWord) {
+          const idx = draft.indexOf(spanWord, Math.max(0, offset - spanWord.length));
+          const foundStart = idx >= 0 ? idx : draft.indexOf(spanWord);
+          if (foundStart >= 0) {
+            wordInfo = {
+              word: spanWord,
+              start: foundStart,
+              end: foundStart + spanWord.length,
+              isMisspelled: true,
+              suggestions: getWordSuggestions(spanWord)
+            };
+          }
+        }
+      }
+    } else {
+      const offset = inputRef.current?.getOffsetAtPoint?.(event.clientX, event.clientY) ?? start;
+      wordInfo = getWordAtOffset(draft, offset);
+    }
+
+    if (wordInfo && (wordInfo.isMisspelled || wordInfo.suggestions.length > 0)) {
+      const targetWord = wordInfo.word;
+      if (wordInfo.suggestions.length === 0) {
+        void fetchWordSuggestionsAsync(targetWord).then((suggs) => {
+          if (suggs.length > 0) {
+            setComposerMenu((prev) => {
+              if (!prev || !prev.wordInfo || prev.wordInfo.word !== targetWord) return prev;
+              return {
+                ...prev,
+                wordInfo: {
+                  ...prev.wordInfo,
+                  isMisspelled: true,
+                  suggestions: suggs
+                }
+              };
+            });
+          }
+        });
+      }
+    }
+
+    setComposerMenu({ x: event.clientX, y: event.clientY, start, end, hasSelection, wordInfo });
+  }
+
+  function applySpellingSuggestion(suggestion: string) {
+    const info = composerMenu?.wordInfo;
+    setComposerMenu(null);
+    if (!info) return;
+    const next = draft.slice(0, info.start) + suggestion + draft.slice(info.end);
+    updateGroupDraft(next);
+    window.setTimeout(() => {
+      const caret = info.start + suggestion.length;
+      inputRef.current?.setSelection(caret);
+      inputRef.current?.focus();
+    }, 0);
+  }
+
+  function handleIgnoreWord(word: string) {
+    setComposerMenu(null);
+    ignoreWord(word);
   }
 
   function openImageCaptionMenu(event: MouseEvent<HTMLElement>) {
@@ -3480,14 +3596,22 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
         <header className="group-chat-header">
           {showVoiceView ? (
             <h3 className="group-chat-title">
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" style={{ verticalAlign: 'middle', marginRight: 6 }}><path d="M3 10v4h4l5 5V5L7 10H3z"/></svg>
-              {voiceConnectedChannel!.name}
+              <span className="group-chat-group-name" title={group.name}>{group.name}</span>
+              <span className="group-chat-title-sep">—</span>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style={{ verticalAlign: 'middle', marginRight: 4, flexShrink: 0 }}><path d="M3 10v4h4l5 5V5L7 10H3zm13.5 2a4.5 4.5 0 0 0-2.5-4v8a4.5 4.5 0 0 0 2.5-4zm-2.5-9v2a7 7 0 0 1 0 14v2a9 9 0 0 0 0-18z"/></svg>
+              <span className="group-chat-name">{voiceConnectedChannel?.name ?? activeChannelName}</span>
             </h3>
           ) : (
             <h3 className="group-chat-title">
-              {activeChannelObj?.type === 'feed'
-                ? <span className="group-channel-feed-icon group-chat-title-feed" aria-hidden="true" />
-                : <span className="group-chat-title-hashtag" aria-hidden="true" />}
+              <span className="group-chat-group-name" title={group.name}>{group.name}</span>
+              <span className="group-chat-title-sep">—</span>
+              {activeChannelObj?.type === 'voice' ? (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style={{ verticalAlign: 'middle', marginRight: 4, flexShrink: 0 }}><path d="M3 10v4h4l5 5V5L7 10H3zm13.5 2a4.5 4.5 0 0 0-2.5-4v8a4.5 4.5 0 0 0 2.5-4zm-2.5-9v2a7 7 0 0 1 0 14v2a9 9 0 0 0 0-18z"/></svg>
+              ) : activeChannelObj?.type === 'feed' ? (
+                <span className="group-channel-feed-icon group-chat-title-feed" aria-hidden="true" />
+              ) : (
+                <span className="group-chat-title-hashtag" aria-hidden="true" />
+              )}
               <span className="group-chat-name">{activeChannelName}</span>
               {activeChannelTopic ? <span className="group-chat-topic">{activeChannelTopic}</span> : null}
             </h3>
@@ -4318,7 +4442,7 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
               ))}
             </div>
           ) : null}
-          <div className="emoji-input-shell messenger-emoji-input">
+          <div className="messenger-compose-row">
             <button className="emoji-toggle inline messenger-attach-inline" type="button" aria-label={t(language, 'imageMessage')}
               disabled={Boolean(editingMessage) || !canAttachInActiveChannel || activeNsfwBlocked}
               onMouseDown={(event) => event.stopPropagation()}
@@ -4341,67 +4465,65 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
                 <img src={sendAsGroupIdentity ? group.avatarData : currentUser.avatarData} alt="" draggable={false} />
               </button>
             ) : null}
-            <EmojiInlineInput ref={inputRef} className="emoji-inline-input messenger-input" value={draft}
-              placeholder={!canSendInActiveChannel
-                ? (activeChannelObj?.type === 'feed'
-                  ? t(language, 'feedAdminsOnly')
-                  : (language === 'ru' ? 'Нет прав писать в этот канал' : 'You cannot send messages here'))
-                : activeChannelObj?.type === 'feed'
-                  ? t(language, 'feedWritePost')
-                  : `# ${activeChannelName}`}
-              disabled={!canSendInActiveChannel || activeNsfwBlocked || activeSlowmodeRemainingMs > 0}
-              mentionUsers={members.map((member) => member.user)}
-              mentionRoles={mentionableRoles.map((role) => ({ id: role.id, name: role.name, color: role.color }))}
-              mentionEveryone={canMentionEveryone && !activeNsfwBlocked}
-              onChange={(event) => updateGroupDraft(event.target.value)} onPaste={handleComposerPaste} onContextMenu={openComposerMenu} />
-            {/* GIF + emoji buttons share the same anchor host so the picker's
-                outside-pointerdown close handler does not auto-close on a second
-                click (which previously caused the GIF panel to close then instantly
-                re-open). Toggle is deterministic: same tab + open => close. */}
-            <div ref={groupEmojiAnchorRef} className="emoji-host inline">
-              <VoiceRecorderControl
-                language={language}
-                disabled={Boolean(editingMessage || pendingImages.length > 0 || !canSendInActiveChannel || activeNsfwBlocked || activeSlowmodeRemainingMs > 0)}
-                voiceDisabled={!canSendVoiceMessagesInActiveChannel}
-                videoDisabled={!canSendVideoCirclesInActiveChannel}
-                onSend={(recording) => sendMessage({ ...recording, spoiler: false })}
-              />
-              <button
-                className="emoji-toggle inline chat-gif-toggle"
-                type="button"
-                aria-label="GIF"
-                disabled={!canAttachInActiveChannel || activeNsfwBlocked || activeSlowmodeRemainingMs > 0}
-                onMouseDown={(event) => event.stopPropagation()}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  if (emojiOpen && pickerTab === 'gif') {
-                    setEmojiOpen(false);
-                  } else {
-                    setPickerTab('gif');
-                    setEmojiOpen(true);
-                  }
-                }}
-              >
-                <GifIcon />
-              </button>
-              <button
-                className="emoji-toggle inline"
-                type="button"
-                aria-label={t(language, 'emoji')}
+            <div className="messenger-input-shell">
+              <EmojiInlineInput ref={inputRef} className="emoji-inline-input messenger-chat-inline-input" value={draft}
+                placeholder={!canSendInActiveChannel
+                  ? (activeChannelObj?.type === 'feed'
+                    ? t(language, 'feedAdminsOnly')
+                    : (language === 'ru' ? 'Нет прав писать в этот канал' : 'You cannot send messages here'))
+                  : activeChannelObj?.type === 'feed'
+                    ? t(language, 'feedWritePost')
+                    : `# ${activeChannelName}`}
                 disabled={!canSendInActiveChannel || activeNsfwBlocked || activeSlowmodeRemainingMs > 0}
-                onMouseDown={(event) => event.stopPropagation()}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  if (emojiOpen && pickerTab === 'emoji') {
-                    setEmojiOpen(false);
-                  } else {
-                    setPickerTab('emoji');
-                    setEmojiOpen(true);
-                  }
-                }}>
-                <EmojiToggleIcon />
-              </button>
-              {emojiOpen ? <EmojiPicker language={language} enlarged initialTab={pickerTab} anchorRef={groupEmojiAnchorRef} placement="top-end" onSelect={insertEmoji} onSelectGif={(gif) => void sendGif(gif)} onClose={() => setEmojiOpen(false)} token={token} currentUser={currentUser} /> : null}
+                mentionUsers={members.map((member) => member.user)}
+                mentionRoles={mentionableRoles.map((role) => ({ id: role.id, name: role.name, color: role.color }))}
+                mentionEveryone={canMentionEveryone && !activeNsfwBlocked}
+                onChange={(event) => updateGroupDraft(event.target.value)} onPaste={handleComposerPaste} onContextMenu={openComposerMenu} />
+              <div ref={groupEmojiAnchorRef} className="messenger-input-actions">
+                <VoiceRecorderControl
+                  language={language}
+                  disabled={Boolean(editingMessage || pendingImages.length > 0 || !canSendInActiveChannel || activeNsfwBlocked || activeSlowmodeRemainingMs > 0)}
+                  voiceDisabled={!canSendVoiceMessagesInActiveChannel}
+                  videoDisabled={!canSendVideoCirclesInActiveChannel}
+                  onSend={(recording) => sendMessage({ ...recording, spoiler: false })}
+                />
+                <button
+                  className="emoji-toggle inline chat-gif-toggle"
+                  type="button"
+                  aria-label="GIF"
+                  disabled={!canAttachInActiveChannel || activeNsfwBlocked || activeSlowmodeRemainingMs > 0}
+                  onMouseDown={(event) => event.stopPropagation()}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    if (emojiOpen && pickerTab === 'gif') {
+                      setEmojiOpen(false);
+                    } else {
+                      setPickerTab('gif');
+                      setEmojiOpen(true);
+                    }
+                  }}
+                >
+                  <GifIcon />
+                </button>
+                <button
+                  className="emoji-toggle inline"
+                  type="button"
+                  aria-label={t(language, 'emoji')}
+                  disabled={!canSendInActiveChannel || activeNsfwBlocked || activeSlowmodeRemainingMs > 0}
+                  onMouseDown={(event) => event.stopPropagation()}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    if (emojiOpen && pickerTab === 'emoji') {
+                      setEmojiOpen(false);
+                    } else {
+                      setPickerTab('emoji');
+                      setEmojiOpen(true);
+                    }
+                  }}>
+                  <EmojiToggleIcon />
+                </button>
+                {emojiOpen ? <EmojiPicker language={language} enlarged initialTab={pickerTab} anchorRef={groupEmojiAnchorRef} placement="top-end" onSelect={insertEmoji} onSelectGif={(gif) => void sendGif(gif)} onClose={() => setEmojiOpen(false)} token={token} currentUser={currentUser} /> : null}
+              </div>
             </div>
           </div>
           {/* Submit on Enter; hidden submit keeps form submission working without a send button. */}
@@ -4410,6 +4532,39 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
 
         {composerMenu ? createPortal(
           <div ref={composerMenuRef} className="context-menu" style={{ left: composerMenuPos.x, top: composerMenuPos.y }} onMouseDown={(event) => event.stopPropagation()}>
+            {composerMenu.wordInfo && (composerMenu.wordInfo.isMisspelled || composerMenu.wordInfo.suggestions.length > 0) ? (
+              <>
+                <div className={`context-submenu-host ${composerMenu.x > (typeof window !== 'undefined' ? window.innerWidth : 1200) - 300 ? 'flip-left' : ''}`}>
+                  <button type="button" className="context-menu-action">
+                    <span className="context-menu-action-text">{language === 'ru' ? 'Правописание' : language === 'uk' ? 'Правопис' : 'Spelling'}</span>
+                    <span style={{ opacity: 0.6, fontSize: 13, marginLeft: 8 }}>›</span>
+                  </button>
+                  <div className="context-submenu">
+                    <button type="button" className="context-menu-action" onClick={() => handleIgnoreWord(composerMenu.wordInfo!.word)}>
+                      <span className="context-menu-action-text">{language === 'ru' ? 'Игнорировать слово' : language === 'uk' ? 'Ігнорувати слово' : 'Ignore word'}</span>
+                    </button>
+                    <hr className="context-menu-divider" />
+                    {composerMenu.wordInfo.suggestions.length > 0 ? (
+                      composerMenu.wordInfo.suggestions.map((suggestion) => (
+                        <button
+                          key={suggestion}
+                          type="button"
+                          className="context-menu-action"
+                          onClick={() => applySpellingSuggestion(suggestion)}
+                        >
+                          <span className="context-menu-action-text" style={{ fontWeight: 500 }}>{suggestion}</span>
+                        </button>
+                      ))
+                    ) : (
+                      <button type="button" className="context-menu-action" disabled>
+                        <span className="context-menu-action-text" style={{ opacity: 0.5 }}>{language === 'ru' ? 'Нет вариантов' : language === 'uk' ? 'Немає варіантів' : 'No suggestions'}</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+                <hr className="context-menu-divider" />
+              </>
+            ) : null}
             <button type="button" className="context-menu-action" onClick={() => void pasteIntoComposer()}>
               <span className="context-menu-action-text">{t(language, 'paste')}</span>
               <MenuPasteIcon />
@@ -4516,7 +4671,7 @@ export function GroupChatView({ token, language, currentUser, group, initialChan
                 <span className="spoiler-checkbox" aria-hidden="true" />
                 <span>{t(language, 'spoiler')}</span>
               </label>
-              <div className="emoji-input-shell image-caption-input">
+              <div className="image-caption-input">
                 <EmojiInlineInput ref={imageCaptionInputRef} className="emoji-inline-input" value={imageCaptionDraft} placeholder={t(language, 'imageCaptionPlaceholder')} onChange={(event) => setImageCaptionDraft(event.target.value)} onPaste={handleComposerPaste} onContextMenu={openImageCaptionMenu} autoFocus />
                 <div ref={imageEmojiAnchorRef} className="emoji-host inline">
                   <button className="emoji-toggle inline" type="button" aria-label={t(language, 'emoji')}

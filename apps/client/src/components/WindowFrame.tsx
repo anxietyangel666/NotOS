@@ -21,6 +21,7 @@ type WindowFrameProps = {
   onMinimize: () => void;
   onToggleMaximize: () => void;
   onClose: () => void;
+  onDetach?: () => void;
   children: ReactNode;
 };
 
@@ -36,7 +37,7 @@ function getDesktopBounds(): { left: number; top: number; width: number; height:
 
 /**
  * Compute a centered, clamped initial position for a window inside the desktop.
- * `hint` is the caller-supplied default (used as the preferred size hint for centering).
+ * Relative to the desktop container coordinate system (top: 0 is right beneath the titlebar).
  */
 function centeredPosition(
   hint: { x: number; y: number },
@@ -46,17 +47,12 @@ function centeredPosition(
   const bounds = getDesktopBounds();
   const winW = storedSize?.width ?? minSize.width;
   const winH = storedSize?.height ?? minSize.height;
-  // Center within the desktop area
-  const cx = bounds.left + Math.round((bounds.width - winW) / 2);
-  const cy = bounds.top + Math.round((bounds.height - winH) / 2);
-  // Clamp so the window is always fully visible
-  const maxX = Math.max(bounds.left + 8, bounds.left + bounds.width - winW - 8);
-  const maxY = Math.max(bounds.top + 8, bounds.top + bounds.height - winH - 58);
-  const x = Math.max(bounds.left + 8, Math.min(maxX, cx));
-  const y = Math.max(bounds.top + 8, Math.min(maxY, cy));
-  // If the hint was already a sensible centered value (caller computed it from
-  // window.innerWidth) and the desktop bounds match the viewport, prefer the
-  // hint so we don't fight with the caller's intent.
+  const cx = Math.max(0, Math.round((bounds.width - winW) / 2));
+  const cy = Math.max(0, Math.round((bounds.height - winH) / 2));
+  const maxX = Math.max(0, bounds.width - winW);
+  const maxY = Math.max(0, bounds.height - winH - 48);
+  const x = Math.max(0, Math.min(maxX, cx));
+  const y = Math.max(0, Math.min(maxY, cy));
   void hint;
   return { x, y };
 }
@@ -70,14 +66,22 @@ function clampSize(
   // Maximum usable area inside the desktop.
   const maxWidth = Math.max(0, bounds.width - 16);
   const maxHeight = Math.max(0, bounds.height - 80);
-  // The effective minimum can never exceed the available area, otherwise a
-  // window keeps a min size larger than the (shrunken) app window and overflows.
   const minWidth = Math.min(minSize.width, maxWidth);
   const minHeight = Math.min(minSize.height, maxHeight);
   return {
     width: Math.max(minWidth, Math.min(maxWidth, size.width)),
     height: Math.max(minHeight, Math.min(maxHeight, size.height))
   };
+}
+
+/** Compute a scale factor between 0.82 and 1.45 based on window dimensions. */
+function computeWindowScale(width: number, height: number): number {
+  if (!width || !height) return 1;
+  const widthRatio = width / 1050;
+  const heightRatio = height / 700;
+  const blend = widthRatio * 0.7 + heightRatio * 0.3;
+  const raw = 0.65 + blend * 0.35;
+  return Math.min(1.45, Math.max(0.82, Math.round(raw * 100) / 100));
 }
 
 export function WindowFrame({
@@ -98,12 +102,36 @@ export function WindowFrame({
   onMinimize,
   onToggleMaximize,
   onClose,
+  onDetach,
   children
 }: WindowFrameProps) {
   const frameRef = useRef<HTMLElement | null>(null);
-  // Last known desktop area, used to compute how much the app window shrank or
-  // grew between two resize events so inner windows can follow that delta 1:1.
   const prevBoundsRef = useRef<{ width: number; height: number } | null>(null);
+  const [windowScale, setWindowScale] = useState(1);
+
+  useEffect(() => {
+    const el = frameRef.current;
+    if (!el) return;
+    const update = (w?: number, h?: number) => {
+      const width = w ?? el.offsetWidth;
+      const height = h ?? el.offsetHeight;
+      if (width && height) {
+        const scale = computeWindowScale(width, height);
+        setWindowScale(scale);
+        el.style.setProperty('--win-scale', String(scale));
+        el.style.setProperty('--win-font-scale', String(scale));
+      }
+    };
+    update();
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const { width, height } = entry.contentRect;
+        update(width, height);
+      }
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [maximized]);
   const [size, setSize] = useState<{ width: number; height: number } | null>(() => {
     if (storageKey) {
       try {
@@ -123,14 +151,18 @@ export function WindowFrame({
   useEffect(() => {
     if (!drag || maximized) return;
     const currentDrag = drag;
-    // Prevent the browser from selecting/highlighting page text while dragging.
     document.body.classList.add('window-dragging');
 
     function move(event: MouseEvent) {
       const bounds = getDesktopBounds();
+      // Relative to desktop container; allow dragging all the way to top boundary (0)
+      const minX = 0;
+      const minY = 0;
+      const maxX = Math.max(0, bounds.width - minSize.width);
+      const maxY = Math.max(0, bounds.height - 48);
       setPosition({
-        x: Math.max(bounds.left + 8, Math.min(bounds.left + bounds.width - minSize.width, currentDrag.baseX + event.clientX - currentDrag.startX)),
-        y: Math.max(bounds.top + 8, Math.min(bounds.top + bounds.height - 160, currentDrag.baseY + event.clientY - currentDrag.startY))
+        x: Math.max(minX, Math.min(maxX, currentDrag.baseX + event.clientX - currentDrag.startX)),
+        y: Math.max(minY, Math.min(maxY, currentDrag.baseY + event.clientY - currentDrag.startY))
       });
     }
 
@@ -146,19 +178,18 @@ export function WindowFrame({
       window.removeEventListener('mouseup', up);
       document.body.classList.remove('window-dragging');
     };
-  }, [drag, maximized]);
+  }, [drag, maximized, minSize.width]);
 
   useEffect(() => {
     if (!resize || maximized) return;
     const currentResize = resize;
-    // Prevent text selection while resizing too.
     document.body.classList.add('window-dragging');
 
     function move(event: MouseEvent) {
       const bounds = getDesktopBounds();
       setSize({
-        width: Math.max(minSize.width, Math.min(bounds.left + bounds.width - position.x - 8, currentResize.baseWidth + event.clientX - currentResize.startX)),
-        height: Math.max(minSize.height, Math.min(bounds.top + bounds.height - position.y - 58, currentResize.baseHeight + event.clientY - currentResize.startY))
+        width: Math.max(minSize.width, Math.min(bounds.width - position.x, currentResize.baseWidth + event.clientX - currentResize.startX)),
+        height: Math.max(minSize.height, Math.min(bounds.height - position.y - 48, currentResize.baseHeight + event.clientY - currentResize.startY))
       });
     }
 
@@ -181,15 +212,7 @@ export function WindowFrame({
     localStorage.setItem(`notoc.window.${storageKey}`, JSON.stringify(size));
   }, [size, storageKey]);
 
-  // Make inner windows track the application window when it is resized: when the
-  // app (desktop area) shrinks or grows by N pixels, each open window changes
-  // its size by exactly the same N pixels (per axis), so windows scale 1:1 with
-  // the app frame. The result is then clamped so a window never drops below its
-  // min size or overflows the available area, and its position is pulled back
-  // inside the desktop bounds.
   useEffect(() => {
-    // Seed the previous-bounds baseline on mount so the first resize computes a
-    // correct delta rather than treating the whole area as the change.
     if (!prevBoundsRef.current) {
       const initial = getDesktopBounds();
       prevBoundsRef.current = { width: initial.width, height: initial.height };
@@ -198,15 +221,11 @@ export function WindowFrame({
     function handleViewportResize() {
       const bounds = getDesktopBounds();
       const prev = prevBoundsRef.current ?? { width: bounds.width, height: bounds.height };
-      // How much the app window changed since the last event (negative = shrank).
       const deltaW = bounds.width - prev.width;
       const deltaH = bounds.height - prev.height;
       prevBoundsRef.current = { width: bounds.width, height: bounds.height };
 
       setSize((current) => {
-        // Even windows without an explicit stored size adopt one now so they can
-        // follow the app frame; base it on the rendered frame, falling back to
-        // the min size.
         const baseW = current?.width ?? frameRef.current?.offsetWidth ?? minSize.width;
         const baseH = current?.height ?? frameRef.current?.offsetHeight ?? minSize.height;
         const next = clampSize({ width: baseW + deltaW, height: baseH + deltaH }, minSize);
@@ -216,11 +235,10 @@ export function WindowFrame({
 
       setPosition((current) => {
         const winW = (size?.width ?? minSize.width) + deltaW;
-        const winH = (size?.height ?? minSize.height) + deltaH;
-        const maxX = bounds.left + bounds.width - Math.min(winW, bounds.width - 16) - 8;
-        const maxY = bounds.top + bounds.height - 160;
-        const x = Math.max(bounds.left + 8, Math.min(maxX, current.x));
-        const y = Math.max(bounds.top + 8, Math.min(maxY, current.y));
+        const maxX = Math.max(0, bounds.width - Math.min(winW, bounds.width));
+        const maxY = Math.max(0, bounds.height - 48);
+        const x = Math.max(0, Math.min(maxX, current.x));
+        const y = Math.max(0, Math.min(maxY, current.y));
         if (x === current.x && y === current.y) return current;
         return { x, y };
       });
@@ -229,13 +247,20 @@ export function WindowFrame({
     return () => window.removeEventListener('resize', handleViewportResize);
   }, [minSize, size?.width, size?.height]);
 
-  const windowStyle = maximized
-    ? { ...style, zIndex }
+  const windowStyle: CSSProperties = maximized
+    ? {
+        ...style,
+        zIndex,
+        ['--win-scale' as any]: windowScale,
+        ['--win-font-scale' as any]: windowScale
+      }
     : {
         ...style,
         left: position.x,
         top: position.y,
         zIndex,
+        ['--win-scale' as any]: windowScale,
+        ['--win-font-scale' as any]: windowScale,
         ...(minimized ? { display: 'none' } : {}),
         ...(size ? { width: size.width, height: size.height } : {})
       };
@@ -255,8 +280,8 @@ export function WindowFrame({
           if (maximized) {
             const bounds = getDesktopBounds();
             const restoredWidth = size?.width ?? Math.min(760, bounds.width - 32);
-            const restoredX = Math.max(bounds.left + 8, Math.min(bounds.left + bounds.width - minSize.width, event.clientX - restoredWidth / 2));
-            const restoredY = bounds.top + 8;
+            const restoredX = Math.max(0, Math.min(bounds.width - minSize.width, event.clientX - bounds.left - restoredWidth / 2));
+            const restoredY = 0;
             setPosition({ x: restoredX, y: restoredY });
             setDrag({ startX: event.clientX, startY: event.clientY, baseX: restoredX, baseY: restoredY });
             onToggleMaximize();
@@ -272,13 +297,31 @@ export function WindowFrame({
           {centerTitle ?? <span>{title}</span>}
         </div>
         <div className="internal-window-controls">
-          <button className="icon-action" type="button" aria-label={t(language, 'minimize')} onClick={onMinimize}>
+          {onDetach ? (
+            <button
+              className="icon-action detach-window-btn"
+              type="button"
+              aria-label={t(language, 'detachWindow')}
+              title={t(language, 'detachWindow')}
+              onClick={(event) => {
+                event.stopPropagation();
+                onDetach();
+              }}
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+                <polyline points="15 3 21 3 21 9" />
+                <line x1="10" y1="14" x2="21" y2="3" />
+              </svg>
+            </button>
+          ) : null}
+          <button className="icon-action btn-minimize" type="button" aria-label={t(language, 'minimize')} onClick={onMinimize}>
             <span className="window-control-icon minimize" aria-hidden="true" />
           </button>
-          <button className="icon-action" type="button" aria-label={t(language, 'maximize')} onClick={onToggleMaximize}>
+          <button className="icon-action btn-maximize" type="button" aria-label={t(language, 'maximize')} onClick={onToggleMaximize}>
             □
           </button>
-          <button className="icon-action danger-text" type="button" aria-label={t(language, 'close')} onClick={onClose}>
+          <button className="icon-action danger-text btn-close" type="button" aria-label={t(language, 'close')} onClick={onClose}>
             <span className="window-control-icon close" aria-hidden="true" />
           </button>
         </div>

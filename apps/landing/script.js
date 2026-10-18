@@ -18,14 +18,14 @@ const TRANSLATIONS = {
     status_online: 'Сервер онлайн',
     status_offline: 'Сервер недоступен',
 
-    hero_pill: 'NotOS Desktop — Обновление 0.5.6 уже доступно',
+    hero_pill: 'NotOS Desktop — Обновление 0.5.28 уже доступно',
     hero_title: 'Ваш виртуальный рабочий стол для <span class="gradient-text">общения и отдыха</span>',
     hero_subtitle: 'NotOS переносит виртуальный рабочий стол в мессенджер: кастомные обои, совместный просмотр фильмов, визиты к друзьям, видео-кружочки и AI-помощник в одном быстром приложении.',
     btn_download_windows: 'Скачать для Windows',
     btn_learn_more: 'Узнать подробнее',
 
     meta_desktop: 'Виртуальный Desktop OS',
-    meta_watch: 'Watch Together & Кино',
+    meta_watch: 'Watch Together & Фильмы',
     meta_privacy: 'Приватность без номеров',
     meta_updates: 'Автообновления в 1 клик',
 
@@ -33,9 +33,50 @@ const TRANSLATIONS = {
     preview_title: 'Настоящий рабочий стол 1-в-1',
     preview_subtitle: 'Никаких однообразных серых колонок. NotOS объединяет плавающие окна мессенджера, кинотеатр Watch Together, музыкальный плеер и нативную панель задач Taskbar.',
 
+    // Preview Mockup
+    mock_settings: 'Настройки',
+    mock_cinema: 'Кинотеатр',
+    mock_music: 'Музыка',
+    mock_inbox: 'Почта',
+    mock_chat_title: 'Мессенджер — # Общий чат',
+    mock_search_chats: 'Поиск чатов...',
+    mock_channels_label: 'КАНАЛЫ И ЗВОНКИ',
+    mock_channel_voice: 'Голосовой #1',
+    mock_dm_label: 'ЛИЧНЫЕ СООБЩЕНИЯ',
+    mock_status_sophia: 'Кинула кружочек 🎥',
+    mock_status_maks: 'Слушает Synthwave',
+    mock_status_ai: 'Ассистент активен',
+    mock_header_user_sub: 'В сети • NotOS Desktop',
+    mock_msg_sophia_text: 'Привет! Зацените как быстро открывается рабочий стол и играет музыка в фоне! Включила новый стрим в Watch Together 🔥',
+    mock_video_circle_hint: 'Видеосообщение',
+    mock_composer_placeholder: 'Написать сообщение Sophia...',
+    mock_composer_input: 'Смотрим! Сейчас подключусь к комнате...',
+    mock_watch_title: 'Watch Together — Cyberpunk: Edgerunners',
+    mock_cinema_sync: 'СИНХРОНИЗИРОВАНО (1080p 60fps)',
+    mock_viewers_count: '3 друга смотрят',
+    mock_music_player_title: 'Музыкальный плеер',
+    mock_track_artist: 'M83 • Плейлист рабочего стола',
+    mock_user_online: 'В сети',
+    mock_tb_messenger: 'Мессенджер',
+    mock_tb_ai: 'AI-Чат',
+    mock_tb_remote: 'Удаленный стол',
+    win_min: 'Свернуть',
+    win_max: 'Развернуть',
+    win_close: 'Закрыть',
+
+    // Bento Grid
     features_tag: 'ВОЗМОЖНОСТИ NOTOS',
     features_title: 'Больше чем мессенджер — персональная экосистема',
     features_subtitle: 'Исследуйте возможности NotOS в интерактивном формате: от виртуального рабочего стола до визитов к друзьям и умного AI.',
+
+    pill_desktop: 'Виртуальная ОС',
+    pill_watch: 'Синхронизация',
+    pill_remote: 'Визиты к друзьям',
+    pill_circles: 'Кружочки & Звук',
+    pill_wall: 'Стена & Музыка',
+    pill_nameplates: 'Персонализация',
+    pill_ai: 'Нейросеть',
+    pill_privacy: 'Безопасность',
 
     b1_title: 'Виртуальный Рабочий Стол (Desktop OS)',
     b1_desc: 'Свободно перемещайте окна, ставьте собственные динамические и видео-обои до 10 МБ, управляйте виджетами и панелью задач Taskbar. Интерфейс, который подстраивается под вас.',
@@ -54,6 +95,17 @@ const TRANSLATIONS = {
     b8_title: 'Приватность без номеров телефонов',
     b8_desc: 'Никаких телефонных номеров, спама и утечек. Вход по защищенному Auth-файлу сессии и PIN-коду. Ваши ключи хранятся только локально.',
 
+    demo_clock_widget: 'Виджет часов',
+    demo_sync_tag: '● СИНХРОНИЗАЦИЯ 1080p',
+    demo_remote_title: 'Рабочий стол Sophia',
+    demo_playlist_host: '🎵 Плейлист хоста:',
+    demo_theme_label: '🎨 Тема оформления:',
+    demo_wall_quote: '«Оставил любимый трек на твоей стене, послушай!»',
+    demo_ai_you: 'Вы:',
+    demo_ai_prompt: 'Синхронизируй воспроизведение стрима',
+    demo_auth_desc: 'Локальный приватный ключ • PIN Active',
+
+    // Status
     status_monitoring: 'МОНИТОРИНГ СЕРВЕРОВ',
     status_heading: 'Состояние сервисов NotOS',
     status_all_operational: 'Все системы работают',
@@ -63,18 +115,25 @@ const TRANSLATIONS = {
     service_updates: 'Сервер обновлений (Auto-Update)',
     service_webrtc: 'WebRTC & P2P Стриминг',
     status_latency: 'Текущая задержка:',
+    status_uptime: 'Аптайм:',
     status_refresh: 'Проверить снова',
+    status_good: 'Нормально',
+    status_warn: 'Проверка',
 
+    // CTA
     cta_title: 'Готовы общаться на новом уровне?',
     cta_desc: 'Скачайте клиент NotOS для Windows бесплатно прямо сейчас. Установка занимает меньше минуты, а все обновления приходят автоматически.',
     btn_download_full: 'Скачать NotOS для Windows',
-    cta_whats_new: 'Что нового в v0.5.6:',
-    cta_notes: 'Мгновенное удаление сообщений в ЛС и группах (0ms отклик), фикс списка диалогов, мгновенная отправка и удаление на стене рабочего стола.',
+    cta_whats_new: 'Что нового в v0.5.27:',
+    cta_notes: 'Стикеры и виджеты рабочего стола, капсулы времени в ЛС, «Наша история», интерактивная доска в звонках и аудио-статусы.',
 
+    // Footer
     footer_tagline: 'Мессенджер нового поколения для голосового общения, звонков и совместного просмотра.',
     footer_rights: 'Все права защищены.',
     footer_product: 'Продукт',
     footer_legal: 'Правовая информация',
+    footer_download_inst: 'Скачать установщик',
+    footer_server_status: 'Статус серверов',
     modal_privacy_title: 'Политика конфиденциальности',
     modal_terms_title: 'Условия использования',
 
@@ -105,31 +164,72 @@ const TRANSLATIONS = {
 
   en: {
     nav_features: 'Features',
-    nav_preview: 'Preview',
+    nav_preview: 'Interface',
     nav_status: 'Status',
     nav_download: 'Download',
-    nav_get_app: 'Get NotOS',
+    nav_get_app: 'Get App',
     status_online: 'Server Online',
     status_offline: 'Server Offline',
 
-    hero_pill: 'NotOS Desktop — Update 0.5.6 is now available',
-    hero_title: 'Your personal virtual desktop for <span class="gradient-text">chatting, calls,</span> and media',
-    hero_subtitle: 'NotOS transforms your messenger into a full virtual desktop: custom wallpapers, synchronized watch parties, visiting friend desktops, video circles, and an integrated AI assistant.',
+    hero_pill: 'NotOS Desktop — Update 0.5.28 is now available',
+    hero_title: 'Your virtual desktop for <span class="gradient-text">connecting & hanging out</span>',
+    hero_subtitle: 'NotOS transforms messaging into a full virtual desktop: custom wallpapers, synchronized watch parties, friend desktop visits, video circles, and an integrated AI assistant in one fast app.',
     btn_download_windows: 'Download for Windows',
     btn_learn_more: 'Explore Features',
 
     meta_desktop: 'Virtual Desktop OS',
-    meta_watch: 'Watch Together Sync',
+    meta_watch: 'Watch Together & Cinema',
     meta_privacy: 'Privacy (No Phone Numbers)',
-    meta_updates: '1-Click Silent Updates',
+    meta_updates: '1-Click Auto Updates',
 
     preview_tag: 'NOTOS INTERFACE',
     preview_title: 'Authentic Desktop Experience',
-    preview_subtitle: 'No more mundane single-column chat feeds. NotOS brings floating messenger windows, synchronized cinema, desktop widgets, and a native taskbar.',
+    preview_subtitle: 'No boring single-column feeds. NotOS combines floating messenger windows, Watch Together cinema, music player, and a native taskbar.',
 
+    // Preview Mockup
+    mock_settings: 'Settings',
+    mock_cinema: 'Cinema',
+    mock_music: 'Music',
+    mock_inbox: 'Inbox',
+    mock_chat_title: 'Messenger — # General Chat',
+    mock_search_chats: 'Search chats...',
+    mock_channels_label: 'CHANNELS & CALLS',
+    mock_channel_voice: 'Voice #1',
+    mock_dm_label: 'DIRECT MESSAGES',
+    mock_status_sophia: 'Sent a video circle 🎥',
+    mock_status_maks: 'Listening to Synthwave',
+    mock_status_ai: 'Assistant active',
+    mock_header_user_sub: 'Online • NotOS Desktop',
+    mock_msg_sophia_text: 'Hey! Check out how fast the desktop loads and music plays in the background! Started a new stream in Watch Together 🔥',
+    mock_video_circle_hint: 'Video Message',
+    mock_composer_placeholder: 'Message Sophia...',
+    mock_composer_input: 'Watching! Connecting to the room now...',
+    mock_watch_title: 'Watch Together — Cyberpunk: Edgerunners',
+    mock_cinema_sync: 'SYNCHRONIZED (1080p 60fps)',
+    mock_viewers_count: '3 friends watching',
+    mock_music_player_title: 'Music Player',
+    mock_track_artist: 'M83 • Desktop Playlist',
+    mock_user_online: 'Online',
+    mock_tb_messenger: 'Messenger',
+    mock_tb_ai: 'AI Chat',
+    mock_tb_remote: 'Remote PC',
+    win_min: 'Minimize',
+    win_max: 'Maximize',
+    win_close: 'Close',
+
+    // Bento Grid
     features_tag: 'NOTOS CAPABILITIES',
     features_title: 'More Than a Messenger — A Personal Ecosystem',
     features_subtitle: 'Explore NotOS capabilities: from virtual desktop customization to friend desktop visits and smart AI.',
+
+    pill_desktop: 'Virtual Desktop OS',
+    pill_watch: 'Synchronization',
+    pill_remote: 'Friend Visits',
+    pill_circles: 'Video Circles & Sound',
+    pill_wall: 'Wall & Music',
+    pill_nameplates: 'Personalization',
+    pill_ai: 'Neural Network',
+    pill_privacy: 'Security & Privacy',
 
     b1_title: 'Virtual Desktop OS',
     b1_desc: 'Freely drag and arrange windows, set custom live video wallpapers up to 10 MB, and manage desktop widgets with a full taskbar. An interface that molds to you.',
@@ -148,6 +248,17 @@ const TRANSLATIONS = {
     b8_title: 'Privacy: Auth File & PIN Lock',
     b8_desc: 'No phone numbers, spam, or leaky cloud passwords. Instant authentication via encrypted local Auth files and optional PIN lock.',
 
+    demo_clock_widget: 'Clock Widget',
+    demo_sync_tag: '● SYNC 1080p',
+    demo_remote_title: "Sophia's Desktop",
+    demo_playlist_host: '🎵 Host playlist:',
+    demo_theme_label: '🎨 Interface theme:',
+    demo_wall_quote: '“Left my favorite track on your wall, take a listen!”',
+    demo_ai_you: 'You:',
+    demo_ai_prompt: 'Synchronize stream playback',
+    demo_auth_desc: 'Local private key • PIN Active',
+
+    // Status
     status_monitoring: 'SERVER MONITORING',
     status_heading: 'NotOS Network Infrastructure',
     status_all_operational: 'All Systems Operational',
@@ -157,18 +268,25 @@ const TRANSLATIONS = {
     service_updates: 'Auto-Update CDN Server',
     service_webrtc: 'WebRTC P2P Media Relays',
     status_latency: 'Current Latency:',
+    status_uptime: 'Uptime:',
     status_refresh: 'Check Again',
+    status_good: 'Operational',
+    status_warn: 'Checking',
 
+    // CTA
     cta_title: 'Ready to elevate your communication?',
     cta_desc: 'Download the NotOS Windows desktop client for free today. Setup takes under a minute, with seamless automatic updates.',
     btn_download_full: 'Download NotOS for Windows',
-    cta_whats_new: "What's new in v0.5.6:",
-    cta_notes: 'Instant optimistic message deletion in DMs and groups (0ms response), conversation preview preservation, instant sending and deletion on the Desktop Wall.',
+    cta_whats_new: "What's new in v0.5.27:",
+    cta_notes: 'Desktop sticky notes & widgets, countdown time capsules in DMs, Our Story friendship profile, live whiteboard in calls, and voice bio snippets.',
 
+    // Footer
     footer_tagline: 'Next-generation messenger for voice communication, direct calls, and watching media together.',
     footer_rights: 'All rights reserved.',
     footer_product: 'Product',
     footer_legal: 'Legal',
+    footer_download_inst: 'Download Installer',
+    footer_server_status: 'Server Status',
     modal_privacy_title: 'Privacy Policy',
     modal_terms_title: 'Terms of Service',
 
@@ -181,6 +299,8 @@ const TRANSLATIONS = {
       <p>Voice and screen share media are transmitted via encrypted WebRTC connections directly between peers or via secure media gateways. We never record your voice calls or store screen share frames.</p>
       <h4>4. Third-Party Sharing</h4>
       <p>We do not sell, rent, or monetize personal information with advertisers or tracking networks.</p>
+      <h4>5. Policy Updates</h4>
+      <p>This policy may evolve as new features arrive. The latest version is always available on notos.tech.</p>
     `,
 
     terms_body: `
@@ -190,6 +310,8 @@ const TRANSLATIONS = {
       <p>You agree not to use the Service for spamming, transmitting malicious payloads, violating applicable laws, or disrupting the network infrastructure.</p>
       <h4>3. Intellectual Property</h4>
       <p>All brand assets, source code, logos, and designs of NotOS belong to the NotOS development team. You are granted a personal, non-commercial license to use the client.</p>
+      <h4>4. Disclaimer of Warranties</h4>
+      <p>The Service is provided on an "as is" and "as available" basis without warranties of any kind.</p>
     `
   },
 
@@ -202,7 +324,7 @@ const TRANSLATIONS = {
     status_online: 'Сервер онлайн',
     status_offline: 'Сервер недоступний',
 
-    hero_pill: 'NotOS Desktop — Оновлення 0.5.6 вже доступне',
+    hero_pill: 'NotOS Desktop — Оновлення 0.5.28 вже доступне',
     hero_title: 'Ваш віртуальний робочий стіл для <span class="gradient-text">спілкування та відпочинку</span>',
     hero_subtitle: 'NotOS переносить віртуальний робочий стіл у месенджер: кастомні шпалери, спільний перегляд фільмів, візити до друзів, відео-кружечки та AI-помічник в одному швидкому додатку.',
     btn_download_windows: 'Завантажити для Windows',
@@ -217,9 +339,50 @@ const TRANSLATIONS = {
     preview_title: 'Справжній робочий стіл 1-в-1',
     preview_subtitle: 'Жодних одноманітних сірих колонок. NotOS поєднує плаваючі вікна месенджера, кінотеатр Watch Together, музичний плеєр та нативну панель завдань Taskbar.',
 
+    // Preview Mockup
+    mock_settings: 'Налаштування',
+    mock_cinema: 'Кінотеатр',
+    mock_music: 'Музика',
+    mock_inbox: 'Пошта',
+    mock_chat_title: 'Месенджер — # Загальний чат',
+    mock_search_chats: 'Пошук чатів...',
+    mock_channels_label: 'КАНАЛИ ТА ДЗВІНКИ',
+    mock_channel_voice: 'Голосовий #1',
+    mock_dm_label: 'ОСОБИСТІ ПОВІДОМЛЕННЯ',
+    mock_status_sophia: 'Надіслала кружечок 🎥',
+    mock_status_maks: 'Слухає Synthwave',
+    mock_status_ai: 'Асистент активний',
+    mock_header_user_sub: 'В мережі • NotOS Desktop',
+    mock_msg_sophia_text: 'Привіт! Зацініть як швидко відкривається робочий стіл та грає музика у фоні! Увімкнула новий стрім у Watch Together 🔥',
+    mock_video_circle_hint: 'Відеоповідомлення',
+    mock_composer_placeholder: 'Написати повідомлення Sophia...',
+    mock_composer_input: 'Дивимось! Зараз підключусь до кімнати...',
+    mock_watch_title: 'Watch Together — Cyberpunk: Edgerunners',
+    mock_cinema_sync: 'СИНХРОНІЗОВАНО (1080p 60fps)',
+    mock_viewers_count: '3 друзів дивляться',
+    mock_music_player_title: 'Музичний плеєр',
+    mock_track_artist: 'M83 • Плейлист робочого столу',
+    mock_user_online: 'В мережі',
+    mock_tb_messenger: 'Месенджер',
+    mock_tb_ai: 'AI-Чат',
+    mock_tb_remote: 'Віддалений стіл',
+    win_min: 'Згорнути',
+    win_max: 'Розгорнути',
+    win_close: 'Закрити',
+
+    // Bento Grid
     features_tag: 'МОЖЛИВОСТІ NOTOS',
     features_title: 'Більше ніж месенджер — персональна екосистема',
     features_subtitle: 'Досліджуйте можливості NotOS: від віртуального робочого столу до візитів до друзів та розумного AI.',
+
+    pill_desktop: 'Віртуальна ОС',
+    pill_watch: 'Синхронізація',
+    pill_remote: 'Візити до друзів',
+    pill_circles: 'Кружечки та звук',
+    pill_wall: 'Стіна та музика',
+    pill_nameplates: 'Персоналізація',
+    pill_ai: 'Нейромережа',
+    pill_privacy: 'Безпека',
 
     b1_title: 'Віртуальний Робочий Стіл (Desktop OS)',
     b1_desc: 'Вільно переміщуйте вікна, встановлюйте власні динамічні та відео-шпалери до 10 МБ, керуйте віджетами та панеллю завдань Taskbar. Інтерфейс підлаштовується під вас.',
@@ -238,6 +401,17 @@ const TRANSLATIONS = {
     b8_title: 'Приватність без номерів телефонів',
     b8_desc: 'Жодних номерів телефонів, спаму та витоків. Вхід за захищеним Auth-файлом сесії та PIN-кодом. Ваші ключі зберігаються локально.',
 
+    demo_clock_widget: 'Віджет годинника',
+    demo_sync_tag: '● СИНХРОНІЗАЦІЯ 1080p',
+    demo_remote_title: 'Робочий стіл Sophia',
+    demo_playlist_host: '🎵 Плейлист хоста:',
+    demo_theme_label: '🎨 Тема оформлення:',
+    demo_wall_quote: '«Залишив улюблений трек на твоїй стіні, послухай!»',
+    demo_ai_you: 'Ви:',
+    demo_ai_prompt: 'Синхронізуй відтворення стріму',
+    demo_auth_desc: 'Локальний приватний ключ • PIN Active',
+
+    // Status
     status_monitoring: 'МОНІТОРИНГ СЕРВЕРІВ',
     status_heading: 'Стан сервісів NotOS',
     status_all_operational: 'Всі системи працюють',
@@ -247,18 +421,25 @@ const TRANSLATIONS = {
     service_updates: 'Сервер оновлень (Auto-Update)',
     service_webrtc: 'WebRTC & P2P Стрімінг',
     status_latency: 'Поточна затримка:',
+    status_uptime: 'Аптайм:',
     status_refresh: 'Перевірити знову',
+    status_good: 'Нормально',
+    status_warn: 'Перевірка',
 
+    // CTA
     cta_title: 'Готові спілкуватися на новому рівні?',
     cta_desc: 'Завантажте клієнт NotOS для Windows безкоштовно просто зараз. Встановлення триває менше хвилини.',
     btn_download_full: 'Завантажити NotOS для Windows',
-    cta_whats_new: 'Що нового у v0.5.6:',
-    cta_notes: 'Миттєве видалення повідомлень в ПП та групах (0ms відгук), збереження діалогів у списку, миттєве надсилання та видалення на стіні робочого столу.',
+    cta_whats_new: 'Що нового у v0.5.27:',
+    cta_notes: 'Стікери та віджети робочого столу, капсули часу у ПП, «Наша історія», інтерактивна дошка у дзвінках та аудіо-статуси.',
 
+    // Footer
     footer_tagline: 'Месенджер нового покоління для голосового зв’язку, дзвінків та спільного перегляду.',
     footer_rights: 'Всі права захищені.',
     footer_product: 'Продукт',
     footer_legal: 'Правова інформація',
+    footer_download_inst: 'Завантажити інсталятор',
+    footer_server_status: 'Статус серверів',
     modal_privacy_title: 'Політика конфіденційності',
     modal_terms_title: 'Умови використання',
 
@@ -269,6 +450,10 @@ const TRANSLATIONS = {
       <p>Зберігаються лише дані, необхідні для авторизації та роботи кімнат. Усі файли сесій генеруються і зберігаються локально на комп’ютері.</p>
       <h4>3. Голос та трансляція</h4>
       <p>Медіапотоки передаються зашифрованими каналами WebRTC напряму. Ми не ведемо запис розмов та трансляцій екрана.</p>
+      <h4>4. Треті сторони</h4>
+      <p>Ми не передаємо та не монетизуємо ваші дані.</p>
+      <h4>5. Оновлення</h4>
+      <p>Політика може оновлюватися. Актуальна версія завжди розміщена на notos.tech.</p>
     `,
 
     terms_body: `
@@ -276,13 +461,79 @@ const TRANSLATIONS = {
       <p>Користуючись NotOS, ви погоджуєтеся дотримуватися цих Умов використання.</p>
       <h4>2. Правила</h4>
       <p>Заборонено використовувати Сервіс для спаму, шкідливого ПЗ або порушення законодавства.</p>
+      <h4>3. Інтелектуальна власність</h4>
+      <p>Усі права на матеріали, бренд і код NotOS належать розробникам NotOS.</p>
+      <h4>4. Відмова від гарантій</h4>
+      <p>Сервіс надається на умовах «як є» (as is).</p>
     `
   }
 };
 
 let currentLang = 'ru';
-let cachedDownloadUrl = '/updates/NotOS-Setup-0.5.2.exe';
-let cachedVersion = '0.5.2';
+let cachedDownloadUrl = 'https://notos.tech/updates/NotOS-Setup-0.5.29.exe';
+let cachedVersion = '0.5.29';
+let cachedNotes = 'Надёжная система обновлений: прямая загрузка установщика .exe и горячее обновление в 1 клик.';
+
+// Update dynamic version and download elements across the page
+function updateDynamicVersionUI() {
+  const navBadge = document.getElementById('navVersionBadge');
+  if (navBadge) navBadge.textContent = `v${cachedVersion}`;
+
+  const mockupTitle = document.getElementById('mockupAppTitle');
+  if (mockupTitle) mockupTitle.textContent = `NotOS Desktop v${cachedVersion}`;
+
+  const heroPill = document.getElementById('heroPill');
+  if (heroPill) {
+    const pillTpl = {
+      ru: `NotOS Desktop — Обновление ${cachedVersion} уже доступно`,
+      en: `NotOS Desktop — Update ${cachedVersion} is now available`,
+      uk: `NotOS Desktop — Оновлення ${cachedVersion} вже доступне`
+    };
+    heroPill.textContent = pillTpl[currentLang] || pillTpl.ru;
+  }
+
+  const subtextMap = {
+    ru: `Версия ${cachedVersion} • 125 МБ • Win 10/11 x64`,
+    en: `Version ${cachedVersion} • 125 MB • Win 10/11 x64`,
+    uk: `Версія ${cachedVersion} • 125 МБ • Win 10/11 x64`
+  };
+  const ctaSubMap = {
+    ru: `Версия ${cachedVersion} • 125 МБ • Прямая загрузка`,
+    en: `Version ${cachedVersion} • 125 MB • Direct Download`,
+    uk: `Версія ${cachedVersion} • 125 МБ • Пряме завантаження`
+  };
+
+  const heroSub = document.getElementById('heroDownloadSub');
+  const ctaSub = document.getElementById('ctaDownloadSub');
+  if (heroSub) heroSub.textContent = subtextMap[currentLang] || subtextMap.ru;
+  if (ctaSub) ctaSub.textContent = ctaSubMap[currentLang] || ctaSubMap.ru;
+
+  const ctaWhatsNew = document.getElementById('ctaWhatsNew');
+  if (ctaWhatsNew) {
+    const whatsNewMap = {
+      ru: `Что нового в v${cachedVersion}:`,
+      en: `What's new in v${cachedVersion}:`,
+      uk: `Що нового у v${cachedVersion}:`
+    };
+    ctaWhatsNew.textContent = whatsNewMap[currentLang] || whatsNewMap.ru;
+  }
+
+  const ctaNotes = document.getElementById('ctaNotes');
+  if (ctaNotes) {
+    const notesMap = {
+      ru: cachedNotes || 'Мгновенная загрузка мессенджера, чатов и истории при запуске, синхронизация групп из локального кэша и фоновая предзагрузка.',
+      en: 'Instant messenger, chat, and history loading on startup, group synchronization from local cache, and background prefetching.',
+      uk: 'Миттєве завантаження месенджера, чатів та історії під час запуску, синхронізація груп з локального кешу та фонове передзавантаження.'
+    };
+    ctaNotes.textContent = notesMap[currentLang] || notesMap.ru;
+  }
+
+  // Set URLs
+  const heroBtn = document.getElementById('heroDownloadBtn');
+  const ctaBtn = document.getElementById('ctaDownloadBtn');
+  if (heroBtn) heroBtn.href = cachedDownloadUrl;
+  if (ctaBtn) ctaBtn.href = cachedDownloadUrl;
+}
 
 // Apply Language
 function setLanguage(lang) {
@@ -311,38 +562,38 @@ function setLanguage(lang) {
     }
   });
 
-  // Re-format download button subtext with language
-  updateDownloadButtonsUI();
-}
+  // Replace placeholders
+  document.querySelectorAll('[data-i18n-placeholder]').forEach((el) => {
+    const key = el.dataset.i18nPlaceholder;
+    if (TRANSLATIONS[lang][key]) {
+      el.placeholder = TRANSLATIONS[lang][key];
+    }
+  });
 
-function updateDownloadButtonsUI() {
-  const heroSub = document.getElementById('heroDownloadSub');
-  const ctaSub = document.getElementById('ctaDownloadSub');
-  const navBadge = document.getElementById('navVersionBadge');
+  // Replace values
+  document.querySelectorAll('[data-i18n-value]').forEach((el) => {
+    const key = el.dataset.i18nValue;
+    if (TRANSLATIONS[lang][key]) {
+      el.value = TRANSLATIONS[lang][key];
+    }
+  });
 
-  if (navBadge) navBadge.textContent = `v${cachedVersion}`;
+  // Replace tooltips
+  document.querySelectorAll('[data-i18n-title]').forEach((el) => {
+    const key = el.dataset.i18nTitle;
+    if (TRANSLATIONS[lang][key]) {
+      el.title = TRANSLATIONS[lang][key];
+    }
+  });
 
-  const subtextMap = {
-    ru: `Версия ${cachedVersion} • 124 МБ • Win 10/11 x64`,
-    en: `Version ${cachedVersion} • 124 MB • Win 10/11 x64`,
-    uk: `Версія ${cachedVersion} • 124 МБ • Win 10/11 x64`
-  };
-
-  const text = subtextMap[currentLang] || subtextMap.ru;
-  if (heroSub) heroSub.textContent = text;
-  if (ctaSub) ctaSub.textContent = text;
-
-  // Set URLs
-  const heroBtn = document.getElementById('heroDownloadBtn');
-  const ctaBtn = document.getElementById('ctaDownloadBtn');
-  if (heroBtn) heroBtn.href = cachedDownloadUrl;
-  if (ctaBtn) ctaBtn.href = cachedDownloadUrl;
+  // Re-format download button and dynamic version labels
+  updateDynamicVersionUI();
 }
 
 // Fetch Latest Release from Server
 async function fetchReleaseInfo() {
   try {
-    const res = await fetch(`${API_BASE}/api/client/update`, { cache: 'no-cache' });
+    const res = await fetch(`${API_BASE}/updates/version.json`, { cache: 'no-cache' });
     if (res.ok) {
       const data = await res.json();
       if (data.version) {
@@ -352,11 +603,16 @@ async function fetchReleaseInfo() {
         cachedDownloadUrl = data.installerUrl.startsWith('http')
           ? data.installerUrl
           : `${API_BASE}${data.installerUrl.startsWith('/') ? '' : '/'}${data.installerUrl}`;
+      } else if (data.url) {
+        cachedDownloadUrl = data.url;
       }
-      updateDownloadButtonsUI();
+      if (data.notes) {
+        cachedNotes = data.notes;
+      }
+      updateDynamicVersionUI();
     }
   } catch (err) {
-    console.warn('[NotOS] Could not reach update manifest, using fallback:', err);
+    console.warn('[NotOS] Could not reach version.json, using fallback:', err);
   }
 }
 
@@ -379,9 +635,13 @@ async function checkServerStatus() {
     const latency = Math.round(performance.now() - t0);
 
     if (res.ok) {
-      if (pingEl) pingEl.textContent = `${latency} мс`;
+      const msLabel = currentLang === 'en' ? 'ms' : (currentLang === 'uk' ? 'мс' : 'мс');
+      if (pingEl) pingEl.textContent = `${latency} ${msLabel}`;
       if (overallBadge) {
         overallBadge.className = 'status-overall-badge';
+        overallBadge.style.background = '';
+        overallBadge.style.borderColor = '';
+        overallBadge.style.color = '';
       }
       if (overallText) overallText.textContent = TRANSLATIONS[currentLang].status_all_operational;
       if (navStatusText) navStatusText.textContent = TRANSLATIONS[currentLang].status_online;
@@ -390,7 +650,7 @@ async function checkServerStatus() {
       [stVoice, stApi, stUpdates, stWebrtc].forEach((el) => {
         if (el) {
           el.className = 'status-item-state state-good';
-          el.textContent = currentLang === 'en' ? 'Operational' : (currentLang === 'uk' ? 'Нормально' : 'Нормально');
+          el.textContent = TRANSLATIONS[currentLang].status_good;
         }
       });
     } else {
@@ -410,7 +670,7 @@ async function checkServerStatus() {
     [stVoice, stApi, stUpdates, stWebrtc].forEach((el) => {
       if (el) {
         el.className = 'status-item-state state-warn';
-        el.textContent = currentLang === 'en' ? 'Rechecking' : 'Проверка';
+        el.textContent = TRANSLATIONS[currentLang].status_warn;
       }
     });
   }

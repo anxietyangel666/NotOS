@@ -14,3 +14,12 @@ apps/client/release-*/
 # Runtime file uploads served from /uploads
 apps/server/uploads/
 uploads/
+
+# Exclude updates and build binaries from git (GitHub file size limits)
+apps/server/updates/
+apps/server.rar
+*.rar
+test*.png
+.understand-anything/
+.claude/
+

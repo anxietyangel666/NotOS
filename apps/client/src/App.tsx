@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
-import { api } from './api/client';
+import { api, getApiBaseUrl } from './api/client';
 import { cacheCurrentUser, clearCachedCurrentUser, loadCachedCurrentUser } from './api/user-cache';
 import type { AuthenticatedResponse, Language, PublicUser, Theme } from './api/types';
 import type { AuthNotice } from './app-types';
 import { clearToken, getStoredToken, storeToken } from './auth/session';
 import { AuthGate } from './components/AuthGate';
 import { Desktop } from './components/Desktop';
+import { DetachedMessenger } from './components/DetachedMessenger';
 import { Onboarding } from './components/Onboarding';
 import { PinLockScreen } from './components/PinLockScreen';
 import { SocketProvider } from './components/SocketProvider';
@@ -27,6 +28,17 @@ export function App() {
   const [showWelcome, setShowWelcome] = useState(false);
   const [language, setLanguage] = useState<Language>(() => getStoredLanguage());
   const [theme, setTheme] = useState<Theme>(() => getStoredTheme());
+
+  const isMessengerWindow = typeof window !== 'undefined' && (
+    new URLSearchParams(window.location.search).get('window') === 'messenger'
+    || window.location.hash.includes('window=messenger')
+  );
+
+  useEffect(() => {
+    if (isMessengerWindow) {
+      document.title = 'NotOS Messenger';
+    }
+  }, [isMessengerWindow]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -71,7 +83,12 @@ export function App() {
     }
 
     async function boot() {
-      const hasOnboarded = localStorage.getItem('notoc.onboarded');
+      const queryToken = new URLSearchParams(window.location.search).get('token');
+      if (queryToken && !getStoredToken()) {
+        storeToken(queryToken, true);
+      }
+      const storedToken = queryToken || getStoredToken();
+      const hasOnboarded = localStorage.getItem('notoc.onboarded') || Boolean(storedToken);
       if (!hasOnboarded) {
         setOnboarding(true);
         setBootStatus('ready');
@@ -79,13 +96,13 @@ export function App() {
         return;
       }
 
-      const storedToken = getStoredToken();
       if (!storedToken) {
         setBootStatus('ready');
         setBooting(false);
         return;
       }
 
+      void window.notoc?.setServerUrl?.(getApiBaseUrl());
       void checkClientUpdate();
 
       setBootStatus('account');
@@ -162,29 +179,11 @@ export function App() {
   }, []);
 
   if (booting) {
-    const bootLabel = language === 'ru'
-      ? bootStatus === 'connection'
-        ? 'Проверка соединения с сервером...'
-        : bootStatus === 'updates'
-          ? 'Проверка обновлений...'
-          : bootStatus === 'account'
-            ? 'Вход в аккаунт...'
-            : 'Запуск NotOS...'
-      : language === 'uk'
-        ? bootStatus === 'connection'
-          ? 'Перевірка зʼєднання із сервером...'
-          : bootStatus === 'updates'
-            ? 'Перевірка оновлень...'
-            : bootStatus === 'account'
-              ? 'Вхід в акаунт...'
-              : 'Запуск NotOS...'
-        : bootStatus === 'connection'
-          ? 'Checking server connection...'
-          : bootStatus === 'updates'
-            ? 'Checking for updates...'
-            : bootStatus === 'account'
-              ? 'Signing in...'
-              : 'Starting NotOS...';
+    const bootLabel =
+      bootStatus === 'connection' ? t(language, 'bootCheckingConnection')
+      : bootStatus === 'updates' ? t(language, 'bootCheckingUpdates')
+      : bootStatus === 'account' ? t(language, 'bootSigningIn')
+      : t(language, 'bootStarting');
     return (
       <>
         <TitleBar language={language} />
@@ -235,6 +234,25 @@ export function App() {
           onSignOut={handleLogout}
         />
       </>
+    );
+  }
+
+  if (isMessengerWindow && token && user) {
+    const searchParams = new URLSearchParams(window.location.search);
+    const initialChatUserId = searchParams.get('userId');
+    const initialGroupId = searchParams.get('groupId');
+    return (
+      <SocketProvider token={token}>
+        <DetachedMessenger
+          token={token}
+          language={language}
+          currentUser={user}
+          onUserChange={handleUserChange}
+          onLogout={handleLogout}
+          initialChatUserId={initialChatUserId}
+          initialGroupId={initialGroupId}
+        />
+      </SocketProvider>
     );
   }
 

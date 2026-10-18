@@ -278,6 +278,10 @@ export function tenorLocale(language: string): string {
       return 'ru_RU';
     case 'uk':
       return 'uk_UA';
+    case 'zh':
+      return 'zh_CN';
+    case 'zh-TW':
+      return 'zh_TW';
     default:
       return 'en_US';
   }

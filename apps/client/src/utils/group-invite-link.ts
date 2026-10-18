@@ -15,9 +15,12 @@ export function groupInviteLinkBase() {
   const configured = import.meta.env.VITE_GROUP_INVITE_LINK_BASE as string | undefined;
   if (configured && configured.trim()) return configured.replace(/\/+$/, '');
   if (typeof window !== 'undefined' && window.location?.origin) {
-    return window.location.origin;
+    const o = window.location.origin;
+    if (!o.includes('localhost') && !o.includes('127.0.0.1') && !o.startsWith('file:')) {
+      return o;
+    }
   }
-  return '';
+  return 'https://notos.tech';
 }
 
 export function buildGroupInviteLink(inviteCode: string, channelId?: string | null) {

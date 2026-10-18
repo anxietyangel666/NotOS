@@ -21,14 +21,18 @@ export async function getMusicTracks(userId: string) {
   }
 }
 
-export async function addMusicTrack(userId: string, track: Omit<MusicTrack, 'id' | 'createdAt'>) {
+export async function addMusicTrack(
+  userId: string,
+  track: Omit<MusicTrack, 'id' | 'createdAt'> & { id?: string; createdAt?: string }
+) {
   const current = await getMusicTracks(userId);
+  const id = track.id || (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`);
   const nextTrack: MusicTrack = {
     ...track,
-    id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-    createdAt: new Date().toISOString()
+    id,
+    createdAt: track.createdAt || new Date().toISOString()
   };
-  const next = [...current.filter((item) => item.storageItemId !== track.storageItemId), nextTrack];
+  const next = [...current.filter((item) => item.storageItemId !== track.storageItemId && item.id !== id), nextTrack];
   localStorage.setItem(playlistKey(userId), JSON.stringify(next));
   return nextTrack;
 }

@@ -4,6 +4,7 @@ import type { PublicUser, VoiceChatMessage, VoiceParticipant } from '../api/type
 import { applyCallAudioConstraints, audioConstraintsFromCallSettings, loadCallSettings, type CallSettings } from '../utils/call-settings';
 import { createRnnoiseNode, destroyRnnoiseNode, setRnnoiseEnabled } from '../utils/rnnoise';
 import { loadUserStatus, patchVoiceState, STATUS_CHANGED_EVENT, type UserStatusState } from '../utils/user-status';
+import { playPttSound } from '../utils/ptt-sound';
 import type { ScreenSource } from './use-voice-call';
 
 const ICE_SERVERS: RTCIceServer[] = [
@@ -32,6 +33,7 @@ type PeerEntry = {
   polite: boolean;
   audioSenderAdded: boolean;
   screenSender: RTCRtpSender | null;
+  cameraSender: RTCRtpSender | null;
 };
 
 type UseVoiceRoomArgs = {
@@ -46,15 +48,19 @@ export function useVoiceRoom({ socket, currentUser }: UseVoiceRoomArgs) {
   const [participants, setParticipants] = useState<VoiceParticipant[]>([]);
   const [remoteStreams, setRemoteStreams] = useState<Map<string, MediaStream>>(new Map());
   const [remoteVideo, setRemoteVideo] = useState<Map<string, MediaStream>>(new Map());
+  const [remoteCameras, setRemoteCameras] = useState<Map<string, MediaStream>>(new Map());
   const [chat, setChat] = useState<VoiceChatMessage[]>([]);
   const [muted, setMuted] = useState(() => loadUserStatus().voice.muted);
   const [deafened, setDeafened] = useState(() => loadUserStatus().voice.deafened);
   const [sharingScreen, setSharingScreen] = useState(false);
+  const [cameraActive, setCameraActive] = useState(false);
   const [localScreenStream, setLocalScreenStream] = useState<MediaStream | null>(null);
+  const [localCameraStream, setLocalCameraStream] = useState<MediaStream | null>(null);
   const [joining, setJoining] = useState(false);
   const [error, setError] = useState('');
   const [talkingIds, setTalkingIds] = useState<Set<string>>(new Set());
   const [screenSources, setScreenSources] = useState<ScreenSource[] | null>(null);
+  const [settingsVersion, setSettingsVersion] = useState(0);
 
   const socketRef = useRef<Socket | null>(null);
   const channelRef = useRef<string | null>(null);
@@ -64,6 +70,7 @@ export function useVoiceRoom({ socket, currentUser }: UseVoiceRoomArgs) {
   const rawMicTrackRef = useRef<MediaStreamTrack | null>(null);
   const micTrackRef = useRef<MediaStreamTrack | null>(null);
   const screenStreamRef = useRef<MediaStream | null>(null);
+  const cameraStreamRef = useRef<MediaStream | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const gainRef = useRef<GainNode | null>(null);
@@ -73,11 +80,16 @@ export function useVoiceRoom({ socket, currentUser }: UseVoiceRoomArgs) {
   const mutedRef = useRef(false);
   const deafenedRef = useRef(false);
   const pttActiveRef = useRef(false);
+  const bitrateRef = useRef(64000);
+  const streamEnabledRef = useRef(true);
+  const videoQualityRef = useRef<'auto' | '720' | '1080'>('auto');
+  const participantsRef = useRef<VoiceParticipant[]>([]);
 
   socketRef.current = socket;
   channelRef.current = activeChannelId;
   mutedRef.current = muted;
   deafenedRef.current = deafened;
+  participantsRef.current = participants;
 
   const setMicEnabled = (enabled: boolean) => {
     if (micTrackRef.current) micTrackRef.current.enabled = enabled;
@@ -108,6 +120,7 @@ export function useVoiceRoom({ socket, currentUser }: UseVoiceRoomArgs) {
   // push-to-talk, mute). Output volume is applied by the audio sink.
   const refreshSettings = useCallback(() => {
     settingsRef.current = loadCallSettings();
+    setSettingsVersion((v) => v + 1);
     void applyCallAudioConstraints(rawMicTrackRef.current, settingsRef.current);
     setRnnoiseEnabled(rnnoiseNodeRef.current, settingsRef.current.noiseSuppression);
     applyMicVolume();
@@ -187,7 +200,7 @@ export function useVoiceRoom({ socket, currentUser }: UseVoiceRoomArgs) {
 
   function createPeer(peerId: string, polite: boolean): PeerEntry {
     const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-    const entry: PeerEntry = { pc, polite, audioSenderAdded: false, screenSender: null };
+    const entry: PeerEntry = { pc, polite, audioSenderAdded: false, screenSender: null, cameraSender: null };
     peersRef.current.set(peerId, entry);
 
     // Add our local audio.
@@ -195,14 +208,27 @@ export function useVoiceRoom({ socket, currentUser }: UseVoiceRoomArgs) {
     if (local) {
       local.getAudioTracks().forEach((track) => pc.addTrack(track, local));
       entry.audioSenderAdded = true;
+      for (const sender of pc.getSenders()) {
+        if (sender.track?.kind !== 'audio') continue;
+        const params = sender.getParameters();
+        if (!params.encodings?.length) params.encodings = [{}];
+        params.encodings[0].maxBitrate = bitrateRef.current;
+        void sender.setParameters(params).catch(() => undefined);
+      }
     }
-    // Always offer a video receive slot so joining an already-shared room shows
-    // the existing screen share without waiting for the sharer to reconnect.
+    // Always offer video receive slots so joining a room with active video shows
+    // the existing video without waiting for the sender to reconnect.
+    try { pc.addTransceiver('video', { direction: 'recvonly' }); } catch { /* ignore */ }
     try { pc.addTransceiver('video', { direction: 'recvonly' }); } catch { /* ignore */ }
     // Re-attach an ongoing screen share to the new peer.
     if (screenStreamRef.current) {
       const vt = screenStreamRef.current.getVideoTracks()[0];
       if (vt) entry.screenSender = pc.addTrack(vt, screenStreamRef.current);
+    }
+    // Re-attach an ongoing camera stream to the new peer.
+    if (cameraStreamRef.current) {
+      const ct = cameraStreamRef.current.getVideoTracks()[0];
+      if (ct) entry.cameraSender = pc.addTrack(ct, cameraStreamRef.current);
     }
 
     pc.onicecandidate = (event) => {
@@ -220,18 +246,39 @@ export function useVoiceRoom({ socket, currentUser }: UseVoiceRoomArgs) {
           return next;
         });
       } else if (event.track.kind === 'video') {
-        setRemoteVideo((prev) => {
-          const next = new Map(prev);
-          next.set(peerId, stream);
-          return next;
-        });
-        event.track.onended = () => {
-          setRemoteVideo((prev) => {
+        const p = participantsRef.current.find((x) => x.userId === peerId);
+        const isCamera =
+          (p?.cameraStreamId && stream.id === p.cameraStreamId) ||
+          (p?.camera && !p?.screen) ||
+          (!event.track.getSettings?.().displaySurface && p?.camera);
+
+        if (isCamera) {
+          setRemoteCameras((prev) => {
             const next = new Map(prev);
-            next.delete(peerId);
+            next.set(peerId, stream);
             return next;
           });
-        };
+          event.track.onended = () => {
+            setRemoteCameras((prev) => {
+              const next = new Map(prev);
+              next.delete(peerId);
+              return next;
+            });
+          };
+        } else {
+          setRemoteVideo((prev) => {
+            const next = new Map(prev);
+            next.set(peerId, stream);
+            return next;
+          });
+          event.track.onended = () => {
+            setRemoteVideo((prev) => {
+              const next = new Map(prev);
+              next.delete(peerId);
+              return next;
+            });
+          };
+        }
       }
     };
 
@@ -280,6 +327,7 @@ export function useVoiceRoom({ socket, currentUser }: UseVoiceRoomArgs) {
     }
     setRemoteStreams((prev) => { const n = new Map(prev); n.delete(peerId); return n; });
     setRemoteVideo((prev) => { const n = new Map(prev); n.delete(peerId); return n; });
+    setRemoteCameras((prev) => { const n = new Map(prev); n.delete(peerId); return n; });
   }
 
   function cleanupLocal() {
@@ -288,10 +336,12 @@ export function useVoiceRoom({ socket, currentUser }: UseVoiceRoomArgs) {
     localStreamRef.current?.getTracks().forEach((t) => t.stop());
     rawMicStreamRef.current?.getTracks().forEach((t) => t.stop());
     screenStreamRef.current?.getTracks().forEach((t) => t.stop());
+    cameraStreamRef.current?.getTracks().forEach((t) => t.stop());
     localStreamRef.current = null;
     rawMicStreamRef.current = null;
     rawMicTrackRef.current = null;
     screenStreamRef.current = null;
+    cameraStreamRef.current = null;
     micTrackRef.current = null;
     if (audioCtxRef.current) {
       void audioCtxRef.current.close().catch(() => undefined);
@@ -327,22 +377,30 @@ export function useVoiceRoom({ socket, currentUser }: UseVoiceRoomArgs) {
     setParticipants([]);
     setRemoteStreams(new Map());
     setRemoteVideo(new Map());
+    setRemoteCameras(new Map());
     setChat([]);
     syncVoiceStateFromStore();
     setSharingScreen(false);
+    setCameraActive(false);
     setLocalScreenStream(null);
+    setLocalCameraStream(null);
     setTalkingIds(new Set());
     setError('');
   }, [currentUser]);
 
-  const join = useCallback(async (channelId: string) => {
+  const join = useCallback(async (channelId: string, options?: { bitrate?: number; voiceMode?: 'voice_activity' | 'ptt'; streamEnabled?: boolean; videoQuality?: 'auto' | '720' | '1080' }) => {
     if (!socketRef.current) return;
     if (channelRef.current === channelId) return;
     // Leave any current room first.
     if (channelRef.current) leave();
     setJoining(true);
     setError('');
+    bitrateRef.current = Math.max(8000, Math.min(384000, options?.bitrate ?? 64000));
+    streamEnabledRef.current = options?.streamEnabled !== false;
+    videoQualityRef.current = options?.videoQuality ?? 'auto';
     settingsRef.current = loadCallSettings();
+    if (options?.voiceMode === 'ptt') settingsRef.current = { ...settingsRef.current, pushToTalk: true };
+    setSettingsVersion((v) => v + 1);
     syncVoiceStateFromStore();
     try {
       await buildLocalAudio();
@@ -356,6 +414,7 @@ export function useVoiceRoom({ socket, currentUser }: UseVoiceRoomArgs) {
         userId: currentUser.id,
         user: currentUser,
         muted: mutedRef.current,
+        deafened: deafenedRef.current,
         screen: false,
         talking: false,
         joinedAt: Date.now()
@@ -365,7 +424,7 @@ export function useVoiceRoom({ socket, currentUser }: UseVoiceRoomArgs) {
         ? existing
         : [...existing, selfParticipant];
       setParticipantsForChannel(channelId, merged);
-      socketRef.current.emit('voice:join', { channelId, muted: mutedRef.current });
+      socketRef.current.emit('voice:join', { channelId, muted: mutedRef.current, deafened: deafenedRef.current });
     } catch {
       setError('micFailed');
       cleanupLocal();
@@ -383,13 +442,16 @@ export function useVoiceRoom({ socket, currentUser }: UseVoiceRoomArgs) {
     mutedRef.current = effectiveMuted;
     deafenedRef.current = nextDeafened;
 
-    if (settingsRef.current.pushToTalk) {
-      setMicEnabled(pttActiveRef.current && !effectiveMuted);
+    if (effectiveMuted) {
+      pttActiveRef.current = false;
+      setMicEnabled(false);
+    } else if (settingsRef.current.pushToTalk) {
+      setMicEnabled(pttActiveRef.current);
     } else {
-      setMicEnabled(!effectiveMuted);
+      setMicEnabled(true);
     }
 
-    if (channelRef.current) socketRef.current?.emit('voice:state', { channelId: channelRef.current, muted: effectiveMuted });
+    if (channelRef.current) socketRef.current?.emit('voice:state', { channelId: channelRef.current, muted: effectiveMuted, deafened: nextDeafened });
     if (!fromStore) patchVoiceState({ muted: effectiveMuted, deafened: nextDeafened });
   }, []);
 
@@ -420,6 +482,10 @@ export function useVoiceRoom({ socket, currentUser }: UseVoiceRoomArgs) {
   }, []);
 
   const startScreenShare = useCallback(async (sourceId?: string) => {
+    if (!streamEnabledRef.current) {
+      setError('STREAM_DISABLED');
+      return;
+    }
     setScreenSources(null);
     try {
       let display: MediaStream;
@@ -432,13 +498,16 @@ export function useVoiceRoom({ socket, currentUser }: UseVoiceRoomArgs) {
       }
       screenStreamRef.current = display;
       const track = display.getVideoTracks()[0];
+      if (videoQualityRef.current === '720') void track.applyConstraints({ height: { ideal: 720 } }).catch(() => undefined);
+      if (videoQualityRef.current === '1080') void track.applyConstraints({ height: { ideal: 1080 } }).catch(() => undefined);
       track.onended = () => { void stopScreenShare(); };
-      peersRef.current.forEach((entry) => {
+      peersRef.current.forEach((entry, peerId) => {
         entry.screenSender = entry.pc.addTrack(track, display);
+        void negotiateWithPeer(peerId);
       });
       setLocalScreenStream(display);
       setSharingScreen(true);
-      socketRef.current?.emit('voice:state', { channelId: channelRef.current, screen: true });
+      socketRef.current?.emit('voice:state', { channelId: channelRef.current, screen: true, screenStreamId: display.id });
     } catch {
       setError('screenFailed');
     }
@@ -465,6 +534,53 @@ export function useVoiceRoom({ socket, currentUser }: UseVoiceRoomArgs) {
   }, [startScreenShare, stopScreenShare]);
 
   const cancelScreenPicker = useCallback(() => setScreenSources(null), []);
+
+  const stopCamera = useCallback(() => {
+    cameraStreamRef.current?.getTracks().forEach((t) => t.stop());
+    cameraStreamRef.current = null;
+    peersRef.current.forEach((entry, peerId) => {
+      if (entry.cameraSender) {
+        try { entry.pc.removeTrack(entry.cameraSender); } catch { /* ignore */ }
+        entry.cameraSender = null;
+        void negotiateWithPeer(peerId);
+      }
+    });
+    setLocalCameraStream(null);
+    setCameraActive(false);
+    socketRef.current?.emit('voice:state', { channelId: channelRef.current, camera: false });
+  }, []);
+
+  const startCamera = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' },
+        audio: false
+      });
+      cameraStreamRef.current = stream;
+      const track = stream.getVideoTracks()[0];
+      if (!track) return;
+      track.onended = () => { stopCamera(); };
+      peersRef.current.forEach((entry, peerId) => {
+        try {
+          entry.cameraSender = entry.pc.addTrack(track, stream);
+          void negotiateWithPeer(peerId);
+        } catch { /* ignore */ }
+      });
+      setLocalCameraStream(stream);
+      setCameraActive(true);
+      socketRef.current?.emit('voice:state', { channelId: channelRef.current, camera: true, cameraStreamId: stream.id });
+    } catch {
+      setError('cameraFailed');
+    }
+  }, [stopCamera]);
+
+  const toggleCamera = useCallback(async () => {
+    if (cameraActive) {
+      stopCamera();
+    } else {
+      await startCamera();
+    }
+  }, [cameraActive, startCamera, stopCamera]);
 
   const sendChat = useCallback((body: string) => {
     const text = body.trim();
@@ -505,9 +621,11 @@ export function useVoiceRoom({ socket, currentUser }: UseVoiceRoomArgs) {
       if (!peersRef.current.has(payload.userId)) createPeer(payload.userId, false);
       // If we are currently sharing our screen, the newcomer's polite offer will
       // include only a recvonly video transceiver; our side won't auto-renegotiate
+      // If we are currently sharing our screen or camera, the newcomer's polite offer will
+      // include only recvonly video transceivers; our side won't auto-renegotiate
       // because our track list didn't change. Force an offer so the new joiner
-      // actually receives the ongoing screen share.
-      if (screenStreamRef.current) {
+      // actually receives the ongoing video streams.
+      if (screenStreamRef.current || cameraStreamRef.current) {
         // Small delay so the polite peer finishes its initial offer first.
         window.setTimeout(() => { void negotiateWithPeer(payload.userId); }, 400);
       }
@@ -546,16 +664,32 @@ export function useVoiceRoom({ socket, currentUser }: UseVoiceRoomArgs) {
       setParticipantsForChannel(payload.channelId, payload.participants);
     };
 
-    const onState = (payload: { channelId: string; userId: string; muted: boolean; screen: boolean; talking: boolean }) => {
+    const onState = (payload: { channelId: string; userId: string; muted: boolean; deafened?: boolean; screen: boolean; camera?: boolean; cameraStreamId?: string; screenStreamId?: string; talking: boolean }) => {
       setParticipants((prev) => prev.map((p) => p.userId === payload.userId && payload.channelId === channelRef.current
-        ? { ...p, muted: payload.muted, screen: payload.screen, talking: payload.talking }
+        ? { ...p, muted: payload.muted, deafened: payload.deafened, screen: payload.screen, camera: payload.camera, cameraStreamId: payload.cameraStreamId, screenStreamId: payload.screenStreamId, talking: payload.talking }
         : p));
+      if (!payload.camera) {
+        setRemoteCameras((prev) => {
+          if (!prev.has(payload.userId)) return prev;
+          const next = new Map(prev);
+          next.delete(payload.userId);
+          return next;
+        });
+      }
+      if (!payload.screen) {
+        setRemoteVideo((prev) => {
+          if (!prev.has(payload.userId)) return prev;
+          const next = new Map(prev);
+          next.delete(payload.userId);
+          return next;
+        });
+      }
       // Also sync the per-channel cached list so the left voice-channel list
       // updates mic/screen icons in real time for every group member.
       const cached = channelParticipantsRef.current.get(payload.channelId);
       if (cached && cached.some((p) => p.userId === payload.userId)) {
         const next = cached.map((p) => p.userId === payload.userId
-          ? { ...p, muted: payload.muted, screen: payload.screen, talking: payload.talking }
+          ? { ...p, muted: payload.muted, deafened: payload.deafened, screen: payload.screen, camera: payload.camera, talking: payload.talking }
           : p);
         channelParticipantsRef.current.set(payload.channelId, next);
         setChannelParticipants(new Map(channelParticipantsRef.current));
@@ -660,63 +794,142 @@ export function useVoiceRoom({ socket, currentUser }: UseVoiceRoomArgs) {
 
   // Push-to-talk: hold the configured key to transmit while connected.
   useEffect(() => {
-    if (!activeChannelId || !settingsRef.current.pushToTalk) return;
-    const key = settingsRef.current.pushToTalkKey;
+    if (!activeChannelId) return;
+    const currentSettings = settingsRef.current;
+    if (!currentSettings.pushToTalk) {
+      pttActiveRef.current = false;
+      if (!mutedRef.current) setMicEnabled(true);
+      return;
+    }
 
-    // When the Electron global hotkey is available it becomes the single source
-    // of truth for PTT (it works whether or not the window is focused). The
-    // window keydown/keyup listeners below would otherwise race with the native
-    // hook: the OS fires the window `keyup` the instant the key is physically
-    // released, while the native hook is still inside its release-delay window.
-    // That race cut the mic off early when the window was focused. So we only
-    // use the window listeners as a fallback when no native hook is present.
-    const native = window.notoc;
-    const hasNative = Boolean(native?.registerPushToTalk);
+    const key = currentSettings.pushToTalkKey || 'Space';
+    let windowHeld = false;
+    let globalHeld = false;
 
+    const syncMic = (playSound = false) => {
+      if (mutedRef.current || deafenedRef.current) {
+        pttActiveRef.current = false;
+        setMicEnabled(false);
+        return;
+      }
+      const active = windowHeld || globalHeld;
+      const prev = pttActiveRef.current;
+      pttActiveRef.current = active;
+      setMicEnabled(active);
+      if (playSound && prev !== active) {
+        playPttSound(active);
+      }
+    };
+
+    // When PTT is active, mic starts muted until key is held
+    syncMic(false);
+
+    const isTargetInput = (target: EventTarget | null) => {
+      const el = target as HTMLElement | null;
+      if (!el) return false;
+      const tag = el.tagName;
+      return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable;
+    };
+
+    const isAlt = (code: string) => code === 'Alt' || code === 'AltLeft' || code === 'AltRight';
+    const isCtrl = (code: string) => code === 'Control' || code === 'Ctrl' || code === 'ControlLeft' || code === 'ControlRight';
+    const isShift = (code: string) => code === 'Shift' || code === 'ShiftLeft' || code === 'ShiftRight';
+
+    const isMatch = (eventCode: string) => {
+      if (eventCode === key) return true;
+      if (isAlt(key) && isAlt(eventCode)) return true;
+      if (isCtrl(key) && isCtrl(eventCode)) return true;
+      if (isShift(key) && isShift(eventCode)) return true;
+      return false;
+    };
+
+    const down = (event: KeyboardEvent) => {
+      if (mutedRef.current || deafenedRef.current) return;
+      if (!isMatch(event.code)) return;
+      if (isTargetInput(event.target)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.repeat) return;
+      if (!windowHeld) {
+        windowHeld = true;
+        syncMic(true);
+      }
+    };
+
+    const up = (event: KeyboardEvent) => {
+      if (!isMatch(event.code)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (windowHeld) {
+        windowHeld = false;
+        syncMic(true);
+      }
+    };
+
+    const onBlur = () => {
+      if (windowHeld) {
+        windowHeld = false;
+        syncMic(true);
+      }
+    };
+
+    window.addEventListener('keydown', down, true);
+    window.addEventListener('keyup', up, true);
+    window.addEventListener('blur', onBlur);
+
+    // Mouse buttons support (Mouse3, Mouse4, Mouse5)
+    let mouseDown: ((event: MouseEvent) => void) | undefined;
+    let mouseUp: ((event: MouseEvent) => void) | undefined;
+    if (key.startsWith('Mouse')) {
+      const targetBtn = key === 'Mouse3' ? 1 : key === 'Mouse4' ? 3 : key === 'Mouse5' ? 4 : -1;
+      if (targetBtn !== -1) {
+        mouseDown = (event: MouseEvent) => {
+          if (mutedRef.current || deafenedRef.current) return;
+          if (event.button === targetBtn) {
+            windowHeld = true;
+            syncMic(true);
+          }
+        };
+        mouseUp = (event: MouseEvent) => {
+          if (event.button === targetBtn) {
+            windowHeld = false;
+            syncMic(true);
+          }
+        };
+        window.addEventListener('mousedown', mouseDown, true);
+        window.addEventListener('mouseup', mouseUp, true);
+      }
+    }
+
+    // Background push-to-talk: register a system-wide hotkey through Electron if available
     let unregisterDown: (() => void) | undefined;
     let unregisterUp: (() => void) | undefined;
-    let down: ((event: KeyboardEvent) => void) | undefined;
-    let up: ((event: KeyboardEvent) => void) | undefined;
-
-    if (hasNative) {
-      // Background-capable push-to-talk via a system-wide hotkey. Drives the
-      // mic for both focused and unfocused (in-game) states.
-      void native?.registerPushToTalk?.(key);
-      unregisterDown = native!.onPushToTalkDown?.(() => {
-        if (pttActiveRef.current) return;
-        pttActiveRef.current = true;
-        if (!mutedRef.current) setMicEnabled(true);
+    const native = window.notoc;
+    if (native?.registerPushToTalk) {
+      void native.registerPushToTalk(key);
+      unregisterDown = native.onPushToTalkDown?.(() => {
+        if (mutedRef.current || deafenedRef.current) return;
+        globalHeld = true;
+        syncMic(true);
       });
-      unregisterUp = native!.onPushToTalkUp?.(() => {
-        pttActiveRef.current = false;
-        setMicEnabled(false);
+      unregisterUp = native.onPushToTalkUp?.(() => {
+        globalHeld = false;
+        syncMic(true);
       });
-    } else {
-      // Browser / no-Electron fallback: in-window key listeners only.
-      down = (event: KeyboardEvent) => {
-        if (event.code !== key || pttActiveRef.current) return;
-        const tag = (event.target as HTMLElement)?.tagName;
-        if (tag === 'INPUT' || tag === 'TEXTAREA') return;
-        pttActiveRef.current = true;
-        if (!mutedRef.current) setMicEnabled(true);
-      };
-      up = (event: KeyboardEvent) => {
-        if (event.code !== key) return;
-        pttActiveRef.current = false;
-        setMicEnabled(false);
-      };
-      window.addEventListener('keydown', down);
-      window.addEventListener('keyup', up);
     }
 
     return () => {
-      if (down) window.removeEventListener('keydown', down);
-      if (up) window.removeEventListener('keyup', up);
+      window.removeEventListener('keydown', down, true);
+      window.removeEventListener('keyup', up, true);
+      window.removeEventListener('blur', onBlur);
+      if (mouseDown) window.removeEventListener('mousedown', mouseDown, true);
+      if (mouseUp) window.removeEventListener('mouseup', mouseUp, true);
       unregisterDown?.();
       unregisterUp?.();
       void window.notoc?.unregisterPushToTalk?.();
+      pttActiveRef.current = false;
     };
-  }, [activeChannelId]);
+  }, [activeChannelId, settingsVersion]);
 
   // Apply saved settings live when the user edits them while connected.
   useEffect(() => {
@@ -748,7 +961,10 @@ export function useVoiceRoom({ socket, currentUser }: UseVoiceRoomArgs) {
     muted,
     deafened,
     sharingScreen,
+    cameraActive,
     localScreenStream,
+    localCameraStream,
+    remoteCameras,
     joining,
     error,
     talkingIds,
@@ -760,6 +976,9 @@ export function useVoiceRoom({ socket, currentUser }: UseVoiceRoomArgs) {
     startScreenShare,
     stopScreenShare,
     requestScreenShare,
+    startCamera,
+    stopCamera,
+    toggleCamera,
     cancelScreenPicker,
     requestGroupRooms,
     refreshSettings,

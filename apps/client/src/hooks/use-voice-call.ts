@@ -3,7 +3,9 @@ import type { Socket } from 'socket.io-client';
 import type { PublicUser } from '../api/types';
 import { applyCallAudioConstraints, audioConstraintsFromCallSettings, loadCallSettings, type CallSettings } from '../utils/call-settings';
 import { createRnnoiseNode, destroyRnnoiseNode, setRnnoiseEnabled } from '../utils/rnnoise';
+import { playPttSound } from '../utils/ptt-sound';
 import { loadUserStatus, patchVoiceState, STATUS_CHANGED_EVENT, type UserStatusState } from '../utils/user-status';
+import { getUserVolume, USER_VOLUME_CHANGED_EVENT } from '../utils/user-volume';
 
 export type CallPhase = 'idle' | 'outgoing' | 'incoming' | 'connecting' | 'active';
 
@@ -50,8 +52,13 @@ export function useVoiceCall({ socket, currentUser, resolveUser, onCallEnded }: 
   const [muted, setMuted] = useState(() => loadUserStatus().voice.muted);
   const [deafened, setDeafened] = useState(() => loadUserStatus().voice.deafened);
   const [sharingScreen, setSharingScreen] = useState(false);
+  const [cameraActive, setCameraActive] = useState(false);
+  const [localCameraStream, setLocalCameraStream] = useState<MediaStream | null>(null);
   const [remoteMuted, setRemoteMuted] = useState(false);
   const [remoteSharingScreen, setRemoteSharingScreen] = useState(false);
+  const [remoteCameraActive, setRemoteCameraActive] = useState(false);
+  const [remoteCameraStream, setRemoteCameraStream] = useState<MediaStream | null>(null);
+  const [remoteDeafened, setRemoteDeafened] = useState(false);
   const [localTalking, setLocalTalking] = useState(false);
   const [remoteTalking, setRemoteTalking] = useState(false);
   const [callError, setCallError] = useState('');
@@ -69,10 +76,15 @@ export function useVoiceCall({ socket, currentUser, resolveUser, onCallEnded }: 
   const rawMicStreamRef = useRef<MediaStream | null>(null);
   const rawMicTrackRef = useRef<MediaStreamTrack | null>(null);
   const screenStreamRef = useRef<MediaStream | null>(null);
+  const cameraStreamRef = useRef<MediaStream | null>(null);
   const micTrackRef = useRef<MediaStreamTrack | null>(null);
   const screenSenderRef = useRef<RTCRtpSender | null>(null);
+  const cameraSenderRef = useRef<RTCRtpSender | null>(null);
   const remoteStreamRef = useRef<MediaStream | null>(null);
   const remoteVideoStreamRef = useRef<MediaStream | null>(null);
+  const remoteCameraStreamRef = useRef<MediaStream | null>(null);
+  const remoteCameraStreamIdRef = useRef<string | null>(null);
+  const remoteScreenStreamIdRef = useRef<string | null>(null);
 
   const audioCtxRef = useRef<AudioContext | null>(null);
   const gainRef = useRef<GainNode | null>(null);
@@ -95,14 +107,21 @@ export function useVoiceCall({ socket, currentUser, resolveUser, onCallEnded }: 
   const endedCallsRef = useRef<Set<string>>(new Set());
 
   const [remoteVideoStream, setRemoteVideoStream] = useState<MediaStream | null>(null);
-  // Local screen-share preview so the sharer can see what is being broadcast.
   const [localScreenStream, setLocalScreenStream] = useState<MediaStream | null>(null);
+  const [settingsVersion, setSettingsVersion] = useState(0);
+  const [incomingSignal, setIncomingSignal] = useState<unknown>(null);
 
   peerRef.current = peer;
   socketRef.current = socket;
 
+  const sendSignal = useCallback((data: unknown) => {
+    if (!socketRef.current || !callIdRef.current) return;
+    socketRef.current.emit('call:signal', { callId: callIdRef.current, data });
+  }, []);
+
   const refreshSettings = useCallback(() => {
     settingsRef.current = loadCallSettings();
+    setSettingsVersion((v) => v + 1);
     void applyCallAudioConstraints(rawMicTrackRef.current, settingsRef.current);
     setRnnoiseEnabled(rnnoiseNodeRef.current, settingsRef.current.noiseSuppression);
     applyMicVolume();
@@ -136,7 +155,8 @@ export function useVoiceCall({ socket, currentUser, resolveUser, onCallEnded }: 
   function applyOutputVolume() {
     const audio = remoteAudioRef.current;
     if (audio) {
-      audio.volume = Math.min(1, Math.max(0, settingsRef.current.outputVolume / 100));
+      const userVol = peerRef.current ? getUserVolume(peerRef.current.id) : 100;
+      audio.volume = Math.min(1, Math.max(0, (settingsRef.current.outputVolume / 100) * (userVol / 100)));
       // Deafen mutes the output element entirely while keeping the volume setting.
       audio.muted = deafenedRef.current;
     }
@@ -152,7 +172,7 @@ export function useVoiceCall({ socket, currentUser, resolveUser, onCallEnded }: 
     }
   }
 
-  function emitState(partial: { muted?: boolean; screen?: boolean; talking?: boolean }) {
+  function emitState(partial: { muted?: boolean; deafened?: boolean; screen?: boolean; camera?: boolean; talking?: boolean; cameraStreamId?: string; screenStreamId?: string }) {
     const live = socketRef.current;
     if (!live || !callIdRef.current) return;
     live.emit('call:state', { callId: callIdRef.current, ...partial });
@@ -164,14 +184,20 @@ export function useVoiceCall({ socket, currentUser, resolveUser, onCallEnded }: 
     localStreamRef.current?.getTracks().forEach((t) => t.stop());
     rawMicStreamRef.current?.getTracks().forEach((t) => t.stop());
     screenStreamRef.current?.getTracks().forEach((t) => t.stop());
+    cameraStreamRef.current?.getTracks().forEach((t) => t.stop());
     localStreamRef.current = null;
     rawMicStreamRef.current = null;
     rawMicTrackRef.current = null;
     screenStreamRef.current = null;
+    cameraStreamRef.current = null;
     micTrackRef.current = null;
     screenSenderRef.current = null;
+    cameraSenderRef.current = null;
     remoteStreamRef.current = null;
     remoteVideoStreamRef.current = null;
+    remoteCameraStreamRef.current = null;
+    remoteCameraStreamIdRef.current = null;
+    remoteScreenStreamIdRef.current = null;
     if (audioCtxRef.current) {
       void audioCtxRef.current.close().catch(() => undefined);
       audioCtxRef.current = null;
@@ -198,13 +224,19 @@ export function useVoiceCall({ socket, currentUser, resolveUser, onCallEnded }: 
     // Preserve the user's mic/deafen preference across calls.
     syncVoiceStateFromStore();
     setSharingScreen(false);
+    setCameraActive(false);
     setRemoteMuted(false);
+    setRemoteDeafened(false);
     setRemoteSharingScreen(false);
+    setRemoteCameraActive(false);
     setLocalTalking(false);
     setRemoteTalking(false);
     setElapsed(0);
     setRemoteVideoStream(null);
+    setRemoteCameraStream(null);
     setLocalScreenStream(null);
+    setLocalCameraStream(null);
+    setIncomingSignal(null);
   }, []);
 
   async function buildLocalAudio(): Promise<MediaStream> {
@@ -296,12 +328,26 @@ export function useVoiceCall({ socket, currentUser, resolveUser, onCallEnded }: 
           void audio.play().catch(() => undefined);
         }
       } else if (event.track.kind === 'video') {
-        remoteVideoStreamRef.current = stream;
-        setRemoteVideoStream(stream);
-        event.track.onended = () => {
-          remoteVideoStreamRef.current = null;
-          setRemoteVideoStream(null);
-        };
+        const isCamera =
+          (remoteCameraStreamIdRef.current && stream.id === remoteCameraStreamIdRef.current) ||
+          (remoteCameraStreamRef.current === null && remoteCameraActive && !remoteSharingScreen) ||
+          (!event.track.getSettings?.().displaySurface && remoteCameraActive);
+
+        if (isCamera) {
+          remoteCameraStreamRef.current = stream;
+          setRemoteCameraStream(stream);
+          event.track.onended = () => {
+            remoteCameraStreamRef.current = null;
+            setRemoteCameraStream(null);
+          };
+        } else {
+          remoteVideoStreamRef.current = stream;
+          setRemoteVideoStream(stream);
+          event.track.onended = () => {
+            remoteVideoStreamRef.current = null;
+            setRemoteVideoStream(null);
+          };
+        }
       }
     };
 
@@ -360,7 +406,7 @@ export function useVoiceCall({ socket, currentUser, resolveUser, onCallEnded }: 
         const pc = createPeerConnection(callId);
         stream.getTracks().forEach((track) => pc.addTrack(track, stream));
         socket.emit('call:accept', { callId });
-        emitState({ muted: mutedRef.current });
+        emitState({ muted: mutedRef.current, deafened: deafenedRef.current });
       } catch {
         setCallError('micFailed');
         socket.emit('call:hangup', { callId });
@@ -406,13 +452,19 @@ export function useVoiceCall({ socket, currentUser, resolveUser, onCallEnded }: 
     mutedRef.current = effectiveMuted;
     deafenedRef.current = nextDeafened;
 
-    if (!settingsRef.current.pushToTalk) setMicEnabled(!effectiveMuted);
-    else if (effectiveMuted) setMicEnabled(false);
+    if (effectiveMuted) {
+      pttActiveRef.current = false;
+      setMicEnabled(false);
+    } else if (settingsRef.current.pushToTalk) {
+      setMicEnabled(pttActiveRef.current);
+    } else {
+      setMicEnabled(true);
+    }
 
     const audio = remoteAudioRef.current;
     if (audio) audio.muted = nextDeafened;
 
-    emitState({ muted: effectiveMuted });
+    emitState({ muted: effectiveMuted, deafened: nextDeafened });
     if (!fromStore) patchVoiceState({ muted: effectiveMuted, deafened: nextDeafened });
   }, []);
 
@@ -465,7 +517,7 @@ export function useVoiceCall({ socket, currentUser, resolveUser, onCallEnded }: 
     await renegotiate();
     setLocalScreenStream(display);
     setSharingScreen(true);
-    emitState({ screen: true });
+    emitState({ screen: true, screenStreamId: display.id });
   }
 
   // Begin screen sharing. In Electron we present a picker of windows/screens first;
@@ -531,6 +583,59 @@ export function useVoiceCall({ socket, currentUser, resolveUser, onCallEnded }: 
     live.emit('call:signal', { callId: callIdRef.current, data: { type: 'offer', sdp: pc.localDescription } });
   }
 
+  const stopCamera = useCallback(async () => {
+    const pc = pcRef.current;
+    cameraStreamRef.current?.getTracks().forEach((t) => t.stop());
+    cameraStreamRef.current = null;
+    if (pc && cameraSenderRef.current) {
+      try {
+        pc.removeTrack(cameraSenderRef.current);
+      } catch {
+        /* ignore */
+      }
+      cameraSenderRef.current = null;
+      await renegotiate();
+    }
+    setLocalCameraStream(null);
+    setCameraActive(false);
+    emitState({ camera: false });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const startCamera = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' },
+        audio: false
+      });
+      cameraStreamRef.current = stream;
+      const track = stream.getVideoTracks()[0];
+      if (!track) return;
+      track.onended = () => {
+        void stopCamera();
+      };
+      const pc = pcRef.current;
+      if (pc) {
+        cameraSenderRef.current = pc.addTrack(track, stream);
+        await renegotiate();
+      }
+      setLocalCameraStream(stream);
+      setCameraActive(true);
+      emitState({ camera: true, cameraStreamId: stream.id });
+    } catch {
+      setCallError('cameraFailed');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stopCamera]);
+
+  const toggleCamera = useCallback(async () => {
+    if (cameraActive) {
+      await stopCamera();
+    } else {
+      await startCamera();
+    }
+  }, [cameraActive, startCamera, stopCamera]);
+
   // --- Signaling wiring ---
 
   useEffect(() => {
@@ -588,9 +693,13 @@ export function useVoiceCall({ socket, currentUser, resolveUser, onCallEnded }: 
     };
 
     const onSignal = async (payload: { callId: string; from: string; data: { type: string; sdp?: RTCSessionDescriptionInit; candidate?: RTCIceCandidateInit } }) => {
+      const { data } = payload;
+      if (data && typeof data === 'object' && typeof data.type === 'string' && data.type.startsWith('whiteboard_')) {
+        setIncomingSignal({ ...data });
+        return;
+      }
       const pc = pcRef.current;
       if (!pc) return;
-      const { data } = payload;
       try {
         if (data.type === 'offer' && data.sdp) {
           await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
@@ -607,8 +716,18 @@ export function useVoiceCall({ socket, currentUser, resolveUser, onCallEnded }: 
       }
     };
 
-    const onRemoteState = (payload: { muted?: boolean; screen?: boolean; talking?: boolean }) => {
+    const onRemoteState = (payload: { muted?: boolean; deafened?: boolean; screen?: boolean; camera?: boolean; talking?: boolean; cameraStreamId?: string; screenStreamId?: string }) => {
       if (typeof payload.muted === 'boolean') setRemoteMuted(payload.muted);
+      if (typeof payload.deafened === 'boolean') setRemoteDeafened(payload.deafened);
+      if (typeof payload.cameraStreamId === 'string') remoteCameraStreamIdRef.current = payload.cameraStreamId;
+      if (typeof payload.screenStreamId === 'string') remoteScreenStreamIdRef.current = payload.screenStreamId;
+      if (typeof payload.camera === 'boolean') {
+        setRemoteCameraActive(payload.camera);
+        if (!payload.camera) {
+          remoteCameraStreamRef.current = null;
+          setRemoteCameraStream(null);
+        }
+      }
       if (typeof payload.screen === 'boolean') {
         setRemoteSharingScreen(payload.screen);
         if (!payload.screen) {
@@ -665,57 +784,157 @@ export function useVoiceCall({ socket, currentUser, resolveUser, onCallEnded }: 
 
   useEffect(() => {
     if (phase !== 'active' && phase !== 'connecting') return;
-    if (!settingsRef.current.pushToTalk) return;
-
-    const key = settingsRef.current.pushToTalkKey;
-    const down = (event: KeyboardEvent) => {
-      if (event.code !== key || pttActiveRef.current) return;
-      const tag = (event.target as HTMLElement)?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
-      pttActiveRef.current = true;
-      if (!mutedRef.current) setMicEnabled(true);
-    };
-    const up = (event: KeyboardEvent) => {
-      if (event.code !== key) return;
+    const currentSettings = settingsRef.current;
+    if (!currentSettings.pushToTalk) {
       pttActiveRef.current = false;
-      setMicEnabled(false);
-    };
-    window.addEventListener('keydown', down);
-    window.addEventListener('keyup', up);
+      if (!mutedRef.current) setMicEnabled(true);
+      return;
+    }
 
-    // Background push-to-talk: register a system-wide hotkey through Electron so
-    // the user can transmit while another app (e.g. a game) is focused. The
-    // in-window listeners above keep working when NotOS itself has focus.
+    const key = currentSettings.pushToTalkKey || 'Space';
+    let windowHeld = false;
+    let globalHeld = false;
+
+    const syncMic = (playSound = false) => {
+      if (mutedRef.current || deafenedRef.current) {
+        pttActiveRef.current = false;
+        setMicEnabled(false);
+        return;
+      }
+      const active = windowHeld || globalHeld;
+      const prev = pttActiveRef.current;
+      pttActiveRef.current = active;
+      setMicEnabled(active);
+      if (playSound && prev !== active) {
+        playPttSound(active);
+      }
+    };
+
+    // When PTT is active, mic starts muted until key is held
+    syncMic(false);
+
+    const isTargetInput = (target: EventTarget | null) => {
+      const el = target as HTMLElement | null;
+      if (!el) return false;
+      const tag = el.tagName;
+      return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable;
+    };
+
+    const isAlt = (code: string) => code === 'Alt' || code === 'AltLeft' || code === 'AltRight';
+    const isCtrl = (code: string) => code === 'Control' || code === 'Ctrl' || code === 'ControlLeft' || code === 'ControlRight';
+    const isShift = (code: string) => code === 'Shift' || code === 'ShiftLeft' || code === 'ShiftRight';
+
+    const isMatch = (eventCode: string) => {
+      if (eventCode === key) return true;
+      if (isAlt(key) && isAlt(eventCode)) return true;
+      if (isCtrl(key) && isCtrl(eventCode)) return true;
+      if (isShift(key) && isShift(eventCode)) return true;
+      return false;
+    };
+
+    const down = (event: KeyboardEvent) => {
+      if (mutedRef.current || deafenedRef.current) return;
+      if (!isMatch(event.code)) return;
+      if (isTargetInput(event.target)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.repeat) return;
+      if (!windowHeld) {
+        windowHeld = true;
+        syncMic(true);
+      }
+    };
+
+    const up = (event: KeyboardEvent) => {
+      if (!isMatch(event.code)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (windowHeld) {
+        windowHeld = false;
+        syncMic(true);
+      }
+    };
+
+    const onBlur = () => {
+      if (windowHeld) {
+        windowHeld = false;
+        syncMic(true);
+      }
+    };
+
+    window.addEventListener('keydown', down, true);
+    window.addEventListener('keyup', up, true);
+    window.addEventListener('blur', onBlur);
+
+    // Mouse buttons support (Mouse3, Mouse4, Mouse5)
+    let mouseDown: ((event: MouseEvent) => void) | undefined;
+    let mouseUp: ((event: MouseEvent) => void) | undefined;
+    if (key.startsWith('Mouse')) {
+      const targetBtn = key === 'Mouse3' ? 1 : key === 'Mouse4' ? 3 : key === 'Mouse5' ? 4 : -1;
+      if (targetBtn !== -1) {
+        mouseDown = (event: MouseEvent) => {
+          if (mutedRef.current || deafenedRef.current) return;
+          if (event.button === targetBtn) {
+            windowHeld = true;
+            syncMic(true);
+          }
+        };
+        mouseUp = (event: MouseEvent) => {
+          if (event.button === targetBtn) {
+            windowHeld = false;
+            syncMic(true);
+          }
+        };
+        window.addEventListener('mousedown', mouseDown, true);
+        window.addEventListener('mouseup', mouseUp, true);
+      }
+    }
+
+    // Background push-to-talk: register a system-wide hotkey through Electron if available
     let unregisterDown: (() => void) | undefined;
     let unregisterUp: (() => void) | undefined;
     const native = window.notoc;
     if (native?.registerPushToTalk) {
       void native.registerPushToTalk(key);
       unregisterDown = native.onPushToTalkDown?.(() => {
-        if (pttActiveRef.current) return;
-        pttActiveRef.current = true;
-        if (!mutedRef.current) setMicEnabled(true);
+        if (mutedRef.current || deafenedRef.current) return;
+        globalHeld = true;
+        syncMic(true);
       });
       unregisterUp = native.onPushToTalkUp?.(() => {
-        pttActiveRef.current = false;
-        setMicEnabled(false);
+        globalHeld = false;
+        syncMic(true);
       });
     }
 
     return () => {
-      window.removeEventListener('keydown', down);
-      window.removeEventListener('keyup', up);
+      window.removeEventListener('keydown', down, true);
+      window.removeEventListener('keyup', up, true);
+      window.removeEventListener('blur', onBlur);
+      if (mouseDown) window.removeEventListener('mousedown', mouseDown, true);
+      if (mouseUp) window.removeEventListener('mouseup', mouseUp, true);
       unregisterDown?.();
       unregisterUp?.();
       void window.notoc?.unregisterPushToTalk?.();
+      pttActiveRef.current = false;
     };
-  }, [phase]);
+  }, [phase, settingsVersion]);
 
   // Apply saved settings live when the user edits them while connected.
   useEffect(() => {
     const handler = () => refreshSettings();
+    const userVolumeHandler = (event: Event) => {
+      const detail = (event as CustomEvent<{ userId: string; volume: number }>).detail;
+      if (!detail || (peerRef.current && detail.userId === peerRef.current.id)) {
+        applyOutputVolume();
+      }
+    };
     window.addEventListener('notoc:callSettingsChanged', handler);
-    return () => window.removeEventListener('notoc:callSettingsChanged', handler);
+    window.addEventListener(USER_VOLUME_CHANGED_EVENT, userVolumeHandler as EventListener);
+    return () => {
+      window.removeEventListener('notoc:callSettingsChanged', handler);
+      window.removeEventListener(USER_VOLUME_CHANGED_EVENT, userVolumeHandler as EventListener);
+    };
   }, [refreshSettings]);
 
   // React to mute/deafen toggles coming from outside the call (e.g. the taskbar
@@ -740,14 +959,19 @@ export function useVoiceCall({ socket, currentUser, resolveUser, onCallEnded }: 
     muted,
     deafened,
     sharingScreen,
+    cameraActive,
     remoteMuted,
+    remoteDeafened,
     remoteSharingScreen,
+    remoteCameraActive,
     localTalking,
     remoteTalking,
     callError,
     elapsed,
     remoteVideoStream,
+    remoteCameraStream,
     localScreenStream,
+    localCameraStream,
     remoteAudioRef,
     screenSources,
     startCall,
@@ -760,8 +984,13 @@ export function useVoiceCall({ socket, currentUser, resolveUser, onCallEnded }: 
     requestScreenShare,
     startScreenShare,
     stopScreenShare,
+    startCamera,
+    stopCamera,
+    toggleCamera,
     cancelScreenPicker,
     refreshSettings,
-    setCallError
+    setCallError,
+    sendSignal,
+    incomingSignal
   };
 }

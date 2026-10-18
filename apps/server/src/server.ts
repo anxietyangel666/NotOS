@@ -1,4 +1,6 @@
 import { createServer } from 'node:http';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import compression from 'compression';
 import cors from 'cors';
 import express from 'express';
@@ -33,7 +35,11 @@ async function main() {
   app.set('etag', false);
   const httpServer = createServer(app);
   const allowOrigin = (origin: string | undefined, callback: (error: Error | null, allow?: boolean) => void) => {
-    if (!origin || config.clientOrigins.includes(origin)) {
+    if (
+      !origin ||
+      config.clientOrigins.includes(origin) ||
+      /^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/i.test(origin)
+    ) {
       callback(null, true);
       return;
     }
@@ -100,25 +106,64 @@ async function main() {
       level: 6
     })
   );
-  app.use(express.json({ limit: '32mb' }));
+  app.use(express.json({ limit: '100mb' }));
   app.use('/uploads', express.static(uploadRoot, {
     fallthrough: false,
     maxAge: '30d',
     immutable: true
   }));
 
+  const updatesDir = path.join(process.cwd(), 'updates');
+  await fs.mkdir(updatesDir, { recursive: true });
+  app.use('/updates', express.static(updatesDir, {
+    fallthrough: false,
+    maxAge: 0,
+    etag: false
+  }));
+
   app.get('/health', (_req, res) => {
     res.json({ status: 'ok' });
   });
 
-  app.get('/api/client/update', (_req, res) => {
-    res.json({
-      version: config.clientUpdateVersion,
-      url: config.clientUpdateUrl,
-      notes: config.clientUpdateNotes,
-      required: config.clientUpdateRequired,
-      publishedAt: config.clientUpdatePublishedAt
-    });
+  app.get('/api/client/update', async (req, res) => {
+    try {
+      const versionFile = path.join(updatesDir, 'version.json');
+      const content = await fs.readFile(versionFile, 'utf8');
+      const manifest = JSON.parse(content);
+      const host = req.get('host') || 'notos.tech';
+      const proto = (req.get('x-forwarded-proto') || req.protocol || 'https').split(',')[0].trim();
+      const baseUrl = `${proto}://${host}`;
+
+      if (manifest.url && !manifest.url.startsWith('http://') && !manifest.url.startsWith('https://')) {
+        manifest.url = `${baseUrl}${manifest.url.startsWith('/') ? '' : '/'}${manifest.url}`;
+      }
+      if (manifest.bundleUrl && !manifest.bundleUrl.startsWith('http://') && !manifest.bundleUrl.startsWith('https://')) {
+        manifest.bundleUrl = `${baseUrl}${manifest.bundleUrl.startsWith('/') ? '' : '/'}${manifest.bundleUrl}`;
+      }
+      if (manifest.installerUrl && !manifest.installerUrl.startsWith('http://') && !manifest.installerUrl.startsWith('https://')) {
+        manifest.installerUrl = `${baseUrl}${manifest.installerUrl.startsWith('/') ? '' : '/'}${manifest.installerUrl}`;
+      }
+
+      // If client explicitly requests bundle via query ?type=bundle or header, provide bundleUrl as url
+      // Otherwise, default url to installerUrl so older clients or browser downloads get the executable installer instead of a raw zip
+      const wantsBundle = req.query.type === 'bundle' || req.get('x-update-type') === 'bundle';
+      if (!wantsBundle && manifest.installerUrl) {
+        manifest.bundleUrl = manifest.bundleUrl || manifest.url;
+        manifest.url = manifest.installerUrl;
+      } else if (wantsBundle && manifest.bundleUrl) {
+        manifest.url = manifest.bundleUrl;
+      }
+
+      return res.json(manifest);
+    } catch {
+      return res.json({
+        version: config.clientUpdateVersion,
+        url: config.clientUpdateUrl,
+        notes: config.clientUpdateNotes,
+        required: config.clientUpdateRequired,
+        publishedAt: config.clientUpdatePublishedAt
+      });
+    }
   });
 
   app.use('/api/auth', authLimiter, authRouter);

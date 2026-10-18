@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent } from 'react';
-import { api } from '../api/client';
+import { api, resolveAudioUrl } from '../api/client';
 import { cacheUser, getOrFetchUser } from '../api/user-cache';
 import { useSocket } from '../hooks/use-socket';
 import { UserName } from './UserName';
@@ -133,7 +133,7 @@ export function RemoteDesktopWindow({ token, language, owner: initialOwner, curr
   const [tracks, setTracks] = useState<PublicAudioTrack[]>([]);
   const [currentTrackIndex, setCurrentTrackIndex] = useState(0);
   const [playing, setPlaying] = useState(false);
-  const [volume, setVolume] = useState(0.55);
+  const [volume, setVolume] = useState(0.10);
   const [time, setTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const currentTrack = tracks[currentTrackIndex];
@@ -179,7 +179,11 @@ export function RemoteDesktopWindow({ token, language, owner: initialOwner, curr
       if (!alive) return;
       setTracks(payload.tracks);
       setCurrentTrackIndex(0);
-      setPlaying(false);
+      if (payload.tracks.length > 0) {
+        setPlaying(true);
+      } else {
+        setPlaying(false);
+      }
     });
     }
 
@@ -270,18 +274,32 @@ export function RemoteDesktopWindow({ token, language, owner: initialOwner, curr
 
   useEffect(() => {
     const audio = audioRef.current;
-    if (!audio || !currentTrack) return;
-    audio.src = currentTrack.dataUrl;
+    if (!audio) return;
+    if (!currentTrack) {
+      audio.removeAttribute('src');
+      setTime(0);
+      setDuration(0);
+      return;
+    }
+    audio.src = resolveAudioUrl(currentTrack.dataUrl);
+    audio.volume = volume;
     setTime(0);
     setDuration(0);
+    if (playing) {
+      void audio.play().catch(() => setPlaying(false));
+    }
   }, [currentTrack]);
 
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio) return;
-    if (playing && currentTrack) void audio.play().catch(() => setPlaying(false));
-    else audio.pause();
-  }, [currentTrack, playing]);
+    audio.volume = volume;
+    if (playing && currentTrack) {
+      void audio.play().catch(() => setPlaying(false));
+    } else {
+      audio.pause();
+    }
+  }, [currentTrack, playing, volume]);
 
   useEffect(() => {
     if (!minimized) return;

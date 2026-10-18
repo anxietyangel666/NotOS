@@ -135,35 +135,54 @@ export function AiDmThread({ token, language, currentUser, assistant, onClose, o
 
   useEffect(() => {
     let alive = true;
+    const storedChatId = loadDmChatId();
 
-    Promise.all([api.getAiSettings(token), api.getAiChats(token), api.getAiQuota(token)])
-      .then(async ([settingsResult, chatsResult, quotaResult]) => {
+    // Instant render from local cache if previously opened
+    if (storedChatId) {
+      try {
+        const cached = sessionStorage.getItem(`notoc.ai.dm.chat.${storedChatId}`);
+        if (cached) {
+          const parsed = JSON.parse(cached) as AiChat;
+          setChat(parsed);
+          setMessages(toMessengerMessages(parsed, currentUser, assistantId));
+        }
+      } catch {
+        // ignore cache parse errors
+      }
+    }
+
+    const fetchTasks = [
+      api.getAiSettings(token).catch(() => null),
+      api.getAiQuota(token).catch(() => null),
+      storedChatId ? api.getAiChat(token, storedChatId).catch(() => null) : null
+    ] as const;
+
+    Promise.all(fetchTasks)
+      .then(async ([settingsResult, quotaResult, chatResult]) => {
         if (!alive) return;
-        setSettings(settingsResult.settings);
-        setConfigured(chatsResult.configured);
-        setQuota(quotaResult.quota);
+        if (settingsResult?.settings) setSettings(settingsResult.settings);
+        if (quotaResult?.quota) setQuota(quotaResult.quota);
 
-        const storedChatId = loadDmChatId();
-        let nextChat: AiChat | null = null;
+        let nextChat = chatResult?.chat ?? null;
 
-        if (storedChatId) {
+        if (!nextChat) {
           try {
-            const payload = await api.getAiChat(token, storedChatId);
-            nextChat = payload.chat;
+            const created = await api.createAiChat(token);
+            saveDmChatId(created.chat.id);
+            nextChat = created.chat;
           } catch {
-            saveDmChatId('');
+            // ignore
           }
         }
 
-        if (!nextChat) {
-          const created = await api.createAiChat(token);
-          saveDmChatId(created.chat.id);
-          nextChat = created.chat;
-        }
-
-        if (!alive) return;
+        if (!alive || !nextChat) return;
         setChat(nextChat);
         setMessages(toMessengerMessages(nextChat, currentUser, assistantId));
+        try {
+          sessionStorage.setItem(`notoc.ai.dm.chat.${nextChat.id}`, JSON.stringify(nextChat));
+        } catch {
+          // ignore
+        }
       })
       .catch(() => {
         if (!alive) return;
@@ -293,6 +312,11 @@ export function AiDmThread({ token, language, currentUser, assistant, onClose, o
 
       setChat(payload.chat);
       setMessages(toMessengerMessages(payload.chat, currentUser, assistantId));
+      try {
+        sessionStorage.setItem(`notoc.ai.dm.chat.${payload.chat.id}`, JSON.stringify(payload.chat));
+      } catch {
+        // ignore
+      }
       setQuota(payload.quota);
       setDraft('');
       clearPendingImages();
@@ -396,7 +420,7 @@ export function AiDmThread({ token, language, currentUser, assistant, onClose, o
               files.forEach((file) => void addImageFile(file));
             }}
           />
-          <div className="emoji-input-shell messenger-emoji-input">
+          <div className="messenger-compose-row">
             <button
               type="button"
               className="emoji-toggle inline messenger-attach-inline"
@@ -408,67 +432,77 @@ export function AiDmThread({ token, language, currentUser, assistant, onClose, o
                 event.stopPropagation();
                 imageInputRef.current?.click();
               }}
-              >
+            >
               <AttachIcon />
             </button>
-            <EmojiInlineInput
-              ref={composerInputRef}
-              className="emoji-inline-input messenger-input"
-              value={draft}
-              placeholder={t(language, 'messagePlaceholder')}
-              disabled={sending || !configured || quotaReached}
-              onChange={(event) => setDraft(event.target.value)}
-              onPaste={handleComposerPaste}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' && !event.shiftKey) {
-                  event.preventDefault();
-                  void sendMessage();
-                }
-              }}
-            />
-            <div ref={emojiAnchorRef} className="emoji-host inline">
-              <button
-                className="emoji-toggle inline chat-gif-toggle"
-                type="button"
-                aria-label="GIF"
+            <div className="messenger-input-shell">
+              <EmojiInlineInput
+                ref={composerInputRef}
+                className="emoji-inline-input messenger-chat-inline-input"
+                value={draft}
+                placeholder={t(language, 'messagePlaceholder')}
                 disabled={sending || !configured || quotaReached}
-                onMouseDown={(event) => event.stopPropagation()}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  setPickerTab('gif');
-                  setEmojiOpen((value) => !value);
+                onChange={(event) => setDraft(event.target.value)}
+                onPaste={handleComposerPaste}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' && !event.shiftKey) {
+                    event.preventDefault();
+                    void sendMessage();
+                  }
                 }}
-              >
-                <GifIcon />
-              </button>
-              <button
-                className="emoji-toggle inline"
-                type="button"
-                aria-label={t(language, 'emoji')}
-                disabled={sending || !configured || quotaReached}
-                onMouseDown={(event) => event.stopPropagation()}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  setPickerTab('emoji');
-                  setEmojiOpen((value) => !value);
-                }}
-              >
-                <EmojiToggleIcon />
-              </button>
-              {emojiOpen ? (
-                <EmojiPicker
-                  language={language}
-                  enlarged
-                  initialTab={pickerTab}
-                  anchorRef={emojiAnchorRef}
-                  placement="top-end"
-                  onSelect={insertEmoji}
-                  onSelectGif={sendGif}
-                  onClose={() => setEmojiOpen(false)}
-                  token={token}
-                  currentUser={currentUser}
-                />
-              ) : null}
+              />
+              <div ref={emojiAnchorRef} className="messenger-input-actions">
+                <button
+                  className="emoji-toggle inline chat-gif-toggle"
+                  type="button"
+                  aria-label="GIF"
+                  disabled={sending || !configured || quotaReached}
+                  onMouseDown={(event) => event.stopPropagation()}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    if (emojiOpen && pickerTab === 'gif') {
+                      setEmojiOpen(false);
+                    } else {
+                      setPickerTab('gif');
+                      setEmojiOpen(true);
+                    }
+                  }}
+                >
+                  <GifIcon />
+                </button>
+                <button
+                  className="emoji-toggle inline"
+                  type="button"
+                  aria-label={t(language, 'emoji')}
+                  disabled={sending || !configured || quotaReached}
+                  onMouseDown={(event) => event.stopPropagation()}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    if (emojiOpen && pickerTab === 'emoji') {
+                      setEmojiOpen(false);
+                    } else {
+                      setPickerTab('emoji');
+                      setEmojiOpen(true);
+                    }
+                  }}
+                >
+                  <EmojiToggleIcon />
+                </button>
+                {emojiOpen ? (
+                  <EmojiPicker
+                    language={language}
+                    enlarged
+                    initialTab={pickerTab}
+                    anchorRef={emojiAnchorRef}
+                    placement="top-end"
+                    onSelect={insertEmoji}
+                    onSelectGif={sendGif}
+                    onClose={() => setEmojiOpen(false)}
+                    token={token}
+                    currentUser={currentUser}
+                  />
+                ) : null}
+              </div>
             </div>
           </div>
         </div>
@@ -504,7 +538,7 @@ export function AiDmThread({ token, language, currentUser, assistant, onClose, o
                   </button>
                 ))}
               </div>
-              <div className="emoji-input-shell image-caption-input">
+              <div className="image-caption-input">
                 <EmojiInlineInput
                   ref={imageCaptionInputRef}
                   className="emoji-inline-input"

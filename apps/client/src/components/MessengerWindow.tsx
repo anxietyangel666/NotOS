@@ -11,7 +11,8 @@ import { LOCALES, t, getSavedTimeFormat, getSavedTranslateTargetName, getSavedCo
 import { EmojiPicker, GifStar } from './EmojiPicker';
 import { EmojiInlineInput, type EmojiInlineInputHandle } from './EmojiInlineInput';
 import { gifFromUrl, isFavoriteGifUrl, subscribeFavoriteGifs, toggleFavoriteGif, type TenorGif } from '../utils/tenor';
-import { GroupChatView } from './GroupChatView';
+import { GroupChatView, type ActiveGroupChannelInfo } from './GroupChatView';
+import { getWordAtOffset, getWordSuggestions, ignoreWord, fetchWordSuggestionsAsync, type WordAtOffsetInfo } from '../utils/spellcheck';
 import { GroupCreateModal } from './GroupCreateModal';
 import { RailFolders, type RailItem } from './RailFolders';
 import { InviteEmbed } from './InviteEmbed';
@@ -42,6 +43,8 @@ import { WindowFrame } from './WindowFrame';
 import { AiDmThread } from './AiDmThread';
 import { isVideoCircleAttachment, isVoiceAttachment, VideoCircleMessagePlayer, VideoCirclePlaybackBar, VoiceMessagePlayer, VoicePlaybackBar, VoiceRecorderControl } from './VoiceMessage';
 import { copyImageToClipboard, MediaLightbox, type MediaLightboxItem } from './MediaLightbox';
+import { TimeCapsuleCard, TimeCapsuleModal, parseTimeCapsule, formatTimeCapsuleTag } from './TimeCapsule';
+import { OurStoryModal } from './OurStoryModal';
 import { CallAudioSink, CallInviteModal, CallStagePanel, ScreenSourcePicker } from './CallOverlay';
 import { useVoiceCall, type CallEndedEvent } from '../hooks/use-voice-call';
 import { useVoiceRoom } from '../hooks/use-voice-room';
@@ -54,11 +57,21 @@ import { applyPresenceChange, normalizePresenceSnapshot, onlineIdsFromPresence, 
 import { assetUrl } from '../utils/assets';
 
 export type OngoingCallInfo = {
+  type: 'dm' | 'group';
   phase: 'connecting' | 'active';
   peer: PublicUser | null;
+  group?: {
+    id: string;
+    name: string;
+    avatarData: string;
+    channelId: string;
+    channelName: string;
+    rawGroup: Group;
+  } | null;
   elapsed: number;
   videoStream: MediaStream | null;
   hangup: () => void;
+  inCurrentChat?: boolean;
 };
 
 type MessengerWindowProps = {
@@ -88,6 +101,9 @@ type MessengerWindowProps = {
   onOpenWatchTogether?: (inviteCode?: string) => void;
   onOpenInbox?: () => void;
   inboxUnreadCount?: number;
+  isDetached?: boolean;
+  onDetach?: () => void;
+  onDock?: () => void;
 };
 
 type SenderGroupSnapshot = NonNullable<MessengerMessage['senderGroup']>;
@@ -171,6 +187,35 @@ const BLOCK_STATE_CACHE_TTL_MS = 5 * 60_000;
 const AI_ASSISTANT_USER_ID = '00000000-0000-4000-8000-0000000000a1';
 const AI_ASSISTANT_AVATAR = assetUrl('Icons/ai.png');
 let messengerBootstrapCache: { token: string; payload: MessengerBootstrapPayload; loadedAt: number } | null = null;
+const MESSENGER_BOOTSTRAP_STORAGE_PREFIX = 'notoc.messengerBootstrap.';
+
+export function loadPersistedMessengerBootstrap(userId: string): MessengerBootstrapPayload | null {
+  try {
+    const raw = localStorage.getItem(`${MESSENGER_BOOTSTRAP_STORAGE_PREFIX}${userId}`);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed && Array.isArray(parsed.friends) && Array.isArray(parsed.conversations) && Array.isArray(parsed.groups)) {
+      return parsed as MessengerBootstrapPayload;
+    }
+  } catch {
+    // Ignore corrupt storage
+  }
+  return null;
+}
+
+export function persistMessengerBootstrap(userId: string, payload: MessengerBootstrapPayload) {
+  try {
+    localStorage.setItem(`${MESSENGER_BOOTSTRAP_STORAGE_PREFIX}${userId}`, JSON.stringify(payload));
+  } catch {
+    // Ignore quota error
+  }
+}
+
+export function setMessengerBootstrapCache(token: string, userId: string, payload: MessengerBootstrapPayload) {
+  messengerBootstrapCache = { token, payload, loadedAt: Date.now() };
+  persistMessengerBootstrap(userId, payload);
+}
+
 const dmThreadCache = new Map<string, MessengerMessage[]>();
 const dmThreadCacheLoadedAt = new Map<string, number>();
 
@@ -739,7 +784,10 @@ export function MessengerWindow({
   onEditProfile,
   onOpenWatchTogether,
   onOpenInbox,
-  inboxUnreadCount = 0
+  inboxUnreadCount = 0,
+  isDetached = false,
+  onDetach,
+  onDock
 }: MessengerWindowProps) {
   const sharedSocket = useSocket();
   const socketRef = useRef<Socket | null>(null);
@@ -750,7 +798,7 @@ export function MessengerWindow({
   // Right-click menu for the message composer. Always offers Paste / Copy / Cut;
   // when text is selected it additionally offers Translate. `hasSelection` drives
   // which clipboard actions are enabled and whether Translate is shown.
-  const [composerMenu, setComposerMenu] = useState<{ x: number; y: number; start: number; end: number; hasSelection: boolean } | null>(null);
+  const [composerMenu, setComposerMenu] = useState<{ x: number; y: number; start: number; end: number; hasSelection: boolean; wordInfo?: WordAtOffsetInfo | null } | null>(null);
   const [imageCaptionMenu, setImageCaptionMenu] = useState<{ x: number; y: number } | null>(null);
   const [composerTranslating, setComposerTranslating] = useState(false);
   const imageCaptionInputRef = useRef<EmojiInlineInputHandle | null>(null);
@@ -782,13 +830,14 @@ export function MessengerWindow({
   const [query, setQuery] = useState('');
   const [friendFilter, setFriendFilter] = useState('');
   const [directMessageFilter, setDirectMessageFilter] = useState('');
+  const [cachedBootstrap] = useState(() => loadPersistedMessengerBootstrap(currentUser.id));
   const [searchResults, setSearchResults] = useState<PublicUser[]>([]);
-  const [friends, setFriends] = useState<PublicUser[]>([]);
-  const [requests, setRequests] = useState<FriendRequests>(EMPTY_REQUESTS);
+  const [friends, setFriends] = useState<PublicUser[]>(() => cachedBootstrap?.friends ?? []);
+  const [requests, setRequests] = useState<FriendRequests>(() => cachedBootstrap?.requests ?? EMPTY_REQUESTS);
   const [onlineUserIds, setOnlineUserIds] = useState<string[]>([]);
   const [presenceStatuses, setPresenceStatuses] = useState<Record<string, PresenceStatus>>({});
   const [typingUserIds, setTypingUserIds] = useState<string[]>([]);
-  const [conversations, setConversations] = useState<ConversationPreview[]>([]);
+  const [conversations, setConversations] = useState<ConversationPreview[]>(() => cachedBootstrap?.conversations ?? []);
   const [selectedUser, setSelectedUser] = useState<PublicUser | null>(null);
   const [aiAssistantName, setAiAssistantName] = useState('NotAI');
   const [aiAssistantAvatarData, setAiAssistantAvatarData] = useState('');
@@ -829,6 +878,7 @@ export function MessengerWindow({
   const [pinnedConversations, setPinnedConversations] = useState<Set<string>>(loadPinned);
   const [archivedConversations, setArchivedConversations] = useState<Set<string>>(loadArchived);
   const [dmListFilter, setDmListFilter] = useState<DmListFilter>('all');
+  const [activeGroupChannel, setActiveGroupChannel] = useState<ActiveGroupChannelInfo | null>(null);
   const [autoTranslateChats, setAutoTranslateChats] = useState<Set<string>>(loadAutoTranslate);
   // Scheduled messages awaiting delivery, plus the compose-time picker state.
   const [scheduledMessages, setScheduledMessages] = useState<MessengerMessage[]>([]);
@@ -839,6 +889,9 @@ export function MessengerWindow({
   const [scheduleChoice, setScheduleChoice] = useState<'1h' | '3h' | 'tomorrow' | 'custom'>('1h');
   const [scheduleCustom, setScheduleCustom] = useState('');
   const [scheduledViewOpen, setScheduledViewOpen] = useState(false);
+  const [timeCapsuleModalOpen, setTimeCapsuleModalOpen] = useState(false);
+  const [ourStoryModalOpen, setOurStoryModalOpen] = useState(false);
+  const [friendshipDate, setFriendshipDate] = useState<string | null>(null);
   const [pollModalOpen, setPollModalOpen] = useState(false);
   // Bookmarks: starred message ids plus the view state inside Saved Messages.
   const [bookmarkedIds, setBookmarkedIds] = useState<Set<string>>(() => new Set());
@@ -1003,10 +1056,13 @@ export function MessengerWindow({
   const [presenceActivities, setPresenceActivities] = useState<Record<string, 'voice' | 'watch'>>({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [groups, setGroups] = useState<Group[]>([]);
+  const [groups, setGroups] = useState<Group[]>(() => cachedBootstrap?.groups ?? []);
   const [selectedGroup, setSelectedGroup] = useState<Group | null>(null);
+  useEffect(() => {
+    setActiveGroupChannel(null);
+  }, [selectedGroup?.id]);
   const [localGroupRequest, setLocalGroupRequest] = useState<{ groupId: string; group: Group; channelId: string | null; requestId: number } | null>(null);
-  const [groupConversations, setGroupConversations] = useState<GroupConversationPreview[]>([]);
+  const [groupConversations, setGroupConversations] = useState<GroupConversationPreview[]>(() => cachedBootstrap?.groupConversations ?? []);
   const [showCreateGroup, setShowCreateGroup] = useState(false);
   const navApplyingRef = useRef(false);
   const [navState, setNavState] = useState<{ entries: MessengerNavLocation[]; index: number }>(() => ({
@@ -1651,6 +1707,7 @@ export function MessengerWindow({
       .then((payload) => {
         if (!alive) return;
         messengerBootstrapCache = { token, payload, loadedAt: Date.now() };
+        persistMessengerBootstrap(currentUser.id, payload);
         setFriends(payload.friends);
         setRequests(payload.requests);
         setConversations(payload.conversations);
@@ -1658,7 +1715,7 @@ export function MessengerWindow({
         setGroupConversations(payload.groupConversations);
       })
       .catch((loadError) => {
-        if (alive) setError(loadError instanceof Error ? loadError.message : t(language, 'unknownError'));
+        if (alive && !cachedBootstrap) setError(loadError instanceof Error ? loadError.message : t(language, 'unknownError'));
       });
 
     return () => {
@@ -2090,6 +2147,29 @@ export function MessengerWindow({
   const voiceRoom = useVoiceRoom({ socket: socketInstance, currentUser });
   const selfStatus = useUserStatus();
 
+  const [activeGroupVoice, setActiveGroupVoice] = useState<{
+    groupId: string;
+    groupName: string;
+    groupAvatar: string;
+    rawGroup: Group;
+    channelId: string;
+    channelName: string;
+    voiceStageOpen: boolean;
+  } | null>(null);
+
+  const [groupVoiceElapsed, setGroupVoiceElapsed] = useState(0);
+  useEffect(() => {
+    if (!voiceRoom.activeChannelId) {
+      setGroupVoiceElapsed(0);
+      setActiveGroupVoice(null);
+      return;
+    }
+    const timer = setInterval(() => {
+      setGroupVoiceElapsed((prev) => prev + 1);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [voiceRoom.activeChannelId]);
+
   // Accept a call that was answered from the desktop toast while the messenger
   // window was closed or minimized (the hook never saw `call:incoming` then).
   useEffect(() => {
@@ -2129,25 +2209,6 @@ export function MessengerWindow({
     prevRoomChannelRef.current = roomChannel;
   }, [voiceCall.phase, voiceRoom.activeChannelId, voiceCall.hangup, voiceRoom.leave]);
 
-  // Report the ongoing call upwards so the desktop can show the floating
-  // call badge while the messenger is minimized or closed.
-  useEffect(() => {
-    if (!onCallStateChange) return;
-    if ((voiceCall.phase === 'active' || voiceCall.phase === 'connecting') && voiceCall.peer) {
-      onCallStateChange({
-        phase: voiceCall.phase,
-        peer: voiceCall.peer,
-        elapsed: voiceCall.elapsed,
-        videoStream: voiceCall.remoteVideoStream ?? voiceCall.localScreenStream,
-        hangup: voiceCall.hangup
-      });
-    } else {
-      onCallStateChange(null);
-    }
-  }, [onCallStateChange, voiceCall.phase, voiceCall.peer, voiceCall.elapsed, voiceCall.remoteVideoStream, voiceCall.localScreenStream, voiceCall.hangup]);
-
-  useEffect(() => () => onCallStateChange?.(null), [onCallStateChange]);
-
   // The call is "in this chat" when its peer is the currently selected DM user.
   const callInThisChat = Boolean(
     voiceCall.peer && selectedUser && voiceCall.peer.id === selectedUser.id && activeView === 'directMessages' && !selectedGroup
@@ -2155,6 +2216,73 @@ export function MessengerWindow({
   // Whether we should show the Discord-style split panel above the chat.
   const callConnectedActive = voiceCall.phase === 'active' || voiceCall.phase === 'connecting';
   const showCallStage = callInThisChat && callConnectedActive;
+
+  // Multi-party group voice: is the voice stage currently visible in the active group?
+  const isGroupVoiceShowing = Boolean(
+    selectedGroup &&
+    activeGroupVoice &&
+    selectedGroup.id === activeGroupVoice.groupId &&
+    activeGroupVoice.voiceStageOpen
+  );
+
+  // Report the ongoing call upwards so the desktop can show the floating
+  // call badge while the messenger is minimized, closed, or when user navigates away.
+  useEffect(() => {
+    if (!onCallStateChange) return;
+
+    if ((voiceCall.phase === 'active' || voiceCall.phase === 'connecting') && voiceCall.peer) {
+      onCallStateChange({
+        type: 'dm',
+        phase: voiceCall.phase,
+        peer: voiceCall.peer,
+        elapsed: voiceCall.elapsed,
+        videoStream: voiceCall.remoteVideoStream ?? voiceCall.localScreenStream,
+        hangup: voiceCall.hangup,
+        inCurrentChat: showCallStage
+      });
+    } else if (voiceRoom.activeChannelId && activeGroupVoice) {
+      const groupVideoStream = (voiceRoom.remoteVideo.size > 0 ? Array.from(voiceRoom.remoteVideo.values())[0] : null) ?? voiceRoom.localScreenStream;
+      onCallStateChange({
+        type: 'group',
+        phase: 'active',
+        peer: null,
+        group: {
+          id: activeGroupVoice.groupId,
+          name: activeGroupVoice.groupName,
+          avatarData: activeGroupVoice.groupAvatar,
+          channelId: activeGroupVoice.channelId,
+          channelName: activeGroupVoice.channelName,
+          rawGroup: activeGroupVoice.rawGroup
+        },
+        elapsed: groupVoiceElapsed,
+        videoStream: groupVideoStream,
+        hangup: () => {
+          voiceRoom.leave();
+        },
+        inCurrentChat: isGroupVoiceShowing
+      });
+    } else {
+      onCallStateChange(null);
+    }
+  }, [
+    onCallStateChange,
+    voiceCall.phase,
+    voiceCall.peer,
+    voiceCall.elapsed,
+    voiceCall.remoteVideoStream,
+    voiceCall.localScreenStream,
+    voiceCall.hangup,
+    showCallStage,
+    voiceRoom.activeChannelId,
+    voiceRoom.leave,
+    voiceRoom.localScreenStream,
+    voiceRoom.remoteVideo,
+    activeGroupVoice,
+    groupVoiceElapsed,
+    isGroupVoiceShowing
+  ]);
+
+  useEffect(() => () => onCallStateChange?.(null), [onCallStateChange]);
 
   useEffect(() => {
     if (voiceCall.phase === 'idle') setCallChatCollapsed(false);
@@ -2195,6 +2323,9 @@ export function MessengerWindow({
     setSelectedUser(person);
     setSelectedGroup(null);
     setActiveView('directMessages');
+    api.getFriendshipDate(token, person.id)
+      .then((res) => setFriendshipDate(res.createdAt))
+      .catch(() => setFriendshipDate(null));
     // Reset the search/right-panel UI for the newly opened conversation.
     setSearchMode(false);
     setConvSearchQuery('');
@@ -2828,12 +2959,13 @@ export function MessengerWindow({
     return uploaded;
   }
 
-  async function sendMessage(attachmentOverride?: PendingChatImage, sendOptions?: { scheduledAt?: string; sendWhenOnline?: boolean }) {
+  async function sendMessage(attachmentOverride?: PendingChatImage, sendOptions?: { scheduledAt?: string; sendWhenOnline?: boolean; bodyOverride?: string }) {
     if (!selectedUser) return;
     const recordingOverride = Boolean(attachmentOverride && (isVoiceAttachment(attachmentOverride.dataUrl, attachmentOverride.name) || isVideoCircleAttachment(attachmentOverride.dataUrl, attachmentOverride.name)));
     const batchImages = attachmentOverride ? [attachmentOverride] : pendingImages;
     const image = batchImages[0] ?? null;
-    const body = recordingOverride ? '' : applySlashCommand(expandCustomEmojiShortcodes((image ? imageCaptionDraft : messageDraftRef.current).trim()));
+    const rawBody = sendOptions?.bodyOverride ?? (image ? imageCaptionDraft : messageDraftRef.current);
+    const body = recordingOverride ? '' : applySlashCommand(expandCustomEmojiShortcodes(rawBody.trim()));
     if (!body && !image) return;
     const activeSenderGroup = selectedUser.allowGroupIdentityMessages === false ? null : selectedGroupIdentity;
 
@@ -3275,7 +3407,75 @@ export function MessengerWindow({
     const end = selection.end;
     const hasSelection = end > start && Boolean(messageDraftRef.current.slice(start, end));
     event.preventDefault();
-    setComposerMenu({ x: event.clientX, y: event.clientY, start, end, hasSelection });
+    const draft = messageDraftRef.current;
+    const targetEl = event.target as HTMLElement | null;
+    const spellingSpan = targetEl?.closest?.('.spelling-error') as HTMLElement | null;
+    let wordInfo: WordAtOffsetInfo | null = null;
+    if (spellingSpan) {
+      const spanWord = spellingSpan.dataset.spellingWord || spellingSpan.textContent || '';
+      if (spanWord) {
+        const offset = messageInputRef.current?.getOffsetAtPoint?.(event.clientX, event.clientY) ?? start;
+        wordInfo = getWordAtOffset(draft, offset);
+        if (!wordInfo || wordInfo.word !== spanWord) {
+          const idx = draft.indexOf(spanWord, Math.max(0, offset - spanWord.length));
+          const foundStart = idx >= 0 ? idx : draft.indexOf(spanWord);
+          if (foundStart >= 0) {
+            wordInfo = {
+              word: spanWord,
+              start: foundStart,
+              end: foundStart + spanWord.length,
+              isMisspelled: true,
+              suggestions: getWordSuggestions(spanWord)
+            };
+          }
+        }
+      }
+    } else {
+      const offset = messageInputRef.current?.getOffsetAtPoint?.(event.clientX, event.clientY) ?? start;
+      wordInfo = getWordAtOffset(draft, offset);
+    }
+
+    if (wordInfo && (wordInfo.isMisspelled || wordInfo.suggestions.length > 0)) {
+      const targetWord = wordInfo.word;
+      if (wordInfo.suggestions.length === 0) {
+        void fetchWordSuggestionsAsync(targetWord).then((suggs) => {
+          if (suggs.length > 0) {
+            setComposerMenu((prev) => {
+              if (!prev || !prev.wordInfo || prev.wordInfo.word !== targetWord) return prev;
+              return {
+                ...prev,
+                wordInfo: {
+                  ...prev.wordInfo,
+                  isMisspelled: true,
+                  suggestions: suggs
+                }
+              };
+            });
+          }
+        });
+      }
+    }
+
+    setComposerMenu({ x: event.clientX, y: event.clientY, start, end, hasSelection, wordInfo });
+  }
+
+  function applySpellingSuggestion(suggestion: string) {
+    const info = composerMenu?.wordInfo;
+    setComposerMenu(null);
+    if (!info) return;
+    const draft = messageDraftRef.current;
+    const next = draft.slice(0, info.start) + suggestion + draft.slice(info.end);
+    replaceMessageDraft(next);
+    window.setTimeout(() => {
+      const caret = info.start + suggestion.length;
+      messageInputRef.current?.setSelection(caret);
+      messageInputRef.current?.focus();
+    }, 0);
+  }
+
+  function handleIgnoreWord(word: string) {
+    setComposerMenu(null);
+    ignoreWord(word);
   }
 
   function openImageCaptionMenu(event: MouseEvent<HTMLElement>) {
@@ -3750,7 +3950,22 @@ export function MessengerWindow({
     centerTitle = (
       <>
         <img className="window-title-avatar" src={selectedGroup.avatarData || `data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" fill="%23444" rx="20"/><text x="50" y="58" text-anchor="middle" fill="%23fff" font-size="28" font-family="sans-serif">${(selectedGroup.name[0] || '?').toUpperCase()}</text></svg>`} alt="" />
-        <span>{selectedGroup.name}</span>
+        <span>
+          {selectedGroup.name}
+          {activeGroupChannel ? (
+            activeGroupChannel.type === 'voice' ? (
+              <>
+                {' - '}
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" style={{ display: 'inline-block', verticalAlign: '-1px', marginRight: 3, opacity: 0.85 }} aria-hidden="true">
+                  <path d="M3 10v4h4l5 5V5L7 10H3zm13.5 2a4.5 4.5 0 0 0-2.5-4v8a4.5 4.5 0 0 0 2.5-4zm-2.5-9v2a7 7 0 0 1 0 14v2a9 9 0 0 0 0-18z"/>
+                </svg>
+                {activeGroupChannel.name}
+              </>
+            ) : (
+              ` - #${activeGroupChannel.name.replace(/^#/, '')}`
+            )
+          ) : ''}
+        </span>
       </>
     );
   } else if (activeView !== 'friends' && selectedUser) {
@@ -3817,25 +4032,8 @@ export function MessengerWindow({
     </div>
   );
 
-  return (
-    <WindowFrame
-      language={language}
-      title={t(language, 'messenger')}
-      titleContent={messengerTitleContent}
-      centerTitle={centerTitle}
-      className="messenger-window"
-      maximized={maximized}
-      minimized={minimized}
-      zIndex={zIndex}
-      defaultPosition={{ x: Math.max(24, window.innerWidth / 2 - 470), y: 70 }}
-      storageKey="messenger"
-      minSize={{ width: 980, height: 620 }}
-      defaultSize={{ width: 1240, height: 800 }}
-      onFocus={onFocus}
-      onClose={onClose}
-      onMinimize={onMinimize}
-      onToggleMaximize={onToggleMaximize}
-    >
+  const messengerBody = (
+    <>
       {onOpenInbox ? (
         <button
           type="button"
@@ -4035,29 +4233,37 @@ export function MessengerWindow({
           </div>
           {globalSearchOpen ? (
             <div className="dm-global-search-kinds">
-              {(['all', 'media', 'links'] as const).map((kind) => (
-                <button
-                  key={kind}
-                  type="button"
-                  className={globalSearchKind === kind ? 'active' : ''}
-                  onClick={() => setGlobalSearchKind(kind)}
-                >
-                  {t(language, kind === 'all' ? 'filterAll' : kind === 'media' ? 'filterMedia' : 'filterLinks')}
-                </button>
-              ))}
+              {(['all', 'media', 'links'] as const).map((kind) => {
+                const label = t(language, kind === 'all' ? 'filterAll' : kind === 'media' ? 'filterMedia' : 'filterLinks');
+                return (
+                  <button
+                    key={kind}
+                    type="button"
+                    className={globalSearchKind === kind ? 'active' : ''}
+                    title={label}
+                    onClick={() => setGlobalSearchKind(kind)}
+                  >
+                    <span className="dm-filter-text">{label}</span>
+                  </button>
+                );
+              })}
             </div>
           ) : (
             <div className="dm-list-filters">
-              {(['all', 'unread', 'archived'] as const).map((filter) => (
-                <button
-                  key={filter}
-                  type="button"
-                  className={dmListFilter === filter ? 'active' : ''}
-                  onClick={() => setDmListFilter(filter)}
-                >
-                  {t(language, filter === 'all' ? 'filterAll' : filter === 'unread' ? 'filterUnread' : 'filterArchived')}
-                </button>
-              ))}
+              {(['all', 'unread', 'archived'] as const).map((filter) => {
+                const label = t(language, filter === 'all' ? 'filterAll' : filter === 'unread' ? 'filterUnread' : 'filterArchived');
+                return (
+                  <button
+                    key={filter}
+                    type="button"
+                    className={dmListFilter === filter ? 'active' : ''}
+                    title={label}
+                    onClick={() => setDmListFilter(filter)}
+                  >
+                    <span className="dm-filter-text">{label}</span>
+                  </button>
+                );
+              })}
             </div>
           )}
           <div className="messenger-conversation-list">
@@ -4182,6 +4388,8 @@ export function MessengerWindow({
               initialChannelId={(localGroupRequest ?? initialGroupRequest)?.groupId === selectedGroup.id ? (localGroupRequest ?? initialGroupRequest)?.channelId ?? null : null}
               initialChannelRequestId={(localGroupRequest ?? initialGroupRequest)?.groupId === selectedGroup.id ? (localGroupRequest ?? initialGroupRequest)?.requestId ?? 0 : 0}
               voiceRoom={voiceRoom}
+              onVoiceStateReport={setActiveGroupVoice}
+              onActiveChannelInfoChange={setActiveGroupChannel}
               onClose={() => { setSelectedGroup(null); setActiveView('directMessages'); setSelectedUser(null); setMessages([]); }}
               onViewProfile={(user, group, preload, anchorRect) => { setProfileUser(user); setProfileGroup(group); setProfilePreload(preload); setProfileAnchor(anchorRect ?? null); }}
               onCloseProfile={() => { setProfileUser(null); setProfileGroup(undefined); setProfilePreload(undefined); setProfileAnchor(null); }}
@@ -4260,6 +4468,20 @@ export function MessengerWindow({
                       onClick={(event) => { event.stopPropagation(); setBookmarksViewOpen((open) => !open); }}
                     >
                       <svg width="18" height="18" viewBox="0 0 24 24" fill={bookmarksViewOpen ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="2" strokeLinejoin="round"><path d="M6 3h12a1 1 0 0 1 1 1v17l-7-4-7 4V4a1 1 0 0 1 1-1z"/></svg>
+                    </button>
+                  ) : null}
+                  {selectedUser.id !== currentUser.id ? (
+                    <button
+                      className={ourStoryModalOpen ? 'messenger-call-button active' : 'messenger-call-button'}
+                      type="button"
+                      title={language === 'ru' ? 'Наша история' : 'Our Story'}
+                      onClick={(event) => { event.stopPropagation(); setOurStoryModalOpen(true); }}
+                    >
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+                        <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+                        <path d="M12 6l1.2 2.4 2.6.4-1.9 1.8.4 2.6-2.3-1.2-2.3 1.2.4-2.6-1.9-1.8 2.6-.4z" fill="currentColor" stroke="none" />
+                      </svg>
                     </button>
                   ) : null}
                   <button
@@ -4909,6 +5131,10 @@ export function MessengerWindow({
                             ) : message.body ? (
                               <>
                                 {(() => {
+                                  const capsule = parseTimeCapsule(message.body);
+                                  if (capsule) {
+                                    return <TimeCapsuleCard data={capsule} language={language} />;
+                                  }
                                   // Hide the long pack-link token from the bubble; the embed renders below.
                                   const original = hasPackLink(message.body) ? stripPackLinks(message.body) : message.body;
                                   // Show the ephemeral translation in place of the original when present.
@@ -5197,6 +5423,39 @@ export function MessengerWindow({
 
               {composerMenu ? createPortal(
                 <div ref={composerMenuRef} className="context-menu" style={{ left: composerMenuPos.x, top: composerMenuPos.y }} onMouseDown={(event) => event.stopPropagation()}>
+                  {composerMenu.wordInfo && (composerMenu.wordInfo.isMisspelled || composerMenu.wordInfo.suggestions.length > 0) ? (
+                    <>
+                      <div className={`context-submenu-host ${composerMenu.x > (typeof window !== 'undefined' ? window.innerWidth : 1200) - 300 ? 'flip-left' : ''}`}>
+                        <button type="button" className="context-menu-action">
+                          <span className="context-menu-action-text">{language === 'ru' ? 'Правописание' : language === 'uk' ? 'Правопис' : 'Spelling'}</span>
+                          <span style={{ opacity: 0.6, fontSize: 13, marginLeft: 8 }}>›</span>
+                        </button>
+                        <div className="context-submenu">
+                          <button type="button" className="context-menu-action" onClick={() => handleIgnoreWord(composerMenu.wordInfo!.word)}>
+                            <span className="context-menu-action-text">{language === 'ru' ? 'Игнорировать слово' : language === 'uk' ? 'Ігнорувати слово' : 'Ignore word'}</span>
+                          </button>
+                          <hr className="context-menu-divider" />
+                          {composerMenu.wordInfo.suggestions.length > 0 ? (
+                            composerMenu.wordInfo.suggestions.map((suggestion) => (
+                              <button
+                                key={suggestion}
+                                type="button"
+                                className="context-menu-action"
+                                onClick={() => applySpellingSuggestion(suggestion)}
+                              >
+                                <span className="context-menu-action-text" style={{ fontWeight: 500 }}>{suggestion}</span>
+                              </button>
+                            ))
+                          ) : (
+                            <button type="button" className="context-menu-action" disabled>
+                              <span className="context-menu-action-text" style={{ opacity: 0.5 }}>{language === 'ru' ? 'Нет вариантов' : language === 'uk' ? 'Немає варіантів' : 'No suggestions'}</span>
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                      <hr className="context-menu-divider" />
+                    </>
+                  ) : null}
                   <button type="button" className="context-menu-action" onClick={() => void pasteIntoComposer()}>
                     <span className="context-menu-action-text">{t(language, 'paste')}</span>
                     <MenuPasteIcon />
@@ -5264,6 +5523,19 @@ export function MessengerWindow({
                           {t(language, 'sendWhenOnline')}
                         </span>
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="currentColor" stroke="none"/><path d="M5.6 5.6a9 9 0 0 0 0 12.8M18.4 5.6a9 9 0 0 1 0 12.8"/></svg>
+                      </button>
+                      <button
+                        type="button"
+                        className="context-menu-action"
+                        onClick={() => {
+                          setComposerMenu(null);
+                          setTimeCapsuleModalOpen(true);
+                        }}
+                      >
+                        <span className="context-menu-action-text">
+                          {language === 'ru' ? 'Капсула времени' : 'Time Capsule'}
+                        </span>
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
                       </button>
                     </>
                   ) : null}
@@ -5345,6 +5617,31 @@ export function MessengerWindow({
                     </div>
                   </div>
                 </div>
+              ) : null}
+
+              {timeCapsuleModalOpen && selectedUser ? (
+                <TimeCapsuleModal
+                  language={language}
+                  recipientName={selectedUser.nickname}
+                  onClose={() => setTimeCapsuleModalOpen(false)}
+                  onSend={(unlockAt, title) => {
+                    setTimeCapsuleModalOpen(false);
+                    const currentText = messageDraftRef.current.trim();
+                    const tagged = formatTimeCapsuleTag(currentText, unlockAt, title);
+                    void sendMessage(undefined, { bodyOverride: tagged });
+                  }}
+                />
+              ) : null}
+
+              {ourStoryModalOpen && selectedUser ? (
+                <OurStoryModal
+                  currentUser={currentUser}
+                  friendUser={selectedUser}
+                  messages={messages}
+                  language={language}
+                  friendshipDate={friendshipDate}
+                  onClose={() => setOurStoryModalOpen(false)}
+                />
               ) : null}
 
               {blockState.blocked || blockState.blockedMe ? (
@@ -5431,7 +5728,7 @@ export function MessengerWindow({
                     ))}
                   </div>
                 ) : null}
-                <div className="emoji-input-shell messenger-emoji-input">
+                <div className="messenger-compose-row">
                   <button className="emoji-toggle inline messenger-attach-inline" type="button" aria-label={t(language, 'imageMessage')}
                     disabled={Boolean(editingMessage)}
                     style={{ display: canChooseGroupIdentityInDm ? undefined : 'none' }}
@@ -5465,81 +5762,77 @@ export function MessengerWindow({
                   >
                     <img src={selectedGroupIdentity?.avatarData || currentUser.avatarData} alt="" draggable={false} />
                   </button>
-                  <EmojiInlineInput
-                    ref={messageInputRef}
-                    className="emoji-inline-input messenger-input"
-                    value={messageDraft}
-                    localValue
-                    syncKey={messageDraftSyncKey}
-                    placeholder={t(language, 'messagePlaceholder')}
-                    mentionUsers={selectedUser ? [selectedUser] : []}
-                    onChange={(event) => updateMessageDraft(event.target.value)}
-                    onPaste={handleComposerPaste}
-                    onContextMenu={openComposerMenu}
-                  />
-                  {/* Both the GIF and the emoji buttons live inside the same anchor host.
-                      The picker's outside-pointerdown close handler ignores clicks that land
-                      inside `anchorRef`, so a second click on these buttons no longer triggers
-                      an auto-close immediately followed by the button's own toggle re-opening it
-                      (which made the GIF panel "close then instantly re-open"). The toggle below
-                      is fully deterministic: same tab + open => close, otherwise open on that tab. */}
-                  <div ref={messageEmojiAnchorRef} className="emoji-host inline">
-                    <VoiceRecorderControl
-                      language={language}
-                      disabled={Boolean(editingMessage || pendingImages.length > 0)}
-                      onSend={(recording) => sendMessage({ ...recording, spoiler: false })}
+                  <div className="messenger-input-shell">
+                    <EmojiInlineInput
+                      ref={messageInputRef}
+                      className="emoji-inline-input messenger-chat-inline-input"
+                      value={messageDraft}
+                      localValue
+                      syncKey={messageDraftSyncKey}
+                      placeholder={t(language, 'messagePlaceholder')}
+                      mentionUsers={selectedUser ? [selectedUser] : []}
+                      onChange={(event) => updateMessageDraft(event.target.value)}
+                      onPaste={handleComposerPaste}
+                      onContextMenu={openComposerMenu}
                     />
-                    <button
-                      className="emoji-toggle inline chat-gif-toggle"
-                      type="button"
-                      aria-label="GIF"
-                      onMouseDown={(event) => event.stopPropagation()}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        if (emojiOpen && pickerTab === 'gif') {
-                          setEmojiOpen(false);
-                        } else {
-                          setPickerTab('gif');
-                          setEmojiOpen(true);
-                        }
-                      }}
-                    >
-                      <GifIcon />
-                    </button>
-                    <button
-                      className="emoji-toggle inline"
-                      type="button"
-                      aria-label={t(language, 'emoji')}
-                      onMouseDown={(event) => event.stopPropagation()}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        if (emojiOpen && pickerTab === 'emoji') {
-                          setEmojiOpen(false);
-                        } else {
-                          setPickerTab('emoji');
-                          setEmojiOpen(true);
-                        }
-                      }}
-                    >
-                      <EmojiToggleIcon />
-                    </button>
-                    {scheduledForSelectedUser.length > 0 || scheduledViewOpen ? (
-                    <button
-                      className={scheduledViewOpen ? 'emoji-toggle inline dm-scheduled-toggle active' : 'emoji-toggle inline dm-scheduled-toggle'}
-                      type="button"
-                      title={t(language, 'scheduledMessages')}
-                      aria-label={t(language, 'scheduledMessages')}
-                      onMouseDown={(event) => event.stopPropagation()}
-                      onClick={(event) => { event.stopPropagation(); setScheduledViewOpen((open) => !open); }}
-                    >
-                      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                        <path d="M6 3h11a2 2 0 0 1 2 2v16l-3-2-3 2-3-2-3 2V5a2 2 0 0 1 2-2z" />
-                        <path d="M9 8h7M9 12h7" />
-                      </svg>
-                      {scheduledForSelectedUser.length > 0 ? <span className="dm-scheduled-count">{scheduledForSelectedUser.length}</span> : null}
-                    </button>
-                    ) : null}
-                    {emojiOpen ? <EmojiPicker language={language} enlarged initialTab={pickerTab} anchorRef={messageEmojiAnchorRef} placement="top-end" onSelect={insertEmoji} onSelectGif={(gif) => void sendGif(gif)} onClose={() => setEmojiOpen(false)} token={token} currentUser={currentUser} /> : null}
+                    <div ref={messageEmojiAnchorRef} className="messenger-input-actions">
+                      <VoiceRecorderControl
+                        language={language}
+                        disabled={Boolean(editingMessage || pendingImages.length > 0)}
+                        onSend={(recording) => sendMessage({ ...recording, spoiler: false })}
+                      />
+                      <button
+                        className="emoji-toggle inline chat-gif-toggle"
+                        type="button"
+                        aria-label="GIF"
+                        onMouseDown={(event) => event.stopPropagation()}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          if (emojiOpen && pickerTab === 'gif') {
+                            setEmojiOpen(false);
+                          } else {
+                            setPickerTab('gif');
+                            setEmojiOpen(true);
+                          }
+                        }}
+                      >
+                        <GifIcon />
+                      </button>
+                      <button
+                        className="emoji-toggle inline"
+                        type="button"
+                        aria-label={t(language, 'emoji')}
+                        onMouseDown={(event) => event.stopPropagation()}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          if (emojiOpen && pickerTab === 'emoji') {
+                            setEmojiOpen(false);
+                          } else {
+                            setPickerTab('emoji');
+                            setEmojiOpen(true);
+                          }
+                        }}
+                      >
+                        <EmojiToggleIcon />
+                      </button>
+                      {scheduledForSelectedUser.length > 0 || scheduledViewOpen ? (
+                      <button
+                        className={scheduledViewOpen ? 'emoji-toggle inline dm-scheduled-toggle active' : 'emoji-toggle inline dm-scheduled-toggle'}
+                        type="button"
+                        title={t(language, 'scheduledMessages')}
+                        aria-label={t(language, 'scheduledMessages')}
+                        onMouseDown={(event) => event.stopPropagation()}
+                        onClick={(event) => { event.stopPropagation(); setScheduledViewOpen((open) => !open); }}
+                      >
+                        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                          <path d="M6 3h11a2 2 0 0 1 2 2v16l-3-2-3 2-3-2-3 2V5a2 2 0 0 1 2-2z" />
+                          <path d="M9 8h7M9 12h7" />
+                        </svg>
+                        {scheduledForSelectedUser.length > 0 ? <span className="dm-scheduled-count">{scheduledForSelectedUser.length}</span> : null}
+                      </button>
+                      ) : null}
+                      {emojiOpen ? <EmojiPicker language={language} enlarged initialTab={pickerTab} anchorRef={messageEmojiAnchorRef} placement="top-end" onSelect={insertEmoji} onSelectGif={(gif) => void sendGif(gif)} onClose={() => setEmojiOpen(false)} token={token} currentUser={currentUser} /> : null}
+                    </div>
                   </div>
                 </div>
                 {/* Submit on Enter; the hidden submit input keeps form submission working without a send button. */}
@@ -5584,7 +5877,7 @@ export function MessengerWindow({
                       <span className="spoiler-checkbox" aria-hidden="true" />
                       <span>{t(language, 'spoiler')}</span>
                     </label>
-                    <div className="emoji-input-shell image-caption-input">
+                    <div className="image-caption-input">
                       <EmojiInlineInput ref={imageCaptionInputRef} className="emoji-inline-input" value={imageCaptionDraft} placeholder={t(language, 'imageCaptionPlaceholder')} onChange={(event) => setImageCaptionDraft(event.target.value)} onPaste={handleComposerPaste} onContextMenu={openImageCaptionMenu} autoFocus />
                       <div ref={imageEmojiAnchorRef} className="emoji-host inline">
                         <button
@@ -6216,6 +6509,78 @@ export function MessengerWindow({
       {/* Multi-party voice: play remote audio. The connected UI lives inside the
           group chat (VoiceStage), mirroring the 1:1 call experience. */}
       <VoiceAudioSink streams={voiceRoom.remoteStreams} deafened={voiceRoom.deafened} />
+    </>
+  );
+
+  if (isDetached) {
+    return (
+      <div className="messenger-window detached-messenger-window">
+        <header className="detached-titlebar">
+          <div className="detached-titlebar-drag">
+            <img className="detached-titlebar-icon" src={assetUrl('Emoji/app-icon.png')} alt="" />
+            <span className="detached-titlebar-app-name">NotOS Messenger</span>
+            <div className="detached-titlebar-nav">
+              {messengerTitleContent}
+            </div>
+            <div className="detached-titlebar-center">
+              {centerTitle}
+            </div>
+          </div>
+          <div className="detached-titlebar-actions">
+            <button
+              type="button"
+              className="detached-dock-btn"
+              title={t(language, 'dockWindow')}
+              aria-label={t(language, 'dockWindow')}
+              onClick={onDock || onClose}
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M4 14h6v6" />
+                <path d="M20 10V4h-6" />
+                <path d="M14 10l7-7" />
+                <path d="M3 21l7-7" />
+              </svg>
+              <span className="detached-dock-btn-label">{t(language, 'dockWindow')}</span>
+            </button>
+            <div className="window-controls detached-window-controls">
+              <button type="button" aria-label={t(language, 'minimize')} onClick={onMinimize}>
+                -
+              </button>
+              <button type="button" aria-label={t(language, 'maximize')} onClick={onToggleMaximize}>
+                □
+              </button>
+              <button className="danger" type="button" aria-label={t(language, 'close')} onClick={onDock || onClose}>
+                ✕
+              </button>
+            </div>
+          </div>
+        </header>
+        {messengerBody}
+      </div>
+    );
+  }
+
+  return (
+    <WindowFrame
+      language={language}
+      title={t(language, 'messenger')}
+      titleContent={messengerTitleContent}
+      centerTitle={centerTitle}
+      className="messenger-window"
+      maximized={maximized}
+      minimized={minimized}
+      zIndex={zIndex}
+      defaultPosition={{ x: Math.max(24, window.innerWidth / 2 - 470), y: 70 }}
+      storageKey="messenger"
+      minSize={{ width: 980, height: 620 }}
+      defaultSize={{ width: 1240, height: 800 }}
+      onFocus={onFocus}
+      onClose={onClose}
+      onMinimize={onMinimize}
+      onToggleMaximize={onToggleMaximize}
+      onDetach={onDetach}
+    >
+      {messengerBody}
     </WindowFrame>
   );
 }

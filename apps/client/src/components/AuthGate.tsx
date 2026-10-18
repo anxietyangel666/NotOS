@@ -89,6 +89,68 @@ function authCopy(language: Language) {
     };
   }
 
+  if (language === 'zh') {
+    return {
+      heroTitle: '欢迎来到 NotOS',
+      heroText: '选择通过授权文件的安全登录，或使用用户名和密码的普通登录。',
+      secureMethod: '安全登录',
+      passwordMethod: '用户名 / 密码',
+      secureCaption: '授权文件在本地保存访问密钥，适合主账户使用。',
+      passwordCaption: '普通方式：昵称和密码，无需选择文件。',
+      loginLabel: '用户名',
+      loginPlaceholder: '例如 neon_admin',
+      password: '密码',
+      passwordPlaceholder: '输入密码',
+      repeatPassword: '确认密码',
+      repeatPasswordPlaceholder: '再次输入密码',
+      email: '邮箱',
+      emailPlaceholder: 'name@example.com',
+      createPassword: '设置密码',
+      passwordLoginTitle: '密码登录',
+      passwordLoginHint: '输入普通注册时设置的用户名和密码。',
+      secureRegisterTitle: '安全注册',
+      passwordRegisterTitle: '普通注册',
+      secureRegisterHint: '创建账户后，NotOS 会保存授权文件并显示恢复密钥。',
+      passwordRegisterHint: '账户将通过昵称和密码打开，无需授权文件。',
+      passwordAccountCreated: '账户已创建。恢复密钥只显示一次，用于恢复访问权限。',
+      passwordMismatch: '两次密码不一致。',
+      signIn: '登录',
+      signingIn: '正在登录…',
+      createAccount: '创建账户'
+    };
+  }
+
+  if (language === 'zh-TW') {
+    return {
+      heroTitle: '歡迎來到 NotOS',
+      heroText: '選擇透過授權檔的安全登入，或使用使用者名稱和密碼的一般登入。',
+      secureMethod: '安全登入',
+      passwordMethod: '使用者名稱 / 密碼',
+      secureCaption: '授權檔在本機保存存取金鑰，適合主要帳戶使用。',
+      passwordCaption: '一般方式：暱稱和密碼，無需選擇檔案。',
+      loginLabel: '使用者名稱',
+      loginPlaceholder: '例如 neon_admin',
+      password: '密碼',
+      passwordPlaceholder: '輸入密碼',
+      repeatPassword: '確認密碼',
+      repeatPasswordPlaceholder: '再次輸入密碼',
+      email: '電子郵件',
+      emailPlaceholder: 'name@example.com',
+      createPassword: '設定密碼',
+      passwordLoginTitle: '密碼登入',
+      passwordLoginHint: '輸入一般註冊時設定的使用者名稱和密碼。',
+      secureRegisterTitle: '安全註冊',
+      passwordRegisterTitle: '一般註冊',
+      secureRegisterHint: '建立帳戶後，NotOS 會儲存授權檔並顯示復原金鑰。',
+      passwordRegisterHint: '帳戶將透過暱稱和密碼開啟，無需授權檔。',
+      passwordAccountCreated: '帳戶已建立。復原金鑰只顯示一次，用於復原存取權限。',
+      passwordMismatch: '兩次密碼不一致。',
+      signIn: '登入',
+      signingIn: '正在登入…',
+      createAccount: '建立帳戶'
+    };
+  }
+
   return {
     heroTitle: 'Welcome to NotOS',
     heroText: 'Choose protected auth-file access or classic nickname and password sign-in.',

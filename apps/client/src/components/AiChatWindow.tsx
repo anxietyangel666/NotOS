@@ -1,16 +1,41 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type DragEvent } from 'react';
 import { api } from '../api/client';
-import type { AiChat, AiChatMessage, AiChatSummary, AiQuota, AiSettings, Language } from '../api/types';
+import type { AiChat, AiChatMessage, AiChatSummary, AiQuota, AiSettings, ChatMediaItem, Language } from '../api/types';
 import { LOCALES, t, getSavedTimeFormat } from '../i18n';
 import { getMusicTracks } from '../music-library';
 import { formatMessageDate, shouldShowDateDivider } from '../utils/message-date';
 import { AiPersonaForm } from './AiPersonaForm';
 import { SaveBar } from './SaveBar';
 import { EmojiPicker } from './EmojiPicker';
-import { EmojiToggleIcon } from './ChatComposeIcons';
+import { AttachIcon, EmojiToggleIcon, GifIcon } from './ChatComposeIcons';
 import { WindowFrame } from './WindowFrame';
+import { readImageAsDataUrl } from '../auth/auth-file';
+import { gifFromUrl, type TenorGif } from '../utils/tenor';
 
 type AiTab = 'chat' | 'persona';
+
+type PendingChatImage = {
+  dataUrl: string;
+  name: string;
+  spoiler: boolean;
+};
+
+const MAX_CHAT_IMAGE_SIZE = 5 * 1024 * 1024;
+const MAX_CHAT_MEDIA_BATCH = 10;
+
+function clipboardImageFiles(data: DataTransfer) {
+  const fromItems = Array.from(data.items ?? [])
+    .filter((item) => item.kind === 'file' && item.type.startsWith('image/'))
+    .map((item) => item.getAsFile())
+    .filter((file): file is File => Boolean(file));
+  if (fromItems.length > 0) return fromItems;
+  return Array.from(data.files).filter((file) => file.type.startsWith('image/'));
+}
+
+function mediaItemsForAiMessage(message: AiChatMessage): ChatMediaItem[] {
+  if (message.mediaItems && message.mediaItems.length > 0) return message.mediaItems;
+  return message.imageData ? [{ dataUrl: message.imageData, name: message.imageName ?? null, spoiler: Boolean(message.imageSpoiler) }] : [];
+}
 
 // Locally-persisted favorite AI chats (by chat id). Favoriting pins a chat to
 // the top of the list, mirroring the favorites available elsewhere in the app.
@@ -55,6 +80,10 @@ function normalizeAiMessage(message: Partial<AiChatMessage> | null | undefined, 
     id: typeof message?.id === 'string' && message.id ? message.id : `recovered-${index}`,
     role,
     content: typeof message?.content === 'string' ? message.content : '',
+    imageData: message?.imageData ?? null,
+    imageName: message?.imageName ?? null,
+    imageSpoiler: message?.imageSpoiler ?? false,
+    mediaItems: Array.isArray(message?.mediaItems) ? message.mediaItems : undefined,
     createdAt
   };
 }
@@ -123,12 +152,53 @@ export function AiChatWindow({
   const [activeChat, setActiveChat] = useState<AiChat | null>(null);
   const [configured, setConfigured] = useState(true);
   const [draft, setDraft] = useState('');
+  const [pendingImages, setPendingImages] = useState<PendingChatImage[]>([]);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [emojiOpen, setEmojiOpen] = useState(false);
+  const [pickerTab, setPickerTab] = useState<'emoji' | 'gif'>('emoji');
   const emojiAnchorRef = useRef<HTMLDivElement | null>(null);
   const composerInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  async function addImageFile(file: File | undefined) {
+    if (!file || !file.type.startsWith('image/') || file.size > MAX_CHAT_IMAGE_SIZE) return;
+    try {
+      const dataUrl = await readImageAsDataUrl(file);
+      setPendingImages((current) => [...current, { dataUrl, name: file.name || t(language, 'imageMessage'), spoiler: false }].slice(0, MAX_CHAT_MEDIA_BATCH));
+      setEmojiOpen(false);
+    } catch {
+      // ignore
+    }
+  }
+
+  function handleComposerPaste(event: ReactClipboardEvent<HTMLElement>) {
+    const files = clipboardImageFiles(event.clipboardData).slice(0, MAX_CHAT_MEDIA_BATCH - pendingImages.length);
+    if (files.length === 0) return;
+    event.preventDefault();
+    files.forEach((file) => void addImageFile(file));
+  }
+
+  async function handleDrop(event: DragEvent<HTMLDivElement>) {
+    if (!Array.from(event.dataTransfer.types).includes('Files')) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const files = Array.from(event.dataTransfer.files).filter((file) => file.type.startsWith('image/')).slice(0, MAX_CHAT_MEDIA_BATCH - pendingImages.length);
+    for (const file of files) {
+      await addImageFile(file);
+    }
+  }
+
+  function removePendingImage(index: number) {
+    setPendingImages((current) => current.filter((_, i) => i !== index));
+  }
+
+  function sendGif(gif: TenorGif) {
+    const normalized = gifFromUrl(gif.url, gif.description || 'GIF');
+    setPendingImages((current) => [...current, { dataUrl: normalized.url, name: normalized.description, spoiler: false }].slice(0, MAX_CHAT_MEDIA_BATCH));
+    setEmojiOpen(false);
+  }
 
   // Tabs + persona/quota state.
   const [tab, setTab] = useState<AiTab>('chat');
@@ -290,9 +360,12 @@ export function AiChatWindow({
 
   async function send() {
     const content = draft.trim();
-    if (!content || sending) return;
+    if ((!content && pendingImages.length === 0) || sending) return;
     setError('');
     setSending(true);
+
+    const attachmentsToSend = pendingImages.map((item) => ({ dataUrl: item.dataUrl, name: item.name, spoiler: item.spoiler }));
+    const primaryImage = attachmentsToSend[0] ?? null;
 
     // Ensure a chat exists before sending the first message.
     let chat = activeChat;
@@ -303,16 +376,26 @@ export function AiChatWindow({
         setActiveChat(chat);
       }
 
-      // Optimistically show the user's message.
+      // Optimistically show the user's message with attachments.
       const optimisticChat: AiChat = {
         ...chat,
         messages: [
           ...chat.messages,
-          { id: `temp-${Date.now()}`, role: 'user', content, createdAt: new Date().toISOString() }
+          {
+            id: `temp-${Date.now()}`,
+            role: 'user',
+            content,
+            imageData: primaryImage?.dataUrl ?? null,
+            imageName: primaryImage?.name ?? null,
+            imageSpoiler: primaryImage?.spoiler ?? false,
+            mediaItems: attachmentsToSend.length > 0 ? attachmentsToSend : undefined,
+            createdAt: new Date().toISOString()
+          }
         ]
       };
       setActiveChat(optimisticChat);
       setDraft('');
+      setPendingImages([]);
 
       // Send the user's local date/time and AM/PM (12h/24h) preference so the
       // assistant can report times synced with the user's clock settings.
@@ -331,18 +414,25 @@ export function AiChatWindow({
       const result = await api.sendAiMessage(token, chat.id, content, {
         localDateTime,
         timeFormat,
-        musicTracks
+        musicTracks,
+        image: primaryImage ? { ...primaryImage } : undefined,
+        mediaItems: attachmentsToSend.length > 1 ? attachmentsToSend : undefined
       });
       setActiveChat(normalizeAiChat(result.chat));
       if (result.quota) setQuota(result.quota);
+      if (result.settings) {
+        setSettings(result.settings);
+        setPersonaDraft(result.settings);
+      }
       await refreshList();
     } catch (err) {
       // The server returns 429 with this message when the daily quota is hit.
       const message = err instanceof Error ? err.message : '';
       const quotaHit = /limit reached|quota/i.test(message);
-      setError(quotaHit ? t(language, 'aiQuotaReached') : t(language, 'aiError'));
-      // Restore the draft so the user can retry.
+      setError(quotaHit ? t(language, 'aiQuotaReached') : (message || t(language, 'aiError')));
+      // Restore the draft and attachments so the user can retry.
       setDraft(content);
+      setPendingImages(attachmentsToSend);
       if (chat) await openChat(chat.id);
       void refreshQuota();
     } finally {
@@ -497,7 +587,16 @@ export function AiChatWindow({
                     <div className={`ai-message ai-message-${message.role}`}>
                       <div className="ai-message-bubble">
                         <time className="ai-message-time">{formatTime(message.createdAt, language)}</time>
-                        <span className="ai-message-text">{message.content}</span>
+                        {mediaItemsForAiMessage(message).length > 0 ? (
+                          <div className={mediaItemsForAiMessage(message).length === 1 ? 'ai-message-media' : 'ai-message-media ai-message-media-grid'}>
+                            {mediaItemsForAiMessage(message).map((item, itemIdx) => (
+                              <div key={`${message.id}:${itemIdx}`} className="ai-message-media-item">
+                                <img src={item.dataUrl} alt={item.name ?? ''} draggable={false} />
+                              </div>
+                            ))}
+                          </div>
+                        ) : null}
+                        {message.content ? <span className="ai-message-text">{message.content}</span> : null}
                       </div>
                     </div>
                   </Fragment>
@@ -513,51 +612,131 @@ export function AiChatWindow({
             ) : null}
           </div>
 
-          {error ? <div className="ai-chat-error">{error}</div> : null}
+          {error ? (
+            <div className="ai-chat-error-row">
+              <span className="ai-chat-error">{error}</span>
+              <button type="button" className="ai-chat-retry-btn" onClick={() => void send()}>
+                {language === 'ru' ? 'Повторить' : language === 'uk' ? 'Повторити' : 'Retry'}
+              </button>
+            </div>
+          ) : null}
           {quotaReached && !error ? <div className="ai-chat-error">{t(language, 'aiQuotaReached')}</div> : null}
 
-          <div className="ai-chat-composer">
-            <textarea
-              ref={composerInputRef}
-              className="text-field ai-chat-input-centered"
-              rows={1}
-              placeholder={t(language, 'aiPlaceholder')}
-              value={draft}
-              disabled={sending || !configured || quotaReached}
-              onChange={(event) => setDraft(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' && !event.shiftKey) {
-                  event.preventDefault();
-                  void send();
-                }
+          <div
+            className="ai-chat-composer"
+            onDragOver={(event) => event.preventDefault()}
+            onDrop={(event) => void handleDrop(event)}
+          >
+            <input
+              ref={fileInputRef}
+              className="hidden-file"
+              type="file"
+              accept="image/*"
+              multiple
+              style={{ display: 'none' }}
+              onChange={(event) => {
+                const files = Array.from(event.currentTarget.files ?? []).slice(0, MAX_CHAT_MEDIA_BATCH - pendingImages.length);
+                event.currentTarget.value = '';
+                files.forEach((file) => void addImageFile(file));
               }}
             />
-            <div ref={emojiAnchorRef} className="emoji-host inline ai-chat-emoji-host">
+
+            {pendingImages.length > 0 ? (
+              <div className="ai-chat-attachments">
+                {pendingImages.map((item, index) => (
+                  <button
+                    key={`${item.name}-${index}`}
+                    type="button"
+                    className="ai-chat-attachment"
+                    title={item.name}
+                    onClick={() => removePendingImage(index)}
+                  >
+                    <img src={item.dataUrl} alt={item.name} />
+                    <span aria-hidden="true">&times;</span>
+                  </button>
+                ))}
+              </div>
+            ) : null}
+
+            <div className="ai-chat-composer-row">
               <button
-                className="emoji-toggle inline"
                 type="button"
-                aria-label={t(language, 'emoji')}
+                className="ai-chat-attach-btn"
+                title={t(language, 'imageMessage')}
+                aria-label={t(language, 'imageMessage')}
                 disabled={sending || !configured || quotaReached}
-                onMouseDown={(event) => event.stopPropagation()}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  setEmojiOpen((value) => !value);
-                }}
+                onClick={() => fileInputRef.current?.click()}
               >
-                <EmojiToggleIcon />
+                <AttachIcon />
               </button>
-              {emojiOpen ? (
-                <EmojiPicker
-                  language={language}
-                  anchorRef={emojiAnchorRef}
-                  placement="top-end"
-                  onSelect={(emoji) => {
-                    setDraft((value) => `${value}${emoji}`);
-                    window.setTimeout(() => composerInputRef.current?.focus(), 0);
+
+              <div className="ai-chat-input-shell">
+                <textarea
+                  ref={composerInputRef}
+                  className="ai-chat-textarea"
+                  rows={1}
+                  placeholder={language === 'ru' ? 'Написать сообщение...' : language === 'uk' ? 'Написати повідомлення...' : 'Write a message...'}
+                  value={draft}
+                  disabled={sending || !configured || quotaReached}
+                  onChange={(event) => setDraft(event.target.value)}
+                  onPaste={handleComposerPaste}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' && !event.shiftKey) {
+                      event.preventDefault();
+                      void send();
+                    }
                   }}
-                  onClose={() => setEmojiOpen(false)}
                 />
-              ) : null}
+
+                <div ref={emojiAnchorRef} className="ai-chat-emoji-host">
+                  <button
+                    className="emoji-toggle inline chat-gif-toggle"
+                    type="button"
+                    aria-label="GIF"
+                    disabled={sending || !configured || quotaReached}
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setPickerTab('gif');
+                      setEmojiOpen((value) => !value);
+                    }}
+                  >
+                    <GifIcon />
+                  </button>
+
+                  <button
+                    className="emoji-toggle inline"
+                    type="button"
+                    aria-label={t(language, 'emoji')}
+                    disabled={sending || !configured || quotaReached}
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setPickerTab('emoji');
+                      setEmojiOpen((value) => !value);
+                    }}
+                  >
+                    <EmojiToggleIcon />
+                  </button>
+
+                  {emojiOpen ? (
+                    <EmojiPicker
+                      language={language}
+                      enlarged
+                      initialTab={pickerTab}
+                      anchorRef={emojiAnchorRef}
+                      placement="top-end"
+                      onSelect={(emoji) => {
+                        setDraft((value) => `${value}${emoji}`);
+                        window.setTimeout(() => composerInputRef.current?.focus(), 0);
+                      }}
+                      onSelectGif={sendGif}
+                      onClose={() => setEmojiOpen(false)}
+                      token={token}
+                    />
+                  ) : null}
+                </div>
+              </div>
             </div>
           </div>
         </div>

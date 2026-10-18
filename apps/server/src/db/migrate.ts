@@ -231,6 +231,13 @@ export async function migrate() {
     ALTER TABLE messages
       ADD COLUMN IF NOT EXISTS view_once_seen_at TIMESTAMPTZ;
 
+    ALTER TABLE messages
+      ADD COLUMN IF NOT EXISTS ai_generated BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE messages
+      ADD COLUMN IF NOT EXISTS ai_name TEXT;
+    ALTER TABLE messages
+      ADD COLUMN IF NOT EXISTS ai_avatar_data TEXT;
+
     -- Full-text-ish search across all conversations of a user.
     CREATE INDEX IF NOT EXISTS messages_body_trgm_idx
       ON messages (recipient_id, created_at DESC)
@@ -360,6 +367,12 @@ export async function migrate() {
     CREATE INDEX IF NOT EXISTS messages_unread_idx
       ON messages (recipient_id, sender_id)
       WHERE read_at IS NULL AND deleted_at IS NULL;
+    CREATE INDEX IF NOT EXISTS messages_recipient_created_idx
+      ON messages (recipient_id, created_at DESC)
+      WHERE deleted_at IS NULL;
+    CREATE INDEX IF NOT EXISTS messages_sender_created_idx
+      ON messages (sender_id, created_at DESC)
+      WHERE deleted_at IS NULL;
 
     CREATE TABLE IF NOT EXISTS conversation_settings (
       user_a UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -554,6 +567,12 @@ export async function migrate() {
       ADD COLUMN IF NOT EXISTS feed_source_id UUID REFERENCES group_messages(id) ON DELETE SET NULL;
     ALTER TABLE group_messages
       ADD COLUMN IF NOT EXISTS feed_mirror BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE group_messages
+      ADD COLUMN IF NOT EXISTS ai_generated BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE group_messages
+      ADD COLUMN IF NOT EXISTS ai_name TEXT;
+    ALTER TABLE group_messages
+      ADD COLUMN IF NOT EXISTS ai_avatar_data TEXT;
 
     CREATE TABLE IF NOT EXISTS group_message_views (
       message_id UUID NOT NULL REFERENCES group_messages(id) ON DELETE CASCADE,
@@ -605,6 +624,8 @@ export async function migrate() {
       ADD COLUMN IF NOT EXISTS feed_chat_channel_id UUID REFERENCES group_channels(id) ON DELETE SET NULL;
     ALTER TABLE group_channels
       ADD COLUMN IF NOT EXISTS feed_parent_channel_id UUID REFERENCES group_channels(id) ON DELETE SET NULL;
+    ALTER TABLE group_channels
+      ADD COLUMN IF NOT EXISTS settings JSONB NOT NULL DEFAULT '{}'::jsonb;
 
     CREATE TABLE IF NOT EXISTS group_folders (
       id UUID PRIMARY KEY,
@@ -784,5 +805,64 @@ export async function migrate() {
 
     CREATE INDEX IF NOT EXISTS user_connections_provider_idx
       ON user_connections (provider, provider_user_id);
+
+    -- Saved Messages uses the same user on both sides; the original
+    -- user_a < user_b check blocked a wallpaper for that chat.
+    DO $$
+    DECLARE
+      r record;
+    BEGIN
+      FOR r IN
+        SELECT conname
+        FROM pg_constraint
+        WHERE conrelid = 'conversation_settings'::regclass
+          AND contype = 'c'
+          AND pg_get_constraintdef(oid) LIKE '%user_a < user_b%'
+      LOOP
+        EXECUTE format('ALTER TABLE conversation_settings DROP CONSTRAINT %I', r.conname);
+      END LOOP;
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'conversation_settings'::regclass
+          AND conname = 'conversation_settings_user_order_check'
+      ) THEN
+        ALTER TABLE conversation_settings
+          ADD CONSTRAINT conversation_settings_user_order_check CHECK (user_a <= user_b);
+      END IF;
+    END $$;
+
+    ALTER TABLE group_members
+      ADD COLUMN IF NOT EXISTS nickname TEXT NOT NULL DEFAULT '';
+    ALTER TABLE group_members
+      ADD COLUMN IF NOT EXISTS timeout_until TIMESTAMPTZ;
+    ALTER TABLE group_invites
+      ADD COLUMN IF NOT EXISTS max_uses INT;
+    ALTER TABLE group_invites
+      ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
+
+    CREATE TABLE IF NOT EXISTS group_bans (
+      group_id UUID NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+      user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      banned_by UUID REFERENCES users(id) ON DELETE SET NULL,
+      reason TEXT NOT NULL DEFAULT '',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (group_id, user_id)
+    );
+    CREATE INDEX IF NOT EXISTS group_bans_user_idx ON group_bans (user_id);
+
+    CREATE TABLE IF NOT EXISTS user_music_tracks (
+      id UUID PRIMARY KEY,
+      user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      url TEXT NOT NULL,
+      mime_type TEXT NOT NULL DEFAULT 'audio/mpeg',
+      size INTEGER NOT NULL DEFAULT 0,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS user_music_tracks_user_idx ON user_music_tracks (user_id, sort_order);
+
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS voice_bio TEXT;
   `);
 }

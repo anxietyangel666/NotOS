@@ -21,7 +21,7 @@ export function CreateChannelModal({
   return (
     <div className="messenger-inline-modal" onClick={onClose}>
       <div className="group-channel-modal" onClick={(e) => e.stopPropagation()}>
-        <h3>{createChannelType === 'feed' ? (language === 'ru' ? 'Создать Feed' : 'Create Feed') : t(language, createChannelType === 'voice' ? 'createVoiceChannel' : 'createChannel')}</h3>
+        <h3>{t(language, createChannelType === 'feed' ? 'createFeed' : createChannelType === 'voice' ? 'createVoiceChannel' : 'createChannel')}</h3>
         <label>{t(language, 'channelName')}</label>
         <input type="text" className="messenger-input" value={newChannelName}
           onChange={(e) => setNewChannelName(e.target.value)}

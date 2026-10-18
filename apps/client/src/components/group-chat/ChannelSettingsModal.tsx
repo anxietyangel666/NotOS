@@ -2,7 +2,7 @@
 // tabs). Extracted verbatim from GroupChatView.tsx — all state and handlers
 // still live in the parent and arrive via props.
 import { type Dispatch, type MutableRefObject, type SetStateAction } from 'react';
-import type { Group, GroupChannel, GroupInvite, GroupRole, Language } from '../../api/types';
+import type { ChannelExtraSettings, Group, GroupChannel, GroupFolder, GroupInvite, GroupRole, Language } from '../../api/types';
 import { t } from '../../i18n';
 import { buildGroupInviteLink } from '../../utils/group-invite-link';
 import { SaveBar } from '../SaveBar';
@@ -15,6 +15,7 @@ type ChannelSettingsModalProps = {
   group: Group;
   channelId: string;
   channels: GroupChannel[];
+  folders: GroupFolder[];
   roles: GroupRole[];
   everyonePermissions: string[];
   groupInvites: GroupInvite[];
@@ -37,6 +38,16 @@ type ChannelSettingsModalProps = {
   setEditBitrateDraft: (value: string) => void;
   editLimitDraft: string;
   setEditLimitDraft: (value: string) => void;
+  extrasDraft: ChannelExtraSettings;
+  setExtrasDraft: Dispatch<SetStateAction<ChannelExtraSettings>>;
+  extrasFolderId: string;
+  setExtrasFolderId: (value: string) => void;
+  signPostsDraft: boolean;
+  setSignPostsDraft: (value: boolean) => void;
+  canManageChannels: boolean;
+  onCloneChannel: () => Promise<void>;
+  onResetPermissions: () => Promise<void>;
+  onCopyChannelId: () => void;
   editBarShake: number;
   selectedChannelPermissionRoleId: string | null;
   setSelectedChannelPermissionRoleId: (roleId: string | null) => void;
@@ -63,6 +74,7 @@ export function ChannelSettingsModal({
   group,
   channelId,
   channels,
+  folders,
   roles,
   everyonePermissions,
   groupInvites,
@@ -85,6 +97,16 @@ export function ChannelSettingsModal({
   setEditBitrateDraft,
   editLimitDraft,
   setEditLimitDraft,
+  extrasDraft,
+  setExtrasDraft,
+  extrasFolderId,
+  setExtrasFolderId,
+  signPostsDraft,
+  setSignPostsDraft,
+  canManageChannels,
+  onCloneChannel,
+  onResetPermissions,
+  onCopyChannelId,
   editBarShake,
   selectedChannelPermissionRoleId,
   setSelectedChannelPermissionRoleId,
@@ -160,6 +182,13 @@ export function ChannelSettingsModal({
                 onKeyDown={(event) => { if (event.key === 'Enter') void saveEditTarget(); }}
                 autoFocus
               />
+              <label>{t(language, 'channelFolder')}</label>
+              <select className="messenger-input" value={extrasFolderId} onChange={(event) => setExtrasFolderId(event.target.value)}>
+                <option value="">{t(language, 'channelNoFolder')}</option>
+                {folders.map((folder) => (
+                  <option key={folder.id} value={folder.id}>{folder.name}</option>
+                ))}
+              </select>
               <label>{language === 'ru' ? 'Тема канала' : 'Channel topic'}</label>
               <div className="channel-topic-toolbar" aria-label={language === 'ru' ? 'Форматирование' : 'Formatting'}>
                 {[
@@ -188,33 +217,138 @@ export function ChannelSettingsModal({
                 rows={5}
               />
               <small className="muted-line channel-settings-counter">{editTopicDraft.length}/{topicLimit}</small>
-              <label>{language === 'ru' ? 'Медленный режим' : 'Slowmode'}</label>
-              <select className="messenger-input" value={editSlowmodeDraft} onChange={(event) => setEditSlowmodeDraft(event.target.value)}>
-                <option value="0">{language === 'ru' ? 'Выкл.' : 'Off'}</option>
-                <option value="5">5 sec</option>
-                <option value="10">10 sec</option>
-                <option value="30">30 sec</option>
-                <option value="60">1 min</option>
-                <option value="300">5 min</option>
-                <option value="900">15 min</option>
-                <option value="3600">1 hour</option>
-                <option value="21600">6 hours</option>
-              </select>
               {!isVoice ? (
-                <label className="settings-toggle-row">
-                  <input type="checkbox" checked={editNsfwDraft} onChange={(event) => setEditNsfwDraft(event.target.checked)} />
-                  <span>{language === 'ru' ? 'NSFW канал' : 'NSFW channel'}</span>
-                </label>
-              ) : null}
-              {isVoice ? (
                 <>
-                  <label>{language === 'ru' ? 'Битрейт' : 'Bitrate'}</label>
+                  <label>{t(language, 'slowmode')}</label>
+                  <select className="messenger-input" value={editSlowmodeDraft} onChange={(event) => setEditSlowmodeDraft(event.target.value)}>
+                    <option value="0">{t(language, 'timerOff')}</option>
+                    <option value="5">5s</option>
+                    <option value="10">10s</option>
+                    <option value="15">15s</option>
+                    <option value="30">30s</option>
+                    <option value="60">1m</option>
+                    <option value="120">2m</option>
+                    <option value="300">5m</option>
+                    <option value="600">10m</option>
+                    <option value="900">15m</option>
+                    <option value="1800">30m</option>
+                    <option value="3600">1h</option>
+                    <option value="7200">2h</option>
+                    <option value="21600">6h</option>
+                  </select>
+                  <label>{t(language, 'newMemberSlowmode')}</label>
+                  <select className="messenger-input" value={String(extrasDraft.newMemberSlowmodeSeconds)} onChange={(event) => setExtrasDraft((current) => ({ ...current, newMemberSlowmodeSeconds: Number(event.target.value) }))}>
+                    <option value="0">{t(language, 'timerOff')}</option>
+                    <option value="300">5m</option>
+                    <option value="600">10m</option>
+                    <option value="3600">1h</option>
+                    <option value="86400">24h</option>
+                    <option value="259200">3d</option>
+                    <option value="604800">7d</option>
+                  </select>
+                  <label>{t(language, 'defaultThreadSlowmode')}</label>
+                  <select className="messenger-input" value={String(extrasDraft.defaultThreadSlowmodeSeconds)} onChange={(event) => setExtrasDraft((current) => ({ ...current, defaultThreadSlowmodeSeconds: Number(event.target.value) }))}>
+                    <option value="0">{t(language, 'timerOff')}</option>
+                    <option value="5">5s</option>
+                    <option value="10">10s</option>
+                    <option value="30">30s</option>
+                    <option value="60">1m</option>
+                    <option value="300">5m</option>
+                  </select>
+                  <label>{t(language, 'defaultAutoArchive')}</label>
+                  <select className="messenger-input" value={String(extrasDraft.defaultAutoArchiveMinutes)} onChange={(event) => setExtrasDraft((current) => ({ ...current, defaultAutoArchiveMinutes: Number(event.target.value) }))}>
+                    <option value="60">1h</option>
+                    <option value="1440">24h</option>
+                    <option value="4320">3d</option>
+                    <option value="10080">7d</option>
+                  </select>
+                  <label>{t(language, 'channelNotifications')}</label>
+                  <select className="messenger-input" value={extrasDraft.defaultNotifications} onChange={(event) => setExtrasDraft((current) => ({ ...current, defaultNotifications: event.target.value as ChannelExtraSettings['defaultNotifications'] }))}>
+                    <option value="all">{t(language, 'notifyAllMessages')}</option>
+                    <option value="mentions">{t(language, 'notifyMentions')}</option>
+                    <option value="nothing">{t(language, 'notifyNothing')}</option>
+                  </select>
+                  <label className="settings-toggle-row">
+                    <input type="checkbox" checked={editNsfwDraft} onChange={(event) => setEditNsfwDraft(event.target.checked)} />
+                    <span>{t(language, 'nsfwChannel')}</span>
+                  </label>
+                  <label className="settings-toggle-row">
+                    <input type="checkbox" checked={extrasDraft.privateChannel} onChange={(event) => setExtrasDraft((current) => ({ ...current, privateChannel: event.target.checked }))} />
+                    <span>{t(language, 'privateChannel')}</span>
+                  </label>
+                  <label className="settings-toggle-row">
+                    <input type="checkbox" checked={extrasDraft.locked} onChange={(event) => setExtrasDraft((current) => ({ ...current, locked: event.target.checked }))} />
+                    <span>{t(language, 'lockedChannel')}</span>
+                  </label>
+                  <label className="settings-toggle-row">
+                    <input type="checkbox" checked={extrasDraft.announcement} onChange={(event) => setExtrasDraft((current) => ({ ...current, announcement: event.target.checked }))} />
+                    <span>{t(language, 'announcementChannel')}</span>
+                  </label>
+                  <label className="settings-toggle-row">
+                    <input type="checkbox" checked={extrasDraft.disableReactions} onChange={(event) => setExtrasDraft((current) => ({ ...current, disableReactions: event.target.checked }))} />
+                    <span>{t(language, 'disableReactions')}</span>
+                  </label>
+                  {channel.type === 'feed' ? (
+                    <label className="settings-toggle-row">
+                      <input type="checkbox" checked={signPostsDraft} onChange={(event) => setSignPostsDraft(event.target.checked)} />
+                      <span>{t(language, 'signPosts')}</span>
+                    </label>
+                  ) : null}
+                </>
+              ) : (
+                <>
+                  <label>{t(language, 'bitrate')}</label>
                   <input type="range" min={8000} max={384000} step={1000} value={editBitrateDraft} onChange={(event) => setEditBitrateDraft(event.target.value)} />
                   <small className="muted-line">{Math.round((Number(editBitrateDraft) || 64000) / 1000)} kbps</small>
                   <label>{t(language, 'memberLimit')}</label>
                   <input type="number" min={1} max={99} className="messenger-input" value={editLimitDraft} placeholder={t(language, 'noLimit')} onChange={(event) => setEditLimitDraft(event.target.value)} />
+                  <label>{t(language, 'voiceMode')}</label>
+                  <select className="messenger-input" value={extrasDraft.voiceMode} onChange={(event) => setExtrasDraft((current) => ({ ...current, voiceMode: event.target.value as ChannelExtraSettings['voiceMode'] }))}>
+                    <option value="voice_activity">{t(language, 'voiceActivity')}</option>
+                    <option value="ptt">{t(language, 'pushToTalk')}</option>
+                  </select>
+                  <label>{t(language, 'videoQuality')}</label>
+                  <select className="messenger-input" value={extrasDraft.videoQuality} onChange={(event) => setExtrasDraft((current) => ({ ...current, videoQuality: event.target.value as ChannelExtraSettings['videoQuality'] }))}>
+                    <option value="auto">{t(language, 'videoQualityAuto')}</option>
+                    <option value="720">720p</option>
+                    <option value="1080">1080p</option>
+                  </select>
+                  <label>{t(language, 'rtcRegion')}</label>
+                  <select className="messenger-input" value={extrasDraft.rtcRegion} onChange={(event) => setExtrasDraft((current) => ({ ...current, rtcRegion: event.target.value }))}>
+                    <option value="automatic">{t(language, 'rtcAutomatic')}</option>
+                    <option value="eu-west">EU West</option>
+                    <option value="eu-east">EU East</option>
+                    <option value="us-east">US East</option>
+                    <option value="us-west">US West</option>
+                    <option value="asia">Asia</option>
+                  </select>
+                  <label className="settings-toggle-row">
+                    <input type="checkbox" checked={extrasDraft.privateChannel} onChange={(event) => setExtrasDraft((current) => ({ ...current, privateChannel: event.target.checked }))} />
+                    <span>{t(language, 'privateChannel')}</span>
+                  </label>
+                  <label className="settings-toggle-row">
+                    <input type="checkbox" checked={extrasDraft.videoEnabled} onChange={(event) => setExtrasDraft((current) => ({ ...current, videoEnabled: event.target.checked }))} />
+                    <span>{t(language, 'videoEnabled')}</span>
+                  </label>
+                  <label className="settings-toggle-row">
+                    <input type="checkbox" checked={extrasDraft.streamEnabled} onChange={(event) => setExtrasDraft((current) => ({ ...current, streamEnabled: event.target.checked }))} />
+                    <span>{t(language, 'streamEnabled')}</span>
+                  </label>
+                  <label className="settings-toggle-row">
+                    <input type="checkbox" checked={extrasDraft.hideInactive} onChange={(event) => setExtrasDraft((current) => ({ ...current, hideInactive: event.target.checked }))} />
+                    <span>{t(language, 'hideInactiveVoice')}</span>
+                  </label>
                 </>
-              ) : null}
+              )}
+              <div className="channel-settings-actions">
+                <button type="button" className="secondary-action" onClick={() => void onCopyChannelId()}>{t(language, 'copyChannelId')}</button>
+                {canManageChannels && !isFeedManagedChannel(channel) ? (
+                  <button type="button" className="secondary-action" onClick={() => void onCloneChannel()}>{t(language, 'cloneChannel')}</button>
+                ) : null}
+                {canManageRoles ? (
+                  <button type="button" className="secondary-action" onClick={() => void onResetPermissions()}>{t(language, 'resetChannelPermissions')}</button>
+                ) : null}
+              </div>
               <SaveBar language={language} dirty={isEditTargetDirty()} shakeKey={editBarShake} onReset={resetEditTarget} onSave={() => void saveEditTarget()} />
             </div>
           ) : null}
@@ -237,7 +371,11 @@ export function ChannelSettingsModal({
               <div className="channel-permissions-editor">
                 <h3>{selectedPermissionRole ? selectedPermissionRole.name : (language === 'ru' ? 'Права канала' : 'Channel permissions')}</h3>
                 {selectedPermissionRole ? CHANNEL_PERMISSION_GROUPS
-                  .filter((group) => !('textOnly' in group) || channel.type === 'text' || channel.type === 'feed')
+                  .filter((group) => {
+                    if ('textOnly' in group && group.textOnly) return channel.type === 'text' || channel.type === 'feed';
+                    if ('voiceOnly' in group && group.voiceOnly) return channel.type === 'voice';
+                    return true;
+                  })
                   .map((group) => (
                     <div key={group.title} className="channel-permission-group">
                       <strong>{group.title}</strong>

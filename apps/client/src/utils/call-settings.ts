@@ -49,6 +49,15 @@ export function describeKey(code: string, fallback: string): string {
   if (code.startsWith('Digit')) return code.slice(5);
   if (code === 'Space') return 'Space';
   if (code.startsWith('Arrow')) return code.slice(5);
+  if (code === 'ControlLeft') return 'Left Ctrl';
+  if (code === 'ControlRight') return 'Right Ctrl';
+  if (code === 'ShiftLeft') return 'Left Shift';
+  if (code === 'ShiftRight') return 'Right Shift';
+  if (code === 'AltLeft') return 'Left Alt';
+  if (code === 'AltRight') return 'Right Alt';
+  if (code === 'Mouse3') return 'Mouse 3 (Wheel)';
+  if (code === 'Mouse4') return 'Mouse 4 (Back)';
+  if (code === 'Mouse5') return 'Mouse 5 (Forward)';
   return code;
 }
 

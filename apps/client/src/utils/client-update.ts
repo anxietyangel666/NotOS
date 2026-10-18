@@ -4,6 +4,8 @@ import { getApiBaseUrl } from '../api/client';
 export type ClientUpdateManifest = {
   version?: string;
   url?: string;
+  bundleUrl?: string;
+  installerUrl?: string;
   notes?: string;
   required?: boolean;
   publishedAt?: string;
@@ -15,6 +17,7 @@ export type ClientUpdateStatus =
       currentVersion: string;
       latestVersion: string;
       url: string;
+      installerUrl: string;
       notes: string;
       required: boolean;
       publishedAt: string;
@@ -75,10 +78,23 @@ export async function checkServerConnection() {
   }
 }
 
+function resolveUpdateUrl(url: string | undefined): string {
+  if (!url) return '';
+  const trimmed = url.trim();
+  if (!trimmed) return '';
+  if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+    return trimmed;
+  }
+  const base = getApiBaseUrl().replace(/\/+$/, '');
+  return `${base}${trimmed.startsWith('/') ? '' : '/'}${trimmed}`;
+}
+
 export async function checkClientUpdate(): Promise<ClientUpdateStatus> {
   const currentVersion = await getCurrentClientVersion();
   try {
-    const response = await fetch(`${getApiBaseUrl()}/api/client/update`, { cache: 'no-store' });
+    const isElectronWithUpdater = typeof window !== 'undefined' && Boolean(window.notoc?.startUpdate);
+    const query = isElectronWithUpdater ? '?type=bundle' : '?type=installer';
+    const response = await fetch(`${getApiBaseUrl()}/api/client/update${query}`, { cache: 'no-store' });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const manifest = (await response.json()) as ClientUpdateManifest;
     const latestVersion = manifest.version?.trim() || currentVersion;
@@ -86,11 +102,20 @@ export async function checkClientUpdate(): Promise<ClientUpdateStatus> {
     const publishedAt = manifest.publishedAt?.trim() || '';
 
     if (compareVersions(latestVersion, currentVersion) > 0) {
+      const rawUrl = manifest.url?.trim() || '';
+      const rawBundle = manifest.bundleUrl?.trim() || (rawUrl.endsWith('.zip') ? rawUrl : '');
+      const rawInstaller = manifest.installerUrl?.trim() || (rawUrl.endsWith('.exe') ? rawUrl : '');
+
+      const bundleUrl = resolveUpdateUrl(rawBundle);
+      const installerUrl = resolveUpdateUrl(rawInstaller);
+      const fallbackUrl = resolveUpdateUrl(rawUrl);
+
       return {
         state: 'available',
         currentVersion,
         latestVersion,
-        url: manifest.url?.trim() || '',
+        url: bundleUrl || fallbackUrl || installerUrl,
+        installerUrl: installerUrl || fallbackUrl,
         notes,
         required: Boolean(manifest.required),
         publishedAt

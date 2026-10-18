@@ -50,8 +50,8 @@ const updateUserSchema = z
   .object({
     nickname: nicknameSchema.optional(),
     avatarData: avatarDataSchema.optional(),
-    wallpaper: z.string().max(2_000_000).optional(),
-    language: z.enum(['en', 'ru', 'uk']).optional(),
+    wallpaper: z.string().max(16_000_000).optional(),
+    language: z.enum(['en', 'ru', 'uk', 'zh', 'zh-TW']).optional(),
     theme: z.enum(['light', 'dark', 'system-black', 'mint', 'ocean']).optional(),
     accentColor: z.string().regex(/^#[0-9A-Fa-f]{6}$/).optional(),
     transparencyEnabled: z.boolean().optional(),
@@ -89,6 +89,7 @@ const updateUserSchema = z
     hideDesktopIcons: z.boolean().optional(),
     desktopSort: z.enum(['custom', 'name', 'type', 'size', 'date']).optional(),
     status: z.string().trim().max(200).optional(),
+    voiceBio: z.string().max(20_000_000).nullable().optional(),
     allowGroupIdentityMessages: z.boolean().optional(),
     pinnedImageData: z.string().max(80_000_000).optional(),
     pinnedCards: z

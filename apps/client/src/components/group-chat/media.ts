@@ -57,6 +57,7 @@ export function getMessageMediaItems(message: Pick<GroupMessage, 'mediaItems' | 
 }
 
 export function groupMessageRunIdentity(message: GroupMessage) {
+  if (message.aiGenerated) return `ai:${message.id}`;
   return message.senderGroup ? `group:${message.senderGroup.id}:user:${message.senderId}` : `user:${message.senderId}`;
 }
 

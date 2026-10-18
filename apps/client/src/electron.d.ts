@@ -40,6 +40,10 @@ declare global {
       minimizeWindow(): Promise<void>;
       toggleMaximizeWindow(): Promise<void>;
       closeWindow(): Promise<void>;
+      detachMessenger?(params?: { activeUserId?: string | null; activeGroupId?: string | null; token?: string }): Promise<{ ok: boolean }>;
+      dockMessenger?(): Promise<{ ok: boolean }>;
+      isMessengerDetached?(): Promise<boolean>;
+      onMessengerDocked?(callback: () => void): () => void;
       getAppVersion?(): Promise<string>;
       restartApp?(): Promise<void>;
       setUnreadBadge?(count: number): Promise<{ ok: boolean }>;
@@ -51,6 +55,14 @@ declare global {
       unregisterPushToTalk?(): Promise<{ ok: boolean }>;
       onPushToTalkDown?(callback: () => void): () => void;
       onPushToTalkUp?(callback: () => void): () => void;
+      setServerUrl?(url: string): Promise<{ ok: boolean; serverUrl?: string }>;
+      getServerUrl?(): Promise<string>;
+      startUpdate?(url: string): Promise<{ ok: boolean; filePath?: string; error?: string }>;
+      applyUpdate?(filePath?: string): Promise<{ ok: boolean; error?: string }>;
+      onUpdateProgress?(callback: (progress: { percent: number; downloaded: number; total: number }) => void): () => void;
+      isWordMisspelled?(word: string): boolean;
+      getWordSuggestions?(word: string): string[];
+      addWordToDictionary?(word: string): Promise<{ ok: boolean; error?: string }>;
     };
   }
 }

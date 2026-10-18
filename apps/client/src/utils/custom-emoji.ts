@@ -10,6 +10,7 @@
 // through a `:shortcode:`-style token.
 
 import { getApiBaseUrl } from '../api/client';
+import { loadCachedCurrentUser } from '../api/user-cache';
 
 // ---- emoji.gg API -----------------------------------------------------------
 
@@ -351,11 +352,14 @@ export async function fetchEmojiGgCategoryEmojis(categoryId: string, page = 1): 
 
 // ---- Installed pack store (persisted locally) -------------------------------
 
-const PACKS_KEY = 'notoc.custom-emoji.packs';
+function getPacksKey(userId?: string): string {
+  const uid = userId || loadCachedCurrentUser()?.id;
+  return uid ? `notoc.custom-emoji.packs.${encodeURIComponent(uid)}` : 'notoc.custom-emoji.packs';
+}
 
-function readPacks(): CustomEmojiPack[] {
+function readPacks(userId?: string): CustomEmojiPack[] {
   try {
-    const raw = localStorage.getItem(PACKS_KEY);
+    const raw = localStorage.getItem(getPacksKey(userId));
     if (!raw) return [];
     const parsed = JSON.parse(raw) as CustomEmojiPack[];
     return Array.isArray(parsed) ? parsed.map(normalizePack) : [];
@@ -364,9 +368,9 @@ function readPacks(): CustomEmojiPack[] {
   }
 }
 
-function writePacks(packs: CustomEmojiPack[]) {
+function writePacks(packs: CustomEmojiPack[], userId?: string) {
   try {
-    localStorage.setItem(PACKS_KEY, JSON.stringify(packs));
+    localStorage.setItem(getPacksKey(userId), JSON.stringify(packs));
   } catch {
     /* ignore quota errors */
   }

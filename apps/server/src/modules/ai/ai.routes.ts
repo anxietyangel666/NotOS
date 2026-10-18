@@ -79,7 +79,7 @@ function publicSettings(record: Awaited<ReturnType<typeof getAiSettings>>) {
 
 const generateSchema = z.object({
   seed: z.string().max(2_000).optional(),
-  language: z.enum(['en', 'ru', 'uk']).optional()
+  language: z.enum(['en', 'ru', 'uk', 'zh', 'zh-TW']).optional()
 });
 
 const translateSchema = z.object({
@@ -143,9 +143,26 @@ function shouldSetAssistantAvatarFromContent(content: string) {
   );
 }
 
+function shouldCheckAvatarAction(content: string, hasAttachments: boolean): boolean {
+  const text = content.toLowerCase();
+  if (hasAttachments) {
+    return (
+      shouldSetAvatarFromContent(content) ||
+      shouldSetAssistantAvatarFromContent(content) ||
+      /\b(аватар|аватарк|аву|авой|аве|pfp|avatar|фото|картинк|поставь)\b/i.test(text)
+    );
+  }
+  return (
+    /\b(аватар|аватарк|аву|авой|аве|pfp|avatar)\b/i.test(text) ||
+    /\b(сбрось|верни|прежний|старый|дефолт|restore|reset)\b/i.test(text)
+  );
+}
+
 function avatarUpdatedReply(language: string) {
   if (language === 'ru') return '\u0413\u043e\u0442\u043e\u0432\u043e, \u043f\u043e\u0441\u0442\u0430\u0432\u0438\u043b \u044d\u0442\u0443 \u043a\u0430\u0440\u0442\u0438\u043d\u043a\u0443 \u0441\u0435\u0431\u0435 \u043d\u0430 \u0430\u0432\u0430\u0442\u0430\u0440.';
   if (language === 'uk') return '\u0413\u043e\u0442\u043e\u0432\u043e, \u043f\u043e\u0441\u0442\u0430\u0432\u0438\u0432 \u0446\u0435 \u0437\u043e\u0431\u0440\u0430\u0436\u0435\u043d\u043d\u044f \u0441\u043e\u0431\u0456 \u043d\u0430 \u0430\u0432\u0430\u0442\u0430\u0440.';
+  if (language === 'zh') return '好了，我把这张图设成了自己的头像。';
+  if (language === 'zh-TW') return '好了，我把這張圖設成了自己的頭像。';
   return 'Done, I set this image as my avatar.';
 }
 
@@ -403,12 +420,13 @@ export function createAiRouter() {
       const allChats = await listAiChats(req.auth.userId);
       const otherChats = allChats
         .filter((c) => c.id !== chatId)
+        .slice(0, 3)
         .map((c) => {
           const decoded = decode(req.auth.userId, c);
           return {
             title: decoded.title,
             updatedAt: c.updated_at.toISOString(),
-            messages: decoded.messages.map((m) => ({ role: m.role, content: m.content }))
+            messages: decoded.messages.slice(-4).map((m) => ({ role: m.role, content: m.content }))
           };
         });
 
@@ -440,14 +458,16 @@ export function createAiRouter() {
 
       let updatedSettings: typeof settings | null = null;
       let avatarActionResult = '';
-      const avatarDecision = await decideAvatarAction({
-        content: input.content,
-        attachmentCount: attachments.length,
-        hasCurrentAvatar: Boolean(settings.assistant_avatar_data),
-        previousAvatarCount: settings.assistant_avatar_history.length,
-        recentMessages: chat.messages.map((message) => ({ role: message.role, content: message.content })),
-        language: user.language_code
-      });
+      const avatarDecision: AvatarAction = shouldCheckAvatarAction(input.content, attachments.length > 0)
+        ? await decideAvatarAction({
+            content: input.content,
+            attachmentCount: attachments.length,
+            hasCurrentAvatar: Boolean(settings.assistant_avatar_data),
+            previousAvatarCount: settings.assistant_avatar_history.length,
+            recentMessages: chat.messages.map((message) => ({ role: message.role, content: message.content })),
+            language: user.language_code
+          })
+        : { action: 'none' };
 
       if (avatarDecision.action === 'set_from_attachment') {
         const index = Math.min(Math.max(avatarDecision.attachmentIndex ?? 0, 0), Math.max(attachments.length - 1, 0));
@@ -480,15 +500,47 @@ export function createAiRouter() {
         avatarActionResult = 'The app reset the assistant avatar to the default avatar.';
       }
 
+      const hasImageAttachments = chat.messages.some(
+        (m) => Boolean(m.imageData) || Boolean(m.mediaItems && m.mediaItems.length > 0)
+      );
+
+      // Vision model fallback: Gemini 3.7 Flash Low supports vision/multimodal!
+      const modelToUse = hasImageAttachments ? config.aiTranslateModel : config.aiModel;
+
       const history = chat.messages
         .slice(-MAX_HISTORY)
-        .map((message) => ({ role: message.role, content: `${message.content}${formatAttachmentSummary(message)}`.trim() }));
+        .map((message) => {
+          const items = message.mediaItems?.length
+            ? message.mediaItems
+            : message.imageData
+              ? [{ dataUrl: message.imageData, name: message.imageName ?? null, spoiler: Boolean(message.imageSpoiler) }]
+              : [];
+
+          if (hasImageAttachments && items.length > 0) {
+            const parts: Array<{ type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } }> = [];
+            if (message.content) {
+              parts.push({ type: 'text', text: message.content });
+            }
+            for (const item of items) {
+              if (item.dataUrl) {
+                parts.push({ type: 'image_url', image_url: { url: item.dataUrl } });
+              }
+            }
+            return { role: message.role, content: parts.length > 0 ? parts : (message.content || 'Attached image') };
+          }
+
+          return {
+            role: message.role,
+            content: `${message.content}${formatAttachmentSummary(message)}`.trim()
+          };
+        });
 
       const reply = await callGroq(
         avatarActionResult
           ? `${systemPrompt}\n\nApp action result for this turn: ${avatarActionResult}\nReply naturally in character. Do not claim you cannot change the avatar if the app action succeeded.`
           : systemPrompt,
-        history
+        history,
+        { model: modelToUse }
       );
       const assistantMessage: ChatMessage = {
         id: randomUUID(),

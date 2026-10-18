@@ -46,19 +46,23 @@ function deletedPreview(language: Language) {
 
 // Small "replying to" quote rendered above a message bubble. Mirrors Discord's
 // inline reply indicator.
-export function ReplyQuote({ reply, resolveName, onJump }: { reply: MessageReplySnippet; resolveName: (userId: string) => string; onJump?: (messageId: string) => void }) {
+export function ReplyQuote({ reply, resolveName, onJump, language = 'ru' }: { reply: MessageReplySnippet; resolveName: (userId: string) => string; onJump?: (messageId: string) => void; language?: Language }) {
   const deleted = Boolean(reply.deletedAt);
   const hasVoice = !deleted && isVoiceAttachment(reply.imageData, reply.imageName);
   const hasVideoCircle = !deleted && isVideoCircleAttachment(reply.imageData, reply.imageName);
-  const authorName = reply.senderGroup?.name || resolveName(reply.senderId);
+  const isAi = reply.aiGenerated;
+  const authorName = isAi ? (reply.aiName || 'NotAI') : (reply.senderGroup?.name || resolveName(reply.senderId));
   return (
     <div className={hasVoice || hasVideoCircle ? 'message-reply-quote has-media' : 'message-reply-quote'}>
       <button type="button" className="message-reply-jump" onClick={() => onJump?.(reply.id)}>
         <svg className="message-reply-corner" width="22" height="14" viewBox="0 0 22 14" fill="none" aria-hidden="true">
           <path d="M21 2H8a5 5 0 0 0-5 5v5" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
         </svg>
-        <span className="message-reply-author">{authorName}</span>
-        <span className="message-reply-text"><MessagePreviewText text={deleted ? deletedPreview('ru' as Language) : previewText(reply.body, reply.imageData, reply.imageName)} size={17} /></span>
+        <span className="message-reply-author">
+          {authorName}
+          {isAi ? <span className="ai-message-badge" style={{ marginLeft: 5, fontSize: 9, padding: '1px 5px', verticalAlign: 'middle' }}>{t(language, 'aiBadge') || 'ИИ'}</span> : null}
+        </span>
+        <span className="message-reply-text"><MessagePreviewText text={deleted ? deletedPreview(language) : previewText(reply.body, reply.imageData, reply.imageName)} size={17} /></span>
       </button>
       {hasVideoCircle && reply.imageData ? (
         <div className="message-reply-media">
@@ -95,12 +99,16 @@ export function ForwardedCard({ senderName, language, children }: { senderName: 
 // The "edit-style" bar shown above the composer while composing a reply. Shows
 // the author + a short snippet and a cancel button.
 export function ReplyComposerBar({ reply, resolveName, onCancel, language }: { reply: MessageReplySnippet; resolveName: (userId: string) => string; onCancel: () => void; language: Language }) {
-  const authorName = reply.senderGroup?.name || resolveName(reply.senderId);
+  const isAi = reply.aiGenerated;
+  const authorName = reply.senderGroup?.name || (isAi ? (reply.aiName || 'NotAI') : resolveName(reply.senderId));
   return (
     <div className="reply-composer-bar">
       <div className="reply-composer-info">
         <span className="reply-composer-label">{t(language, 'reply')}</span>
-        <span className="reply-composer-author">{authorName}</span>
+        <span className="reply-composer-author">
+          {authorName}
+          {isAi ? <span className="ai-message-badge" style={{ marginLeft: 6, fontSize: 10, padding: '1px 5px', verticalAlign: 'middle' }}>{t(language, 'aiBadge') || 'ИИ'}</span> : null}
+        </span>
         <span className="reply-composer-text"><MessagePreviewText text={reply.deletedAt ? deletedPreview(language) : previewText(reply.body, reply.imageData, reply.imageName)} size={16} /></span>
       </div>
       <button type="button" className="reply-composer-cancel" aria-label={t(language, 'cancel')} onClick={onCancel}>✕</button>

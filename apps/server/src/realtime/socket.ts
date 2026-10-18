@@ -467,8 +467,8 @@ export function setupRealtime(io: Server) {
       io.to(peer).emit('call:signal', { callId: payload.callId, from: userId, data: payload.data });
     });
 
-    // Notify peer about media state changes (mute, screen share, talking).
-    socket.on('call:state', (payload: { callId?: unknown; muted?: unknown; screen?: unknown; talking?: unknown }) => {
+    // Notify peer about media state changes (mute, deafen, screen share, camera, talking).
+    socket.on('call:state', (payload: { callId?: unknown; muted?: unknown; deafened?: unknown; screen?: unknown; camera?: unknown; talking?: unknown; cameraStreamId?: unknown; screenStreamId?: unknown }) => {
       if (typeof payload?.callId !== 'string') return;
       const peer = peerOf(payload.callId);
       if (!peer) return;
@@ -476,8 +476,12 @@ export function setupRealtime(io: Server) {
         callId: payload.callId,
         from: userId,
         muted: typeof payload.muted === 'boolean' ? payload.muted : undefined,
+        deafened: typeof payload.deafened === 'boolean' ? payload.deafened : undefined,
         screen: typeof payload.screen === 'boolean' ? payload.screen : undefined,
-        talking: typeof payload.talking === 'boolean' ? payload.talking : undefined
+        camera: typeof payload.camera === 'boolean' ? payload.camera : undefined,
+        talking: typeof payload.talking === 'boolean' ? payload.talking : undefined,
+        cameraStreamId: typeof payload.cameraStreamId === 'string' ? payload.cameraStreamId : undefined,
+        screenStreamId: typeof payload.screenStreamId === 'string' ? payload.screenStreamId : undefined
       });
     });
 

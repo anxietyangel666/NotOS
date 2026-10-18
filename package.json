@@ -11,6 +11,8 @@
     "dev:client": "npm --workspace @notoc/client run dev",
     "dev:server": "npm --workspace @notoc/server run dev",
     "build": "npm --workspace @notoc/server run build && npm --workspace @notoc/client run build",
+    "dist:win": "npm --workspace @notoc/client run dist:win",
+    "update:publish": "node scripts/publish-update.mjs",
     "docker:up": "docker compose up --build"
   }
 }

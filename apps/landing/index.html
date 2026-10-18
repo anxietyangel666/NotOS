@@ -36,7 +36,7 @@
       <a href="#" class="brand">
         <img src="assets/logo.png" alt="NotOS Logo" class="brand-logo">
         <span class="brand-name">NotOS</span>
-        <span class="badge-version" id="navVersionBadge">v0.5.6</span>
+        <span class="badge-version" id="navVersionBadge">v0.5.29</span>
       </a>
 
       <nav class="nav-links">
@@ -72,7 +72,7 @@
     <div class="container hero-container">
       <div class="hero-badge">
         <span class="badge-sparkle">✨</span>
-        <span data-i18n="hero_pill">NotOS Desktop — Обновление 0.5.5 уже доступно</span>
+        <span data-i18n="hero_pill" id="heroPill">NotOS Desktop — Обновление 0.5.28 уже доступно</span>
       </div>
 
       <h1 class="hero-title" data-i18n="hero_title">
@@ -90,7 +90,7 @@
           </svg>
           <div class="btn-text-block">
             <span class="btn-main-text" data-i18n="btn_download_windows">Скачать для Windows</span>
-            <span class="btn-sub-text" id="heroDownloadSub">Версия 0.5.5 • 125 МБ • Win 10/11</span>
+            <span class="btn-sub-text" id="heroDownloadSub">Версия 0.5.28 • 125 МБ • Win 10/11</span>
           </div>
         </a>
 
@@ -106,7 +106,7 @@
         </span>
         <span class="meta-item">
           <svg viewBox="0 0 20 20" fill="currentColor" class="meta-icon"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/></svg>
-          <span data-i18n="meta_watch">Watch Together & Кино</span>
+          <span data-i18n="meta_watch">Watch Together & Фильмы</span>
         </span>
         <span class="meta-item">
           <svg viewBox="0 0 20 20" fill="currentColor" class="meta-icon"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/></svg>
@@ -136,7 +136,7 @@
         <div class="mockup-titlebar">
           <div class="window-app-identity">
             <img src="assets/logo.png" alt="NotOS" class="titlebar-icon">
-            <span class="window-app-title">NotOS Desktop v0.5.2</span>
+            <span class="window-app-title" id="mockupAppTitle">NotOS Desktop v0.5.28</span>
           </div>
           <div class="window-active-session">
             <span class="session-user-badge">alex@notos</span>
@@ -144,9 +144,9 @@
             <span class="session-status-text">48 kHz WebRTC</span>
           </div>
           <div class="window-controls-native">
-            <span class="win-btn win-min" title="Свернуть">─</span>
-            <span class="win-btn win-max" title="Развернуть">▢</span>
-            <span class="win-btn win-close" title="Закрыть">✕</span>
+            <span class="win-btn win-min" data-i18n-title="win_min" title="Свернуть">─</span>
+            <span class="win-btn win-max" data-i18n-title="win_max" title="Развернуть">▢</span>
+            <span class="win-btn win-close" data-i18n-title="win_close" title="Закрыть">✕</span>
           </div>
         </div>
 
@@ -159,22 +159,22 @@
           <div class="mockup-desktop-icons">
             <div class="desktop-icon-item">
               <div class="desktop-icon-tile tile-settings">ST</div>
-              <span class="desktop-icon-label">Настройки</span>
+              <span class="desktop-icon-label" data-i18n="mock_settings">Настройки</span>
             </div>
             <div class="desktop-icon-item">
               <div class="desktop-icon-tile tile-watch">WT</div>
-              <span class="desktop-icon-label">Кинотеатр</span>
+              <span class="desktop-icon-label" data-i18n="mock_cinema">Кинотеатр</span>
             </div>
             <div class="desktop-icon-item">
               <div class="desktop-icon-tile tile-music">MU</div>
-              <span class="desktop-icon-label">Музыка</span>
+              <span class="desktop-icon-label" data-i18n="mock_music">Музыка</span>
             </div>
             <div class="desktop-icon-item">
               <div class="desktop-icon-tile tile-inbox">
                 IN
                 <span class="desktop-badge-dot">1</span>
               </div>
-              <span class="desktop-icon-label">Почта</span>
+              <span class="desktop-icon-label" data-i18n="mock_inbox">Почта</span>
             </div>
           </div>
 
@@ -185,7 +185,7 @@
               <div class="os-window-header">
                 <div class="os-window-title">
                   <span class="os-win-icon">💬</span>
-                  <span>Мессенджер — # Общий чат</span>
+                  <span data-i18n="mock_chat_title">Мессенджер — # Общий чат</span>
                 </div>
                 <div class="os-window-actions">
                   <span class="os-win-action">─</span>
@@ -199,15 +199,15 @@
                 <div class="msg-sidebar">
                   <div class="msg-search-box">
                     <span>🔍</span>
-                    <span class="placeholder-text">Поиск чатов...</span>
+                    <span class="placeholder-text" data-i18n="mock_search_chats">Поиск чатов...</span>
                   </div>
 
                   <div class="msg-nav-group">
-                    <span class="msg-nav-label">КАНАЛЫ И ЗВОНКИ</span>
+                    <span class="msg-nav-label" data-i18n="mock_channels_label">КАНАЛЫ И ЗВОНКИ</span>
                     <div class="msg-channel-item active">
                       <span class="chan-icon">🔊</span>
                       <div class="chan-meta">
-                        <span class="chan-name">Голосовой #1</span>
+                        <span class="chan-name" data-i18n="mock_channel_voice">Голосовой #1</span>
                         <div class="chan-audio-indicator">
                           <span class="bar bar-1"></span>
                           <span class="bar bar-2"></span>
@@ -219,7 +219,7 @@
                   </div>
 
                   <div class="msg-nav-group">
-                    <span class="msg-nav-label">ЛИЧНЫЕ СООБЩЕНИЯ</span>
+                    <span class="msg-nav-label" data-i18n="mock_dm_label">ЛИЧНЫЕ СООБЩЕНИЯ</span>
                     <div class="msg-user-item active">
                       <div class="user-avatar-wrap">
                         <div class="avatar-ring-online"></div>
@@ -227,7 +227,7 @@
                       </div>
                       <div class="user-item-info">
                         <div class="user-item-nameplate np-neon-cyan">Sophia</div>
-                        <span class="user-item-status">Кинула кружочек 🎥</span>
+                        <span class="user-item-status" data-i18n="mock_status_sophia">Кинула кружочек 🎥</span>
                       </div>
                     </div>
 
@@ -237,7 +237,7 @@
                       </div>
                       <div class="user-item-info">
                         <div class="user-item-nameplate np-neon-violet">Maks</div>
-                        <span class="user-item-status">Слушает Synthwave</span>
+                        <span class="user-item-status" data-i18n="mock_status_maks">Слушает Synthwave</span>
                       </div>
                     </div>
 
@@ -247,7 +247,7 @@
                       </div>
                       <div class="user-item-info">
                         <div class="user-item-nameplate np-neon-emerald">NotOS AI</div>
-                        <span class="user-item-status">Ассистент активен</span>
+                        <span class="user-item-status" data-i18n="mock_status_ai">Ассистент активен</span>
                       </div>
                     </div>
                   </div>
@@ -264,13 +264,13 @@
                       </div>
                       <div class="chat-user-meta">
                         <span class="user-item-nameplate np-neon-cyan">Sophia</span>
-                        <span class="chat-user-sub">В сети • NotOS Desktop</span>
+                        <span class="chat-user-sub" data-i18n="mock_header_user_sub">В сети • NotOS Desktop</span>
                       </div>
                     </div>
                     <div class="chat-header-actions">
-                      <button class="chat-act-btn" title="Позвонить">📞</button>
-                      <button class="chat-act-btn" title="Стрим экрана">🖥️</button>
-                      <button class="chat-act-btn" title="Смотреть вместе">🍿</button>
+                      <button class="chat-act-btn" title="📞">📞</button>
+                      <button class="chat-act-btn" title="🖥️">🖥️</button>
+                      <button class="chat-act-btn" title="🍿">🍿</button>
                     </div>
                   </div>
 
@@ -286,7 +286,7 @@
                           <span class="user-item-nameplate np-neon-cyan">Sophia</span>
                           <span class="msg-time">21:38</span>
                         </div>
-                        <div class="msg-text-bubble">
+                        <div class="msg-text-bubble" data-i18n="mock_msg_sophia_text">
                           Привет! Зацените как быстро открывается рабочий стол и играет музыка в фоне! Включила новый стрим в Watch Together 🔥
                         </div>
                       </div>
@@ -304,7 +304,7 @@
                         </div>
                         <!-- Voice Message Player Bubble -->
                         <div class="msg-voice-bubble">
-                          <button class="voice-play-btn" title="Воспроизвести">
+                          <button class="voice-play-btn" title="▶">
                             <span class="play-icon">▶</span>
                           </button>
                           <div class="voice-wave-container">
@@ -357,7 +357,7 @@
                             </div>
                             <span class="circle-duration-badge">0:14</span>
                           </div>
-                          <span class="video-circle-hint">Видеосообщение</span>
+                          <span class="video-circle-hint" data-i18n="mock_video_circle_hint">Видеосообщение</span>
                         </div>
                       </div>
                     </div>
@@ -365,10 +365,10 @@
 
                   <!-- Chat Composer -->
                   <div class="chat-composer">
-                    <button class="composer-icon-btn" title="Прикрепить файл">📎</button>
-                    <input type="text" class="composer-input" placeholder="Написать сообщение Sophia..." readonly value="Смотрим! Сейчас подключусь к комнате...">
-                    <button class="composer-icon-btn" title="Эмодзи">😊</button>
-                    <button class="composer-voice-btn" title="Записать кружочек / голос">
+                    <button class="composer-icon-btn" title="📎">📎</button>
+                    <input type="text" class="composer-input" id="mockupComposerInput" data-i18n-placeholder="mock_composer_placeholder" data-i18n-value="mock_composer_input" placeholder="Написать сообщение Sophia..." readonly value="Смотрим! Сейчас подключусь к комнате...">
+                    <button class="composer-icon-btn" title="😊">😊</button>
+                    <button class="composer-voice-btn" title="🎙️">
                       <span>🎙️</span>
                     </button>
                   </div>
@@ -381,7 +381,7 @@
               <div class="os-window-header">
                 <div class="os-window-title">
                   <span class="os-win-icon">🍿</span>
-                  <span>Watch Together — Cyberpunk: Edgerunners</span>
+                  <span data-i18n="mock_watch_title">Watch Together — Cyberpunk: Edgerunners</span>
                 </div>
                 <div class="os-window-actions">
                   <span class="os-win-action">─</span>
@@ -398,7 +398,7 @@
                     <div class="cinema-title-overlay">
                       <span class="cinema-sync-chip">
                         <span class="pulse-dot"></span>
-                        СИНХРОНИЗИРОВАНО (1080p 60fps)
+                        <span data-i18n="mock_cinema_sync">СИНХРОНИЗИРОВАНО (1080p 60fps)</span>
                       </span>
                     </div>
                     <div class="cinema-center-action">
@@ -410,7 +410,7 @@
                         <span class="viewer-chip bg-pink" title="Sophia">S</span>
                         <span class="viewer-chip bg-purple" title="Maks">M</span>
                       </div>
-                      <span class="viewers-count-text">3 друга смотрят</span>
+                      <span class="viewers-count-text" data-i18n="mock_viewers_count">3 друга смотрят</span>
                     </div>
                   </div>
 
@@ -440,7 +440,7 @@
             <div class="desktop-floating-widget music-widget">
               <div class="widget-header">
                 <span class="widget-icon">🎵</span>
-                <span class="widget-title">Музыкальный плеер</span>
+                <span class="widget-title" data-i18n="mock_music_player_title">Музыкальный плеер</span>
                 <div class="music-equalizer">
                   <span class="eq-bar eq-1"></span>
                   <span class="eq-bar eq-2"></span>
@@ -451,7 +451,7 @@
                 <div class="track-artwork">💿</div>
                 <div class="track-meta">
                   <span class="track-title">Midnight City</span>
-                  <span class="track-artist">M83 • Плейлист рабочего стола</span>
+                  <span class="track-artist" data-i18n="mock_track_artist">M83 • Плейлист рабочего стола</span>
                 </div>
               </div>
               <div class="widget-controls">
@@ -475,7 +475,7 @@
               </div>
               <div class="tb-user-info">
                 <span class="tb-nameplate np-neon-violet">Alex [Dev]</span>
-                <span class="tb-user-status">В сети</span>
+                <span class="tb-user-status" data-i18n="mock_user_online">В сети</span>
               </div>
             </div>
 
@@ -483,12 +483,12 @@
             <div class="taskbar-apps-list">
               <button class="taskbar-app-btn" type="button" title="Настройки">
                 <span class="taskbar-app-tile tile-settings">ST</span>
-                <span class="taskbar-app-name">Настройки</span>
+                <span class="taskbar-app-name" data-i18n="mock_settings">Настройки</span>
               </button>
 
               <button class="taskbar-app-btn active" type="button" title="Мессенджер">
                 <span class="taskbar-app-tile tile-messenger">M</span>
-                <span class="taskbar-app-name">Мессенджер</span>
+                <span class="taskbar-app-name" data-i18n="mock_tb_messenger">Мессенджер</span>
               </button>
 
               <button class="taskbar-app-btn" type="button" title="Почта и заявки">
@@ -496,7 +496,7 @@
                   IN
                   <span class="tb-badge">1</span>
                 </span>
-                <span class="taskbar-app-name">Почта</span>
+                <span class="taskbar-app-name" data-i18n="mock_inbox">Почта</span>
               </button>
 
               <button class="taskbar-app-btn active-app" type="button" title="Watch Together">
@@ -506,12 +506,12 @@
 
               <button class="taskbar-app-btn" type="button" title="AI-Ассистент">
                 <span class="taskbar-app-tile tile-ai">AI</span>
-                <span class="taskbar-app-name">AI-Чат</span>
+                <span class="taskbar-app-name" data-i18n="mock_tb_ai">AI-Чат</span>
               </button>
 
               <button class="taskbar-app-btn" type="button" title="Удаленный рабочий стол друзей">
                 <span class="taskbar-app-tile tile-remote">PC</span>
-                <span class="taskbar-app-name">Удаленный стол</span>
+                <span class="taskbar-app-name" data-i18n="mock_tb_remote">Удаленный стол</span>
               </button>
             </div>
 
@@ -545,7 +545,7 @@
         <div class="bento-card bento-card-wide card-desktop">
           <div class="bento-badge-pill">
             <span class="pill-spark">🖥️</span>
-            <span>Desktop Experience</span>
+            <span data-i18n="pill_desktop">Виртуальная ОС</span>
           </div>
           <div class="bento-content-top">
             <h3 class="bento-title" data-i18n="b1_title">Виртуальный Рабочий Стол (Desktop OS)</h3>
@@ -557,14 +557,14 @@
           <div class="bento-demo bento-demo-desktop">
             <div class="demo-desktop-frame">
               <div class="mini-window mini-win-1">
-                <div class="mini-win-bar"><span>Мессенджер</span><span>✕</span></div>
+                <div class="mini-win-bar"><span data-i18n="mock_tb_messenger">Мессенджер</span><span>✕</span></div>
                 <div class="mini-win-content">
                   <div class="mini-line w-80"></div>
                   <div class="mini-line w-50"></div>
                 </div>
               </div>
               <div class="mini-window mini-win-2">
-                <div class="mini-win-bar"><span>Виджет часов</span></div>
+                <div class="mini-win-bar"><span data-i18n="demo_clock_widget">Виджет часов</span></div>
                 <div class="mini-clock-display">21:42 • Пн</div>
               </div>
               <div class="mini-taskbar-preview">
@@ -584,7 +584,7 @@
         <div class="bento-card card-watch">
           <div class="bento-badge-pill">
             <span class="pill-spark">🍿</span>
-            <span>Синхронизация</span>
+            <span data-i18n="pill_watch">Синхронизация</span>
           </div>
           <h3 class="bento-title" data-i18n="b2_title">Watch Together & Кинотеатр</h3>
           <p class="bento-desc" data-i18n="b2_desc">
@@ -594,7 +594,7 @@
           <div class="bento-demo bento-demo-watch">
             <div class="demo-cinema-box">
               <div class="demo-cinema-screen">
-                <span class="cinema-sync-tag">● SYNC 1080p</span>
+                <span class="cinema-sync-tag" data-i18n="demo_sync_tag">● СИНХРОНИЗАЦИЯ 1080p</span>
                 <span class="cinema-play-btn">▶</span>
               </div>
               <div class="demo-cinema-bar">
@@ -613,7 +613,7 @@
         <div class="bento-card card-remote">
           <div class="bento-badge-pill">
             <span class="pill-spark">🌐</span>
-            <span>Визиты к друзьям</span>
+            <span data-i18n="pill_remote">Визиты к друзьям</span>
           </div>
           <h3 class="bento-title" data-i18n="b3_title">Удаленный рабочий стол друзей</h3>
           <p class="bento-desc" data-i18n="b3_desc">
@@ -624,15 +624,15 @@
             <div class="demo-remote-card">
               <div class="remote-host-badge">
                 <span class="remote-pulse"></span>
-                <span>Рабочий стол Sophia</span>
+                <span data-i18n="demo_remote_title">Рабочий стол Sophia</span>
               </div>
               <div class="remote-actions-list">
                 <div class="remote-action-item">
-                  <span>🎵 Плейлист хоста:</span>
+                  <span data-i18n="demo_playlist_host">🎵 Плейлист хоста:</span>
                   <span class="remote-val">Synthwave Nights</span>
                 </div>
                 <div class="remote-action-item">
-                  <span>🎨 Тема оформления:</span>
+                  <span data-i18n="demo_theme_label">🎨 Тема оформления:</span>
                   <span class="remote-val">Neon Cyber Blue</span>
                 </div>
               </div>
@@ -644,7 +644,7 @@
         <div class="bento-card card-circles">
           <div class="bento-badge-pill">
             <span class="pill-spark">🎥</span>
-            <span>Кружочки & Звук</span>
+            <span data-i18n="pill_circles">Кружочки & Звук</span>
           </div>
           <h3 class="bento-title" data-i18n="b4_title">Видео-кружочки и HD-звук</h3>
           <p class="bento-desc" data-i18n="b4_desc">
@@ -673,7 +673,7 @@
         <div class="bento-card card-wall">
           <div class="bento-badge-pill">
             <span class="pill-spark">📝</span>
-            <span>Стена & Музыка</span>
+            <span data-i18n="pill_wall">Стена & Музыка</span>
           </div>
           <h3 class="bento-title" data-i18n="b5_title">Стена профиля и музыкальный плеер</h3>
           <p class="bento-desc" data-i18n="b5_desc">
@@ -687,7 +687,7 @@
                 <span class="wall-author-name">Alex [Dev]</span>
                 <span class="wall-emoji-burst">🔥 🚀 ✨</span>
               </div>
-              <p class="wall-message-text">«Оставил любимый трек на твоей стене, послушай!»</p>
+              <p class="wall-message-text" data-i18n="demo_wall_quote">«Оставил любимый трек на твоей стене, послушай!»</p>
               <div class="wall-music-chip">
                 <span>🎵 The Midnight — Days of Thunder</span>
                 <span class="wall-chip-play">▶</span>
@@ -700,7 +700,7 @@
         <div class="bento-card card-nameplates">
           <div class="bento-badge-pill">
             <span class="pill-spark">✨</span>
-            <span>Персонализация</span>
+            <span data-i18n="pill_nameplates">Персонализация</span>
           </div>
           <h3 class="bento-title" data-i18n="b6_title">Кастомные NamePlates & Неон</h3>
           <p class="bento-desc" data-i18n="b6_desc">
@@ -729,7 +729,7 @@
         <div class="bento-card card-ai">
           <div class="bento-badge-pill">
             <span class="pill-spark">🧠</span>
-            <span>Нейросеть</span>
+            <span data-i18n="pill_ai">Нейросеть</span>
           </div>
           <h3 class="bento-title" data-i18n="b7_title">Встроенный AI-Ассистент</h3>
           <p class="bento-desc" data-i18n="b7_desc">
@@ -739,8 +739,8 @@
           <div class="bento-demo bento-demo-ai">
             <div class="demo-ai-chat">
               <div class="ai-prompt-bubble">
-                <span class="ai-label">Вы:</span>
-                <span>Синхронизируй воспроизведение стрима</span>
+                <span class="ai-label" data-i18n="demo_ai_you">Вы:</span>
+                <span data-i18n="demo_ai_prompt">Синхронизируй воспроизведение стрима</span>
               </div>
               <div class="ai-response-bubble">
                 <span class="ai-label">NotOS AI:</span>
@@ -754,7 +754,7 @@
         <div class="bento-card card-privacy">
           <div class="bento-badge-pill">
             <span class="pill-spark">🔒</span>
-            <span>Безопасность</span>
+            <span data-i18n="pill_privacy">Безопасность</span>
           </div>
           <h3 class="bento-title" data-i18n="b8_title">Приватность без номеров телефонов</h3>
           <p class="bento-desc" data-i18n="b8_desc">
@@ -766,7 +766,7 @@
               <div class="auth-key-icon">🔑</div>
               <div class="auth-key-info">
                 <span class="auth-key-title">notos-session-auth.key</span>
-                <span class="auth-key-status">Локальный приватный ключ • PIN Active</span>
+                <span class="auth-key-status" data-i18n="demo_auth_desc">Локальный приватный ключ • PIN Active</span>
               </div>
               <span class="auth-check-icon">✓</span>
             </div>
@@ -831,7 +831,7 @@
             <span class="ping-value" id="statusPingValue">~18 мс</span>
           </div>
           <div class="uptime-block">
-            <span class="uptime-label">Uptime:</span>
+            <span class="uptime-label" data-i18n="status_uptime">Аптайм:</span>
             <span class="uptime-value">99.98%</span>
           </div>
           <button class="btn btn-xs btn-outline" id="refreshStatusBtn" data-i18n="status_refresh">
@@ -860,14 +860,14 @@
               </svg>
               <div class="btn-text-block">
                 <span class="btn-main-text" data-i18n="btn_download_full">Скачать NotOS для Windows</span>
-                <span class="btn-sub-text" id="ctaDownloadSub">Версия 0.5.5 • 125 МБ • Прямая загрузка</span>
+                <span class="btn-sub-text" id="ctaDownloadSub">Версия 0.5.28 • 125 МБ • Прямая загрузка</span>
               </div>
             </a>
           </div>
 
           <p class="download-changelog" id="downloadChangelog">
-            <strong data-i18n="cta_whats_new">Что нового в v0.5.5:</strong>
-            <span data-i18n="cta_notes">Ответ с помощью ИИ в чатах и группах (@упоминание, бейдж ИИ, персональный аватар), улучшенный ИИ чат AnyModel/Grok, оптимизация автообновлений.</span>
+            <strong data-i18n="cta_whats_new" id="ctaWhatsNew">Что нового в v0.5.28:</strong>
+            <span data-i18n="cta_notes" id="ctaNotes">Открепление мессенджера в отдельное окно (Discord-style) и мгновенный возврат на рабочий стол.</span>
           </p>
         </div>
       </div>
@@ -892,8 +892,8 @@
         <h4 data-i18n="footer_product">Продукт</h4>
         <a href="#features" data-i18n="nav_features">Возможности</a>
         <a href="#preview" data-i18n="nav_preview">Интерфейс</a>
-        <a href="#download" data-i18n="nav_download">Скачать установщик</a>
-        <a href="#status" data-i18n="nav_status">Статус серверов</a>
+        <a href="#download" data-i18n="footer_download_inst">Скачать установщик</a>
+        <a href="#status" data-i18n="footer_server_status">Статус серверов</a>
       </div>
 
       <div class="footer-links-col">

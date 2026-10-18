@@ -1,7 +1,7 @@
-﻿import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent } from 'react';
 import { createPortal, flushSync } from 'react-dom';
 import type { Socket } from 'socket.io-client';
-import { api } from '../api/client';
+import { api, resolveAudioUrl } from '../api/client';
 import { cacheUser, getOrFetchUser } from '../api/user-cache';
 import { useSocket } from '../hooks/use-socket';
 import type { ConnectionProvider, DesktopIconSize, DesktopSort, DesktopWallMessage, FriendRequests, Group, GroupMessage, Language, MentionNotification, MessengerMessage, NameStyle, NamePlate, PinnedCard, PublicUser, Theme, UserConnection } from '../api/types';
@@ -14,7 +14,7 @@ import { addMusicTrack, deleteMusicTrack, getMusicTracks, saveMusicTracksOrder, 
 import { AvatarCropper } from './AvatarCropper';
 import { DesktopWall } from './DesktopWall';
 import { DesktopIcons } from './DesktopIcons';
-import { MessengerWindow, type OngoingCallInfo } from './MessengerWindow';
+import { MessengerWindow, setMessengerBootstrapCache, type OngoingCallInfo } from './MessengerWindow';
 import { isVideoCircleAttachment, isVoiceAttachment } from './VoiceMessage';
 import { AiChatWindow } from './AiChatWindow';
 import { callMessageLabel, formatCallDuration } from '../utils/call-messages';
@@ -35,6 +35,9 @@ import {
 import { applyPresenceChange, normalizePresenceSnapshot, onlineIdsFromPresence, type PresenceChangedPayload, type PresenceSnapshotPayload } from '../utils/presence';
 import { PinnedImageCard } from './PinnedImageWindow';
 import { PinnedVideoCard } from './PinnedVideoWindow';
+import { DesktopStickyNotesLayer, loadStickyNotes, saveStickyNotes, type DesktopStickyNoteData } from './DesktopStickyNotes';
+import { DesktopBestFriendWidget, DesktopClockWeatherWidget, loadBestFriendWidget, saveBestFriendWidget, loadClockWeatherWidget, saveClockWeatherWidget, type BestFriendWidgetData, type ClockWeatherWidgetData } from './DesktopWidgets';
+import { ProfileVoiceBio } from './ProfileVoiceBio';
 import { RemoteDesktopWindow } from './RemoteDesktopWindow';
 import { WindowFrame } from './WindowFrame';
 import { PinSetupModal } from './PinSetupModal';
@@ -48,12 +51,14 @@ import { ProfilePreviewCard } from './ProfilePreviewCard';
 import { customEmojiToShortcodes, expandCustomEmojiShortcodes } from '../utils/custom-emoji';
 import { parseForward } from '../utils/forward';
 import { UpdatesWindow } from './UpdatesWindow';
+import { UserVolumePopover } from './UserVolumePopover';
 import { InboxWindow } from './InboxWindow';
 import { hasPin } from '../utils/pin-lock';
 import { LATEST_UPDATE_ID, hasUnseenUpdate, markUpdatesSeen } from '../utils/updates';
 import { DesktopNotifications, ToastQuickReply, type DesktopNotification } from './DesktopNotifications';
 import { ErrorBoundary } from './ErrorBoundary';
 import { assetUrl } from '../utils/assets';
+import { LEGAL_DOCS, getLegalDoc } from '../utils/legal-docs';
 
 type DesktopProps = {
   token: string;
@@ -321,15 +326,83 @@ function desktopGridPositionByIndex(
   );
 }
 
+function findNearestFreeDesktopPosition(
+  targetPos: { x: number; y: number },
+  iconId: string,
+  allPositions: Record<string, { x: number; y: number } | undefined>,
+  metrics: { width: number; height: number; gap: number },
+  bounds?: DOMRect | { width: number; height: number } | null
+): { x: number; y: number } {
+  const stepX = metrics.width + metrics.gap;
+  const stepY = metrics.height + metrics.gap;
+  const { maxX, maxY } = desktopGridBounds(bounds, metrics);
+  const maxCol = Math.max(0, Math.floor((maxX - DESKTOP_GRID_MARGIN) / stepX));
+  const maxRow = Math.max(0, Math.floor((maxY - DESKTOP_GRID_MARGIN) / stepY));
+
+  const targetCol = Math.max(0, Math.min(maxCol, Math.round((targetPos.x - DESKTOP_GRID_MARGIN) / stepX)));
+  const targetRow = Math.max(0, Math.min(maxRow, Math.round((targetPos.y - DESKTOP_GRID_MARGIN) / stepY)));
+
+  const isOccupied = (c: number, r: number) => {
+    const px = DESKTOP_GRID_MARGIN + c * stepX;
+    const py = DESKTOP_GRID_MARGIN + r * stepY;
+    for (const [id, pos] of Object.entries(allPositions)) {
+      if (id === iconId || !pos) continue;
+      if (Math.abs(pos.x - px) < stepX * 0.6 && Math.abs(pos.y - py) < stepY * 0.6) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  if (!isOccupied(targetCol, targetRow)) {
+    return {
+      x: DESKTOP_GRID_MARGIN + targetCol * stepX,
+      y: DESKTOP_GRID_MARGIN + targetRow * stepY
+    };
+  }
+
+  let bestCol = targetCol;
+  let bestRow = targetRow;
+  let minDistance = Infinity;
+  const maxR = Math.max(maxCol, maxRow, 15);
+
+  for (let radius = 1; radius <= maxR; radius++) {
+    for (let dc = -radius; dc <= radius; dc++) {
+      for (let dr = -radius; dr <= radius; dr++) {
+        if (Math.abs(dc) !== radius && Math.abs(dr) !== radius) continue;
+        const c = targetCol + dc;
+        const r = targetRow + dr;
+        if (c < 0 || c > maxCol || r < 0 || r > maxRow) continue;
+        if (!isOccupied(c, r)) {
+          const dist = dc * dc + dr * dr;
+          if (dist < minDistance) {
+            minDistance = dist;
+            bestCol = c;
+            bestRow = r;
+          }
+        }
+      }
+    }
+    if (minDistance < Infinity) break;
+  }
+
+  return {
+    x: DESKTOP_GRID_MARGIN + bestCol * stepX,
+    y: DESKTOP_GRID_MARGIN + bestRow * stepY
+  };
+}
+
 function snapDesktopIconPositions(
   positions: PublicUser['desktopIcons'],
   metrics: { width: number; height: number; gap: number },
   bounds?: DOMRect | { width: number; height: number } | null
 ) {
-  const next: PublicUser['desktopIcons'] = { ...positions };
+  const next: PublicUser['desktopIcons'] = {};
   for (const [id, pos] of Object.entries(positions)) {
     if (!pos) continue;
-    next[id] = { ...pos, ...snapDesktopIconPosition(pos.x, pos.y, metrics, bounds) };
+    const snapped = snapDesktopIconPosition(pos.x, pos.y, metrics, bounds);
+    const free = findNearestFreeDesktopPosition(snapped, id, next, metrics, bounds);
+    next[id] = { ...pos, x: free.x, y: free.y };
   }
   return next;
 }
@@ -392,10 +465,10 @@ function notificationMessage(message: Pick<MessengerMessage, 'body' | 'imageData
   const fwd = parseForward(message.body);
   if (fwd) return `↪ ${fwd.caption || fwd.body}`;
   if (isVideoCircleAttachment(message.imageData, message.imageName)) {
-    return language === 'ru' ? 'Р’РёРґРµРѕ РєСЂСѓР¶РѕРє' : 'Video message';
+    return language === 'ru' ? 'Видео кружок' : 'Video message';
   }
   if (isVoiceAttachment(message.imageData, message.imageName)) {
-    return language === 'ru' ? 'Р“РѕР»РѕСЃРѕРІРѕРµ СЃРѕРѕР±С‰РµРЅРёРµ' : 'Voice message';
+    return language === 'ru' ? 'Голосовое сообщение' : 'Voice message';
   }
   return message.body || (message.imageData ? t(language, 'imageMessage') : '');
 }
@@ -546,6 +619,7 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
   });
   const [messengerWindow, setMessengerWindow] = useState<'closed' | 'open' | 'minimized'>('closed');
   const [messengerMaximized, setMessengerMaximized] = useState(() => loadWindowMaximized().messenger ?? false);
+  const [messengerDetached, setMessengerDetached] = useState<boolean>(false);
   const [remoteDesktopWindow, setRemoteDesktopWindow] = useState<'closed' | 'open' | 'minimized'>('closed');
   const [remoteDesktopMaximized, setRemoteDesktopMaximized] = useState(() => loadWindowMaximized()['remote-desktop'] ?? false);
   const [remoteDesktopUser, setRemoteDesktopUser] = useState<PublicUser | null>(null);
@@ -559,6 +633,10 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
   const [aiChatWindow, setAiChatWindow] = useState<'closed' | 'open' | 'minimized'>('closed');
   const [aiChatMaximized, setAiChatMaximized] = useState(() => loadWindowMaximized()['ai-chat'] ?? false);
   const [pinnedCards, setPinnedCards] = useState<PinnedCard[]>(() => (Array.isArray(user.pinnedCards) ? user.pinnedCards : []));
+  const [stickies, setStickies] = useState<DesktopStickyNoteData[]>(() => loadStickyNotes(user.id));
+  const [bestFriendWidget, setBestFriendWidget] = useState<BestFriendWidgetData>(() => loadBestFriendWidget(user.id));
+  const [clockWidget, setClockWidget] = useState<ClockWeatherWidgetData>(() => loadClockWeatherWidget(user.id));
+  const [friendsList, setFriendsList] = useState<PublicUser[]>([]);
   const [desktopWatcherCount, setDesktopWatcherCount] = useState(0);
   const [viewerCursors, setViewerCursors] = useState<Record<string, { nickname: string; x: number; y: number }>>({});
   // Use the shared socket from SocketProvider instead of creating a new one.
@@ -598,6 +676,15 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
   const [settingsSearch, setSettingsSearch] = useState('');
   const settingsContentRef = useRef<HTMLDivElement | null>(null);
   const [highlightSettingsHeading, setHighlightSettingsHeading] = useState<string | null>(null);
+  const [appVersion, setAppVersion] = useState('0.5.15');
+  useEffect(() => {
+    if (window.notoc?.getAppVersion) {
+      window.notoc.getAppVersion().then((v: string) => {
+        if (v) setAppVersion(v);
+      }).catch(() => {});
+    }
+  }, []);
+  const [callVolumeMenu, setCallVolumeMenu] = useState<{ user: PublicUser; anchor: { x: number; y: number } } | null>(null);
   const [legalContent, setLegalContent] = useState<'privacy' | 'terms' | null>(null);
   const [pinModal, setPinModal] = useState<'create' | 'change' | null>(null);
   const [pinDisableModal, setPinDisableModal] = useState(false);
@@ -625,6 +712,30 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
   const [ongoingCall, setOngoingCall] = useState<OngoingCallInfo | null>(null);
   const handleCallStateChange = useCallback((info: OngoingCallInfo | null) => setOngoingCall(info), []);
   const handlePendingCallHandled = useCallback(() => setPendingCallAccept(null), []);
+  const [callToastPos, setCallToastPos] = useState<{ x: number; y: number } | null>(null);
+  const callToastDragRef = useRef<{
+    startX: number;
+    startY: number;
+    initialX: number;
+    initialY: number;
+    hasMoved: boolean;
+  } | null>(null);
+  const callToastJustDraggedRef = useRef(false);
+
+  useEffect(() => {
+    if (!callToastPos) return;
+    const onResize = () => {
+      setCallToastPos((prev) => {
+        if (!prev) return prev;
+        return {
+          x: Math.max(8, Math.min(window.innerWidth - 220, prev.x)),
+          y: Math.max(8, Math.min(window.innerHeight - 80, prev.y))
+        };
+      });
+    };
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, [callToastPos]);
 
   // Safety net: the desktop socket reconnects when its effect deps change, so a
   // `call:accepted`/`call:ended` can be missed. Never keep a ringing toast longer
@@ -788,6 +899,22 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
   useEffect(() => {
     localStorage.setItem(`notoc.inbox.mentions.${user.id}`, JSON.stringify(mentionNotifications.slice(0, 100)));
   }, [mentionNotifications, user.id]);
+
+  // Prefetch messenger bootstrap in the background so opening messenger renders instantly with fresh data
+  useEffect(() => {
+    let alive = true;
+    api.getMessengerBootstrap(token)
+      .then((payload) => {
+        if (!alive) return;
+        setMessengerBootstrapCache(token, user.id, payload);
+      })
+      .catch(() => {
+        // Silently ignore background prefetch errors (offline/network)
+      });
+    return () => {
+      alive = false;
+    };
+  }, [token, user.id]);
 
   useEffect(() => {
     setInboxLoading(true);
@@ -1046,8 +1173,61 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
     setMusicPlaying(false);
     audioRef.current?.pause();
 
-    void getMusicTracks(user.id).then((tracks) => {
-      if (alive) setMusicTracks(tracks);
+    void getMusicTracks(user.id).then(async (localTracks) => {
+      if (!alive) return;
+      if (localTracks.length) setMusicTracks(localTracks);
+
+      try {
+        const remote = await api.getPublicAudio(token, user.id);
+        if (!alive) return;
+        if (remote.tracks && remote.tracks.length > 0) {
+          const synced: MusicTrack[] = remote.tracks.map((t) => ({
+            id: t.id,
+            storageItemId: `audio:${t.id}`,
+            name: t.name,
+            dataUrl: t.dataUrl,
+            createdAt: t.updatedAt || new Date().toISOString()
+          }));
+          const remoteNames = new Set(synced.map((t) => t.name.toLowerCase()));
+          const pendingUploads = localTracks.filter((loc) => !remoteNames.has(loc.name.toLowerCase()));
+          const merged = [...synced, ...pendingUploads];
+          setMusicTracks(merged);
+          await saveMusicTracksOrder(user.id, merged);
+
+          for (const pending of pendingUploads) {
+            if (pending.dataUrl && (pending.dataUrl.startsWith('data:') || pending.dataUrl.startsWith('http'))) {
+              void api.uploadAudioTrack(token, { name: pending.name, dataUrl: pending.dataUrl })
+                .then((res) => {
+                  if (res.track) {
+                    pending.id = res.track.id;
+                    pending.dataUrl = res.track.dataUrl;
+                    pending.storageItemId = `audio:${res.track.id}`;
+                    void saveMusicTracksOrder(user.id, merged);
+                  }
+                })
+                .catch(() => undefined);
+            }
+          }
+        } else if (localTracks.length > 0) {
+          // If server has no tracks, sync local tracks to server so others can hear them!
+          for (const local of localTracks) {
+            if (local.dataUrl && (local.dataUrl.startsWith('data:') || local.dataUrl.startsWith('http'))) {
+              void api.uploadAudioTrack(token, { name: local.name, dataUrl: local.dataUrl })
+                .then((res) => {
+                  if (res.track) {
+                    local.id = res.track.id;
+                    local.dataUrl = res.track.dataUrl;
+                    local.storageItemId = `audio:${res.track.id}`;
+                    void saveMusicTracksOrder(user.id, localTracks);
+                  }
+                })
+                .catch(() => undefined);
+            }
+          }
+        }
+      } catch {
+        /* keep local tracks on network failure */
+      }
     });
 
     return () => {
@@ -1089,8 +1269,9 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
       setMusicDuration(0);
       return;
     }
-    if (audio.getAttribute('src') === track.dataUrl) return;
-    audio.src = track.dataUrl;
+    const resolvedUrl = resolveAudioUrl(track.dataUrl);
+    if (audio.getAttribute('src') === resolvedUrl) return;
+    audio.src = resolvedUrl;
     setMusicTime(0);
     setMusicDuration(0);
   }, [currentTrackIndex, musicTracks]);
@@ -1277,6 +1458,7 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
     }
 
     function onCallIncoming(payload: { callId: string; callerId: string; callerNickname: string }) {
+      if (messengerDetached) return;
       void getOrFetchUser(payload.callerId, (id) =>
         api.getPublicUser(token, id).then((r) => r.user)
       ).then((caller) => {
@@ -1338,7 +1520,7 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
       socket.off('call:accepted', dismissCallToast);
       socket.off('presence:changed', onPresenceChanged);
     };
-  }, [activeChatGroupId, activeChatUserId, language, messengerWindow, onUserChange, sharedSocket, token, user.id, userStatus.status]);
+  }, [activeChatGroupId, activeChatUserId, language, messengerDetached, messengerWindow, onUserChange, sharedSocket, token, user.id, userStatus.status]);
 
   useEffect(() => {
     const socket = sharedSocket;
@@ -1362,16 +1544,36 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
       setInboxRequests(payload.requests);
     }
 
+    function onStoragePublicChanged(payload: { userId: string }) {
+      if (payload.userId === user.id) {
+        void api.getPublicAudio(token, user.id).then((remote) => {
+          if (remote.tracks) {
+            const synced: MusicTrack[] = remote.tracks.map((t) => ({
+              id: t.id,
+              storageItemId: `audio:${t.id}`,
+              name: t.name,
+              dataUrl: t.dataUrl,
+              createdAt: t.updatedAt || new Date().toISOString()
+            }));
+            setMusicTracks(synced);
+            void saveMusicTracksOrder(user.id, synced);
+          }
+        }).catch(() => undefined);
+      }
+    }
+
     socket.on('desktopWall:messageCreated', onInboxWallCreated);
     socket.on('desktopWall:messageDeleted', onInboxWallDeleted);
     socket.on('messenger:friendsChanged', onInboxFriendsChanged);
+    socket.on('storage:publicChanged', onStoragePublicChanged);
 
     return () => {
       socket.off('desktopWall:messageCreated', onInboxWallCreated);
       socket.off('desktopWall:messageDeleted', onInboxWallDeleted);
       socket.off('messenger:friendsChanged', onInboxFriendsChanged);
+      socket.off('storage:publicChanged', onStoragePublicChanged);
     };
-  }, [sharedSocket, user.id]);
+  }, [sharedSocket, token, user.id]);
 
   useEffect(() => {
     if (desktopWatcherCount <= 0) return;
@@ -1473,9 +1675,12 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
     for (const id of currentDrag.ids) {
       const base = currentDrag.basePositions[id];
       if (!base) continue;
+      const snapped = snapDesktopIconPosition(base.x + dx, base.y + dy, iconMetrics, bounds);
+      const free = findNearestFreeDesktopPosition(snapped, id, nextPositions, iconMetrics, bounds);
       nextPositions[id] = {
         ...nextPositions[id],
-        ...snapDesktopIconPosition(base.x + dx, base.y + dy, iconMetrics, bounds)
+        x: free.x,
+        y: free.y
       };
     }
 
@@ -1642,10 +1847,84 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
     setContextMenu(null);
   }, [bringToFront, selectSettingsTab]);
 
-  const openMessenger = useCallback(() => {
+  const handleDetachMessenger = useCallback(async () => {
+    if (!window.notoc?.detachMessenger) return;
+    const params = {
+      activeUserId: activeChatUserId,
+      activeGroupId: activeChatGroupId,
+      token
+    };
+    await window.notoc.detachMessenger(params);
+    setMessengerDetached(true);
+    setMessengerWindow('closed');
+    try {
+      const bc = new BroadcastChannel('notoc-messenger-channel');
+      bc.postMessage({ type: 'detached', ...params });
+      bc.close();
+    } catch {}
+  }, [activeChatGroupId, activeChatUserId, token]);
+
+  const handleDockMessenger = useCallback(async () => {
+    if (window.notoc?.dockMessenger) {
+      await window.notoc.dockMessenger();
+    }
+    setMessengerDetached(false);
     setMessengerWindow('open');
     bringToFront('messenger');
+    try {
+      const bc = new BroadcastChannel('notoc-messenger-channel');
+      bc.postMessage({ type: 'dock' });
+      bc.close();
+    } catch {}
   }, [bringToFront]);
+
+  useEffect(() => {
+    if (window.notoc?.isMessengerDetached) {
+      window.notoc.isMessengerDetached().then((detached) => {
+        if (detached) {
+          setMessengerDetached(true);
+          setMessengerWindow('closed');
+        }
+      });
+    }
+
+    const unsub = window.notoc?.onMessengerDocked?.(() => {
+      setMessengerDetached(false);
+      setMessengerWindow('open');
+      bringToFront('messenger');
+    });
+
+    let bc: BroadcastChannel | null = null;
+    try {
+      bc = new BroadcastChannel('notoc-messenger-channel');
+      bc.onmessage = (event) => {
+        if (event.data?.type === 'dock') {
+          setMessengerDetached(false);
+          setMessengerWindow('open');
+          bringToFront('messenger');
+        } else if (event.data?.type === 'detached') {
+          setMessengerDetached(true);
+          setMessengerWindow('closed');
+        } else if (event.data?.type === 'user_changed' && event.data?.user) {
+          onUserChange(event.data.user);
+        }
+      };
+    } catch {}
+
+    return () => {
+      unsub?.();
+      try { bc?.close(); } catch {}
+    };
+  }, [bringToFront, onUserChange]);
+
+  const openMessenger = useCallback(() => {
+    if (messengerDetached) {
+      void handleDockMessenger();
+      return;
+    }
+    setMessengerWindow('open');
+    bringToFront('messenger');
+  }, [bringToFront, handleDockMessenger, messengerDetached]);
 
   const openInbox = useCallback(() => {
     setInboxWindow('open');
@@ -1663,16 +1942,90 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
   }
 
   function openMessengerChat(userId: string) {
+    if (messengerDetached) {
+      void handleDockMessenger();
+    }
     setMessengerChatRequest((current) => ({ userId, requestId: (current?.requestId ?? 0) + 1 }));
     setMessengerWindow('open');
     bringToFront('messenger');
   }
 
   function openMessengerGroup(group: Group, channelId: string | null = null) {
+    if (messengerDetached) {
+      void handleDockMessenger();
+    }
     setMessengerGroupRequest((current) => ({ groupId: group.id, group, channelId, requestId: (current?.requestId ?? 0) + 1 }));
     setMessengerWindow('open');
     bringToFront('messenger');
   }
+
+  const handleCallToastPointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    if ((event.target as HTMLElement).closest('.call-btn')) return;
+
+    event.stopPropagation();
+    const target = event.currentTarget;
+    try {
+      target.setPointerCapture(event.pointerId);
+    } catch {}
+
+    const rect = target.getBoundingClientRect();
+    callToastDragRef.current = {
+      startX: event.clientX,
+      startY: event.clientY,
+      initialX: rect.left,
+      initialY: rect.top,
+      hasMoved: false
+    };
+  }, []);
+
+  const handleCallToastPointerMove = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (!callToastDragRef.current) return;
+    event.stopPropagation();
+
+    const dx = event.clientX - callToastDragRef.current.startX;
+    const dy = event.clientY - callToastDragRef.current.startY;
+    if (!callToastDragRef.current.hasMoved && Math.hypot(dx, dy) > 4) {
+      callToastDragRef.current.hasMoved = true;
+    }
+    if (callToastDragRef.current.hasMoved) {
+      const rect = event.currentTarget.getBoundingClientRect();
+      const newX = Math.max(8, Math.min(window.innerWidth - rect.width - 8, callToastDragRef.current.initialX + dx));
+      const newY = Math.max(8, Math.min(window.innerHeight - rect.height - 8, callToastDragRef.current.initialY + dy));
+      setCallToastPos({ x: newX, y: newY });
+    }
+  }, []);
+
+  const handleCallToastPointerUp = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (!callToastDragRef.current) return;
+    event.stopPropagation();
+
+    try {
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+    } catch {}
+
+    const wasMoved = callToastDragRef.current.hasMoved;
+    callToastDragRef.current = null;
+
+    if (wasMoved) {
+      callToastJustDraggedRef.current = true;
+      setTimeout(() => {
+        callToastJustDraggedRef.current = false;
+      }, 120);
+    }
+  }, []);
+
+  const handleCallToastClick = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    event.stopPropagation();
+    if (callToastJustDraggedRef.current) return;
+    if (ongoingCall?.type === 'group' && ongoingCall.group) {
+      openMessengerGroup(ongoingCall.group.rawGroup, ongoingCall.group.channelId);
+    } else if (ongoingCall?.peer) {
+      openMessengerChat(ongoingCall.peer.id);
+    }
+  }, [ongoingCall]);
 
   const markGroupMentionsRead = useCallback((groupId: string) => {
     setInboxReadIds((current) => {
@@ -1787,6 +2140,30 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
     }
   }
 
+  useEffect(() => {
+    if (!token) return;
+    api.getFriends(token).then((res) => setFriendsList(res.friends)).catch(() => {});
+  }, [token]);
+
+  function createStickyNote(point?: { x: number; y: number }) {
+    setContextMenu(null);
+    const newNote: DesktopStickyNoteData = {
+      id: `sticky-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      text: '',
+      color: 'yellow',
+      x: point ? Math.max(20, Math.min(window.innerWidth - 260, point.x)) : 100,
+      y: point ? Math.max(20, Math.min(window.innerHeight - 240, point.y)) : 100,
+      width: 240,
+      height: 220,
+      pinned: false,
+      authorName: user.nickname,
+      createdAt: new Date().toISOString()
+    };
+    const next = [...stickies, newNote];
+    setStickies(next);
+    saveStickyNotes(user.id, next);
+  }
+
   function chooseDesktopWidget(kind: 'image' | 'video', point: { x: number; y: number }) {
     widgetDropPointRef.current = point;
     setContextMenu(null);
@@ -1879,6 +2256,7 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
   }
 
   async function removeTrack(id: string) {
+    void api.deleteAudioTrack(token, id).catch(() => undefined);
     await deleteMusicTrack(user.id, id);
     setMusicTracks((current) => current.filter((track) => track.id !== id));
     setCurrentTrackIndex(0);
@@ -1913,10 +2291,28 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
     }
     beginOrUpdateUpload(0.05);
     try {
-      const dataUrl = dataUrlWithMime(await readFileAsDataUrl(file, (fraction) => beginOrUpdateUpload(Math.min(0.9, Math.max(0.05, fraction * 0.9)))), mimeType);
-      const storageItemId = `local-audio:${file.name}:${file.size}:${file.lastModified}`;
-      const added = await addMusicTrack(user.id, { storageItemId, name: file.name, dataUrl });
-      setMusicTracks((current) => [...current.filter((track) => track.storageItemId !== storageItemId), added]);
+      const dataUrl = dataUrlWithMime(await readFileAsDataUrl(file, (fraction) => beginOrUpdateUpload(Math.min(0.8, Math.max(0.05, fraction * 0.8)))), mimeType);
+      beginOrUpdateUpload(0.85);
+
+      let finalUrl = dataUrl;
+      let trackId = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+      try {
+        const uploaded = await api.uploadAudioTrack(token, { name: file.name, dataUrl });
+        if (uploaded.track) {
+          finalUrl = uploaded.track.dataUrl;
+          trackId = uploaded.track.id;
+        }
+      } catch (err) {
+        console.warn('Failed to upload track to server:', err);
+        finishUpload();
+        window.alert(getErrorMessage(err, language));
+        return;
+      }
+
+      const storageItemId = `audio:${trackId}`;
+      const added = await addMusicTrack(user.id, { id: trackId, storageItemId, name: file.name, dataUrl: finalUrl });
+      setMusicTracks((current) => [...current.filter((track) => track.storageItemId !== storageItemId && track.id !== trackId), added]);
       finishUpload();
     } catch (error) {
       finishUpload();
@@ -2100,7 +2496,7 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
       return;
     }
 
-    if (kind === 'wallpaper' && file.size > 1_200_000) {
+    if (kind === 'wallpaper' && file.size > 10 * 1024 * 1024) {
       setSettingsError(t(language, 'wallpaperTooLarge'));
       return;
     }
@@ -2141,7 +2537,7 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
       const nativeImage = await openNativeImageFile();
 
       if (nativeImage) {
-        if (kind === 'wallpaper' && nativeImage.dataUrl.length > 2_000_000) {
+        if (kind === 'wallpaper' && nativeImage.dataUrl.length > 16_000_000) {
           setSettingsError(t(language, 'wallpaperTooLarge'));
           return;
         }
@@ -2182,6 +2578,7 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
   const editProfileFromMessenger = useCallback(() => openSettings('profile'), [openSettings]);
 
   const messengerNode = useMemo(() => {
+    if (messengerDetached) return null;
     if (messengerWindow === 'closed' && !ongoingCall && !pendingCallAccept) return null;
     return (
       <MessengerWindow
@@ -2211,6 +2608,7 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
         onOpenWatchTogether={openWatchTogether}
         onOpenInbox={openInbox}
         inboxUnreadCount={inboxUnreadCount}
+        onDetach={window.notoc?.detachMessenger ? handleDetachMessenger : undefined}
       />
     );
   }, [
@@ -2219,11 +2617,13 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
     focusMessengerWindow,
     groupMentionCounts,
     handleCallStateChange,
+    handleDetachMessenger,
     handlePendingCallHandled,
     inboxUnreadCount,
     language,
     markGroupMentionsRead,
     messengerChatRequest,
+    messengerDetached,
     messengerGroupRequest,
     messengerMaximized,
     messengerWindow,
@@ -2419,6 +2819,25 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
               <div className="context-submenu-host">
                 <button type="button">{language === 'ru' ? 'Виджет' : language === 'uk' ? 'Віджет' : 'Widget'} <span>{'>'}</span></button>
                 <div className="context-submenu">
+                  <button type="button" onClick={() => createStickyNote({ x: contextMenu.x, y: contextMenu.y })}>
+                    {language === 'ru' ? 'Стикер (Записка)' : 'Sticky Note'}
+                  </button>
+                  <button type="button" onClick={() => {
+                    setContextMenu(null);
+                    const next = { ...bestFriendWidget, enabled: true, x: Math.min(window.innerWidth - 260, contextMenu.x), y: Math.min(window.innerHeight - 220, contextMenu.y) };
+                    setBestFriendWidget(next);
+                    saveBestFriendWidget(user.id, next);
+                  }}>
+                    {language === 'ru' ? 'Лучший друг' : 'Best Friend'}
+                  </button>
+                  <button type="button" onClick={() => {
+                    setContextMenu(null);
+                    const next = { ...clockWidget, enabled: true, x: Math.min(window.innerWidth - 300, contextMenu.x), y: Math.min(window.innerHeight - 200, contextMenu.y) };
+                    setClockWidget(next);
+                    saveClockWeatherWidget(user.id, next);
+                  }}>
+                    {language === 'ru' ? 'Часы и погода' : 'Clock & Weather'}
+                  </button>
                   <button type="button" onClick={() => chooseDesktopWidget('image', { x: contextMenu.x, y: contextMenu.y })}>{language === 'ru' ? 'Фото' : language === 'uk' ? 'Фото' : 'Photo'}</button>
                   <button type="button" onClick={() => chooseDesktopWidget('video', { x: contextMenu.x, y: contextMenu.y })}>{language === 'ru' ? 'Видео' : language === 'uk' ? 'Відео' : 'Video'}</button>
                 </div>
@@ -2499,7 +2918,7 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
                     {t(language, 'logout')}
                   </button>
                   <div className="settings-footer">
-                    <span className="settings-version">NotOS v1.0.0</span>
+                    <span className="settings-version">{`NotOS v${appVersion}`}</span>
                     <div className="settings-links">
                       <button type="button" onClick={() => setLegalContent('privacy')}>{t(language, 'privacyPolicy')}</button>
                       <button type="button" onClick={() => setLegalContent('terms')}>{t(language, 'termsOfService')}</button>
@@ -2664,6 +3083,20 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
                         />
                       ) : null}
                     </div>
+
+                    <p className={settingsHeadingClass('profile-voice-bio', 'field-label')} data-settings-heading="profile-voice-bio">
+                      {language === 'ru' ? 'Аудио-статус (Voice Bio)' : 'Voice Bio Status'}
+                    </p>
+                    <ProfileVoiceBio
+                      userId={user.id}
+                      isSelf={true}
+                      language={language}
+                      initialBioUrl={user.voiceBio}
+                      token={token}
+                      onBioUpdated={(newUrl) => {
+                        onUserChange({ ...user, voiceBio: newUrl });
+                      }}
+                    />
                     </div>
                     <div className="profile-preview">
                       <ProfilePreviewCard
@@ -3234,6 +3667,7 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
                                 reordered.splice(index, 0, moved);
                                 setMusicTracks(reordered);
                                 void saveMusicTracksOrder(user.id, reordered);
+                                void api.reorderAudioTracks(token, reordered.map((t) => t.id)).catch(() => undefined);
                                 setCurrentTrackIndex((prev) => {
                                   if (prev === dragTrackIndex) return index;
                                   if (dragTrackIndex < prev && index >= prev) return prev - 1;
@@ -3379,26 +3813,27 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
               </div>
             ) : null}
 
-            {legalContent ? (
-              <div className="modal-backdrop" onClick={() => setLegalContent(null)}>
-                <section className="legal-window" onClick={(event) => event.stopPropagation()}>
-                  <div className="legal-header">
-                    <h2>{t(language, legalContent === 'privacy' ? 'privacyPolicy' : 'termsOfService')}</h2>
-                    <button className="icon-action" type="button" onClick={() => setLegalContent(null)}>x</button>
-                  </div>
-                  <div className="legal-body">
-                    <h3>1. {t(language, 'informationCollection')}</h3>
-                    <p>{t(language, 'infoCollectionText')}</p>
-                    <h3>2. {t(language, 'dataUsage')}</h3>
-                    <p>{t(language, 'dataUsageText')}</p>
-                    <h3>3. {t(language, 'dataSecurity')}</h3>
-                    <p>{t(language, 'dataSecurityText')}</p>
-                    <h3>4. {t(language, 'contactInfo')}</h3>
-                    <p>{t(language, 'contactText')}</p>
-                  </div>
-                </section>
-              </div>
-            ) : null}
+            {legalContent ? (() => {
+              const doc = getLegalDoc(legalContent, language);
+              return (
+                <div className="modal-backdrop" onClick={() => setLegalContent(null)}>
+                  <section className="legal-window" onClick={(event) => event.stopPropagation()}>
+                    <div className="legal-header">
+                      <h2>{doc.title || t(language, legalContent === 'privacy' ? 'privacyPolicy' : 'termsOfService')}</h2>
+                      <button className="icon-action" type="button" onClick={() => setLegalContent(null)}>✕</button>
+                    </div>
+                    <div className="legal-body">
+                      {doc.sections.map((section, idx) => (
+                        <div key={idx} className="legal-section">
+                          <h3>{section.title}</h3>
+                          <p>{section.content}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+                </div>
+              );
+            })() : null}
 
             {nameStyleModalOpen ? (
               <NameStyleModal
@@ -3555,6 +3990,46 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
         )
       )}
 
+      <DesktopStickyNotesLayer
+        currentUser={user}
+        language={language}
+        stickies={stickies}
+        onStickiesChange={setStickies}
+      />
+
+      {bestFriendWidget.enabled ? (
+        <DesktopBestFriendWidget
+          currentUser={user}
+          language={language}
+          friends={friendsList}
+          onlineUserIds={onlineUserIds}
+          config={bestFriendWidget}
+          onUpdateConfig={setBestFriendWidget}
+          onOpenChat={openMessengerChat}
+          onStartCall={(u) => openMessengerChat(u.id)}
+          onOpenProfile={(u) => { setProfileModalUser(u); setProfileAnchor(null); }}
+          onClose={() => {
+            const next = { ...bestFriendWidget, enabled: false };
+            setBestFriendWidget(next);
+            saveBestFriendWidget(user.id, next);
+          }}
+        />
+      ) : null}
+
+      {clockWidget.enabled ? (
+        <DesktopClockWeatherWidget
+          currentUser={user}
+          language={language}
+          config={clockWidget}
+          onUpdateConfig={setClockWidget}
+          onClose={() => {
+            const next = { ...clockWidget, enabled: false };
+            setClockWidget(next);
+            saveClockWeatherWidget(user.id, next);
+          }}
+        />
+      ) : null}
+
       {Object.entries(viewerCursors).map(([cursorUserId, cursor]) => (
         <div key={cursorUserId} className="remote-cursor" style={{ left: `${cursor.x * 100}%`, top: `${cursor.y * 100}%` }}>
           <span className="remote-cursor-name">{cursor.nickname}</span>
@@ -3575,6 +4050,10 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
           onClose={() => setWatchTogetherWindow('closed')}
           onMinimize={() => setWatchTogetherWindow('minimized')}
           onToggleMaximize={() => setWatchTogetherMaximized((value) => !value)}
+          onOpenProfile={(profileUser, anchorRect) => {
+            setProfileModalUser(profileUser);
+            setProfileAnchor(anchorRect ?? null);
+          }}
         />
       ) : null}
 
@@ -3697,7 +4176,12 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
       ) : null}
 
       {incomingCallToast && !ongoingCall ? (
-        <div className="desktop-call-toast" role="alert">
+        <div
+          className="desktop-call-toast"
+          role="alert"
+          onMouseDown={(e) => e.stopPropagation()}
+          onPointerDown={(e) => e.stopPropagation()}
+        >
           <div className="desktop-call-toast-avatar">
             <img src={incomingCallToast.caller.avatarData} alt="" />
             <span className="desktop-call-ring" />
@@ -3736,11 +4220,16 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
         </div>
       ) : null}
 
-      {ongoingCall?.peer && messengerWindow !== 'open' && !incomingCallToast ? (
+      {ongoingCall && (!ongoingCall.inCurrentChat || messengerWindow !== 'open') && !incomingCallToast ? (
         <div
           className={ongoingCall.videoStream ? 'desktop-call-toast ongoing with-video' : 'desktop-call-toast ongoing'}
           role="status"
-          onClick={() => openMessengerChat(ongoingCall.peer!.id)}
+          style={callToastPos ? { left: `${callToastPos.x}px`, top: `${callToastPos.y}px`, right: 'auto', bottom: 'auto' } : undefined}
+          onPointerDown={handleCallToastPointerDown}
+          onPointerMove={handleCallToastPointerMove}
+          onPointerUp={handleCallToastPointerUp}
+          onPointerCancel={handleCallToastPointerUp}
+          onClick={handleCallToastClick}
           title={t(language, 'ongoingCall')}
         >
           {ongoingCall.videoStream ? (
@@ -3757,23 +4246,66 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
               }}
             />
           ) : null}
-          <div className="desktop-call-toast-avatar">
-            <img src={ongoingCall.peer.avatarData} alt="" />
-            <span className="desktop-call-ring active" />
-          </div>
-          <div className="desktop-call-toast-info">
-            <strong>{ongoingCall.peer.nickname}</strong>
-            <small>
-              {ongoingCall.phase === 'active'
-                ? `${t(language, 'ongoingCall')} В· ${formatCallDuration(ongoingCall.elapsed)}`
-                : t(language, 'callConnecting')}
-            </small>
-          </div>
+          {ongoingCall.type === 'group' && ongoingCall.group ? (
+            <>
+              <div className="desktop-call-toast-avatar group">
+                <img
+                  src={
+                    ongoingCall.group.avatarData ||
+                    `data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" fill="%23444" rx="20"/><text x="50" y="58" text-anchor="middle" fill="%23fff" font-size="28" font-family="sans-serif">${encodeURIComponent(
+                      (ongoingCall.group.name[0] || '?').toUpperCase()
+                    )}</text></svg>`
+                  }
+                  alt=""
+                />
+                <span className="desktop-call-ring active" />
+              </div>
+              <div className="desktop-call-toast-info">
+                <strong>{ongoingCall.group.name}</strong>
+                <small>{`#${ongoingCall.group.channelName} · ${formatCallDuration(ongoingCall.elapsed)}`}</small>
+              </div>
+            </>
+          ) : ongoingCall.peer ? (
+            <>
+              <div
+                className="desktop-call-toast-avatar"
+                onContextMenu={(e) => {
+                  if (ongoingCall.peer) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setCallVolumeMenu({ user: ongoingCall.peer, anchor: { x: e.clientX, y: e.clientY } });
+                  }
+                }}
+              >
+                <img src={ongoingCall.peer.avatarData} alt="" />
+                <span className="desktop-call-ring active" />
+              </div>
+              <div
+                className="desktop-call-toast-info"
+                onContextMenu={(e) => {
+                  if (ongoingCall.peer) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setCallVolumeMenu({ user: ongoingCall.peer, anchor: { x: e.clientX, y: e.clientY } });
+                  }
+                }}
+              >
+                <strong>{ongoingCall.peer.nickname}</strong>
+                <small>
+                  {ongoingCall.phase === 'active'
+                    ? `${t(language, 'ongoingCall')} · ${formatCallDuration(ongoingCall.elapsed)}`
+                    : t(language, 'callConnecting')}
+                </small>
+              </div>
+            </>
+          ) : null}
           <div className="desktop-call-toast-actions">
             <button
               className="call-btn decline"
               type="button"
               title={t(language, 'endCall')}
+              onMouseDown={(event) => event.stopPropagation()}
+              onPointerDown={(event) => event.stopPropagation()}
               onClick={(event) => {
                 event.stopPropagation();
                 ongoingCall.hangup();
@@ -3783,6 +4315,15 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
             </button>
           </div>
         </div>
+      ) : null}
+
+      {callVolumeMenu ? (
+        <UserVolumePopover
+          user={callVolumeMenu.user}
+          anchor={callVolumeMenu.anchor}
+          language={language}
+          onClose={() => setCallVolumeMenu(null)}
+        />
       ) : null}
 
       <footer className="taskbar">
@@ -3909,12 +4450,34 @@ export function Desktop({ token, user, language, notice, onNoticeClose, onUserCh
             {t(language, 'settings')}
           </button>
         ) : null}
-        {messengerWindow !== 'closed' ? (
-          <button className={messengerWindow === 'open' ? 'taskbar-app active' : 'taskbar-app'} type="button" onClick={() => {
-            setMessengerWindow('open');
-            bringToFront('messenger');
-          }}>
+        {messengerWindow !== 'closed' || messengerDetached ? (
+          <button
+            className={messengerDetached ? 'taskbar-app detached' : messengerWindow === 'open' ? 'taskbar-app active' : 'taskbar-app'}
+            type="button"
+            title={messengerDetached ? t(language, 'messengerDetached') : t(language, 'messenger')}
+            onClick={() => {
+              if (messengerDetached) {
+                void handleDockMessenger();
+                return;
+              }
+              if (messengerWindow === 'open') {
+                minimizeMessengerWindow();
+              } else {
+                setMessengerWindow('open');
+                bringToFront('messenger');
+              }
+            }}
+          >
             <span className="taskbar-app-icon tile-icon tile-icon-messenger">M</span>
+            {messengerDetached ? (
+              <span className="taskbar-detached-badge" title={t(language, 'messengerDetached')}>
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+                  <polyline points="15 3 21 3 21 9" />
+                  <line x1="10" y1="14" x2="21" y2="3" />
+                </svg>
+              </span>
+            ) : null}
             {t(language, 'messenger')}
           </button>
         ) : null}

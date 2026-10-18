@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react';
 import { createPortal } from 'react-dom';
 import type { Language } from '../api/types';
+import { LOCALES, t } from '../i18n';
 
 const MAX_RECORDING_SECONDS = 180;
 const VIDEO_CIRCLE_MAX_RECORDING_SECONDS = 60;
@@ -166,6 +167,28 @@ type VideoCirclePlaybackDetail = {
 let activeVideoCircle: HTMLVideoElement | null = null;
 let activeVideoCircleDetail: VideoCirclePlaybackDetail | null = null;
 
+function stopVoicePlayback() {
+  const audio = activeVoiceAudio;
+  activeVoiceAudio = null;
+  activeVoiceDetail = null;
+  if (audio) {
+    audio.pause();
+    try { audio.currentTime = 0; } catch { /* ignore seek errors on unset duration */ }
+  }
+  window.dispatchEvent(new CustomEvent<VoicePlaybackDetail | null>(VOICE_PLAYBACK_EVENT, { detail: null }));
+}
+
+function stopVideoCirclePlayback() {
+  const video = activeVideoCircle;
+  activeVideoCircle = null;
+  activeVideoCircleDetail = null;
+  if (video) {
+    video.pause();
+    try { video.currentTime = 0; } catch { /* ignore seek errors on unset duration */ }
+  }
+  window.dispatchEvent(new CustomEvent<VideoCirclePlaybackDetail | null>(VIDEO_CIRCLE_PLAYBACK_EVENT, { detail: null }));
+}
+
 // Sticky playback speed for voice messages (shared by every player instance
 // and persisted across sessions).
 const VOICE_SPEED_KEY = 'notoc.voice.playbackRate';
@@ -187,6 +210,7 @@ function setVoicePlaybackRate(rate: number) {
 }
 
 function announceVoicePlayback(detail: Omit<VoicePlaybackDetail, 'audio'>): VoicePlaybackDetail {
+  stopVideoCirclePlayback();
   if (!activeVoiceAudio || activeVoiceDetail?.src !== detail.src) {
     activeVoiceAudio?.pause();
     activeVoiceAudio = new Audio(detail.src);
@@ -226,6 +250,7 @@ function announceVoicePlayback(detail: Omit<VoicePlaybackDetail, 'audio'>): Voic
 }
 
 function announceVideoCirclePlayback(detail: Omit<VideoCirclePlaybackDetail, 'video'>, videoElement: HTMLVideoElement): VideoCirclePlaybackDetail {
+  stopVoicePlayback();
   if (activeVideoCircle && activeVideoCircle !== videoElement) activeVideoCircle.pause();
   activeVideoCircle = videoElement;
   if (activeVideoCircle.src !== detail.src) activeVideoCircle.src = detail.src;
@@ -251,13 +276,13 @@ function voiceDateLabel(createdAt: string, language: Language): string {
   const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
   const startValue = new Date(value.getFullYear(), value.getMonth(), value.getDate()).getTime();
   const dayDifference = Math.round((startToday - startValue) / 86_400_000);
-  const time = value.toLocaleTimeString(language === 'ru' ? 'ru-RU' : language === 'uk' ? 'uk-UA' : 'en-US', {
+  const time = value.toLocaleTimeString(LOCALES[language], {
     hour: '2-digit',
     minute: '2-digit'
   });
-  if (dayDifference === 0) return `${language === 'ru' ? 'Сегодня' : language === 'uk' ? 'Сьогодні' : 'Today'}, ${time}`;
-  if (dayDifference === 1) return `${language === 'ru' ? 'Вчера' : language === 'uk' ? 'Учора' : 'Yesterday'}, ${time}`;
-  return `${value.toLocaleDateString(language === 'ru' ? 'ru-RU' : language === 'uk' ? 'uk-UA' : 'en-US')}, ${time}`;
+  if (dayDifference === 0) return `${t(language, 'today')}, ${time}`;
+  if (dayDifference === 1) return `${t(language, 'yesterday')}, ${time}`;
+  return `${value.toLocaleDateString(LOCALES[language])}, ${time}`;
 }
 
 export function VoiceMessagePlayer({
@@ -602,7 +627,7 @@ export function VideoCirclePlaybackBar({ language }: { language: Language }) {
   const [duration, setDuration] = useState(0);
 
   useEffect(() => {
-    const activate = (event: Event) => setActive((event as CustomEvent<VideoCirclePlaybackDetail>).detail);
+    const activate = (event: Event) => setActive((event as CustomEvent<VideoCirclePlaybackDetail | null>).detail ?? null);
     window.addEventListener(VIDEO_CIRCLE_PLAYBACK_EVENT, activate);
     return () => window.removeEventListener(VIDEO_CIRCLE_PLAYBACK_EVENT, activate);
   }, []);
@@ -648,12 +673,7 @@ export function VideoCirclePlaybackBar({ language }: { language: Language }) {
       </div>
       <time>{formatRecordingTime(Math.floor(currentTime))} / {formatRecordingTime(Math.floor(duration))}</time>
       <button className="voice-playback-close" type="button" aria-label="Close" onClick={() => {
-        active.video.pause();
-        active.video.currentTime = 0;
-        if (activeVideoCircle === active.video) {
-          activeVideoCircle = null;
-          activeVideoCircleDetail = null;
-        }
+        stopVideoCirclePlayback();
         setActive(null);
       }}>
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.4 5 12 10.6 17.6 5 19 6.4 13.4 12 19 17.6 17.6 19 12 13.4 6.4 19 5 17.6 10.6 12 5 6.4z" /></svg>
@@ -671,7 +691,7 @@ export function VoicePlaybackBar({ language }: { language: Language }) {
   const [volumeOpen, setVolumeOpen] = useState(false);
 
   useEffect(() => {
-    const activate = (event: Event) => setActive((event as CustomEvent<VoicePlaybackDetail>).detail);
+    const activate = (event: Event) => setActive((event as CustomEvent<VoicePlaybackDetail | null>).detail ?? null);
     window.addEventListener(VOICE_PLAYBACK_EVENT, activate);
     return () => window.removeEventListener(VOICE_PLAYBACK_EVENT, activate);
   }, []);
@@ -743,12 +763,7 @@ export function VoicePlaybackBar({ language }: { language: Language }) {
         ) : null}
       </div>
       <button className="voice-playback-close" type="button" aria-label="Close" onClick={() => {
-        active.audio.pause();
-        active.audio.currentTime = 0;
-        if (activeVoiceAudio === active.audio) {
-          activeVoiceAudio = null;
-          activeVoiceDetail = null;
-        }
+        stopVoicePlayback();
         setActive(null);
       }}>
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.4 5 12 10.6 17.6 5 19 6.4 13.4 12 19 17.6 17.6 19 12 13.4 6.4 19 5 17.6 10.6 12 5 6.4z" /></svg>
@@ -920,7 +935,7 @@ export function VoiceRecorderControl({ disabled = false, voiceDisabled = false, 
   async function beginRecording(button: HTMLButtonElement) {
     if (disabled || (recordingKindRef.current === 'video' ? videoDisabled : voiceDisabled) || modeRef.current !== 'idle') return;
     const kind = recordingKindRef.current;
-    setPortalHost(button.closest<HTMLElement>('.emoji-input-shell'));
+    setPortalHost(button.closest<HTMLElement>('.messenger-input-shell, .emoji-input-shell'));
     setError('');
     pendingFinishRef.current = null;
     completedBlobRef.current = null;

@@ -1,13 +1,36 @@
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webFrame } = require('electron');
 
 contextBridge.exposeInMainWorld('notoc', {
   platform: 'electron',
+  isWordMisspelled: (word) => {
+    try {
+      return webFrame.isWordMisspelled(word);
+    } catch {
+      return false;
+    }
+  },
+  getWordSuggestions: (word) => {
+    try {
+      return webFrame.getWordSuggestions(word);
+    } catch {
+      return [];
+    }
+  },
+  addWordToDictionary: (word) => ipcRenderer.invoke('spellcheck:add-word', word),
   saveAuthFile: (authFile) => ipcRenderer.invoke('auth-file:save', authFile),
   openAuthFile: () => ipcRenderer.invoke('auth-file:open'),
   openImageFile: () => ipcRenderer.invoke('image-file:open'),
   minimizeWindow: () => ipcRenderer.invoke('window:minimize'),
   toggleMaximizeWindow: () => ipcRenderer.invoke('window:maximize-toggle'),
   closeWindow: () => ipcRenderer.invoke('window:close'),
+  detachMessenger: (params) => ipcRenderer.invoke('messenger:detach', params),
+  dockMessenger: () => ipcRenderer.invoke('messenger:dock'),
+  isMessengerDetached: () => ipcRenderer.invoke('messenger:is-detached'),
+  onMessengerDocked: (callback) => {
+    const handler = () => callback();
+    ipcRenderer.on('messenger:docked', handler);
+    return () => ipcRenderer.removeListener('messenger:docked', handler);
+  },
   getAppVersion: () => ipcRenderer.invoke('app:get-version'),
   restartApp: () => ipcRenderer.invoke('app:restart'),
   setUnreadBadge: (count) => ipcRenderer.invoke('app:set-unread-badge', count),
@@ -26,5 +49,14 @@ contextBridge.exposeInMainWorld('notoc', {
     const handler = () => callback();
     ipcRenderer.on('ptt:up', handler);
     return () => ipcRenderer.removeListener('ptt:up', handler);
+  },
+  setServerUrl: (url) => ipcRenderer.invoke('app:set-server-url', url),
+  getServerUrl: () => ipcRenderer.invoke('app:get-server-url'),
+  startUpdate: (url) => ipcRenderer.invoke('app:start-update', url),
+  applyUpdate: (filePath) => ipcRenderer.invoke('app:apply-update', filePath),
+  onUpdateProgress: (callback) => {
+    const handler = (_event, data) => callback(data);
+    ipcRenderer.on('update:progress', handler);
+    return () => ipcRenderer.removeListener('update:progress', handler);
   }
 });

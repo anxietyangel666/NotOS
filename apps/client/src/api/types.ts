@@ -72,6 +72,7 @@ export type PublicUser = {
   hideDesktopIcons: boolean;
   desktopSort: DesktopSort;
   status: string;
+  voiceBio?: string | null;
   pinnedImageData: string;
   pinnedCards: PinnedCard[];
   allowGroupIdentityMessages: boolean;
@@ -175,6 +176,9 @@ export type MessengerMessage = {
   // Attachment that self-destructs once the recipient opens it.
   viewOnce?: boolean;
   viewOnceSeenAt?: string | null;
+  aiGenerated?: boolean;
+  aiName?: string | null;
+  aiAvatarData?: string | null;
   // Client-only: a stable React key kept across the optimistic→server swap so
   // the bubble reconciles in place instead of remounting (no flash/jump). Also
   // marks a message as still-sending for a subtle pending style.
@@ -207,6 +211,9 @@ export type MessageReplySnippet = {
   id: string;
   senderId: string;
   senderGroup?: { id: string; name: string; avatarData: string } | null;
+  aiGenerated?: boolean;
+  aiName?: string | null;
+  aiAvatarData?: string | null;
   body: string;
   imageData: string | null;
   imageName: string | null;
@@ -279,6 +286,8 @@ export type GroupMember = {
   roleId: string | null;
   // Every role the member holds (primary + extra customization roles).
   roleIds: string[];
+  nickname?: string;
+  timeoutUntil?: string | null;
   joinedAt: string;
 };
 
@@ -289,6 +298,16 @@ export type GroupInvite = {
   code: string;
   creator: PublicUser | null;
   usesCount: number;
+  maxUses?: number | null;
+  expiresAt?: string | null;
+  createdAt: string;
+};
+
+export type GroupBan = {
+  userId: string;
+  user: PublicUser | null;
+  reason: string;
+  bannedBy: string | null;
   createdAt: string;
 };
 
@@ -329,6 +348,9 @@ export type GroupMessage = {
   threadCount?: number;
   commentCount?: number;
   scheduledAt?: string | null;
+  aiGenerated?: boolean;
+  aiName?: string | null;
+  aiAvatarData?: string | null;
   createdAt: string;
   // Client-only: see MessengerMessage.clientKey/pending.
   clientKey?: string;
@@ -365,6 +387,69 @@ export type GroupRole = {
   hoist: boolean;
 };
 
+export type ChannelDefaultNotifications = 'all' | 'mentions' | 'nothing';
+export type ChannelVideoQuality = 'auto' | '720' | '1080';
+export type ChannelVoiceMode = 'voice_activity' | 'ptt';
+
+export type ChannelExtraSettings = {
+  privateChannel: boolean;
+  locked: boolean;
+  announcement: boolean;
+  defaultNotifications: ChannelDefaultNotifications;
+  videoQuality: ChannelVideoQuality;
+  rtcRegion: string;
+  defaultAutoArchiveMinutes: number;
+  newMemberSlowmodeSeconds: number;
+  disableReactions: boolean;
+  voiceMode: ChannelVoiceMode;
+  videoEnabled: boolean;
+  streamEnabled: boolean;
+  hideInactive: boolean;
+  defaultThreadSlowmodeSeconds: number;
+};
+
+export const DEFAULT_CHANNEL_EXTRA_SETTINGS: ChannelExtraSettings = {
+  privateChannel: false,
+  locked: false,
+  announcement: false,
+  defaultNotifications: 'all',
+  videoQuality: 'auto',
+  rtcRegion: 'automatic',
+  defaultAutoArchiveMinutes: 1440,
+  newMemberSlowmodeSeconds: 0,
+  disableReactions: false,
+  voiceMode: 'voice_activity',
+  videoEnabled: true,
+  streamEnabled: true,
+  hideInactive: false,
+  defaultThreadSlowmodeSeconds: 0
+};
+
+export function normalizeChannelExtraSettings(raw: unknown): ChannelExtraSettings {
+  const value = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {};
+  const notifications = value.defaultNotifications;
+  const videoQuality = value.videoQuality;
+  const voiceMode = value.voiceMode;
+  return {
+    privateChannel: Boolean(value.privateChannel),
+    locked: Boolean(value.locked),
+    announcement: Boolean(value.announcement),
+    defaultNotifications: notifications === 'mentions' || notifications === 'nothing' ? notifications : 'all',
+    videoQuality: videoQuality === '720' || videoQuality === '1080' ? videoQuality : 'auto',
+    rtcRegion: typeof value.rtcRegion === 'string' && value.rtcRegion.trim() ? value.rtcRegion.trim().slice(0, 40) : 'automatic',
+    defaultAutoArchiveMinutes: [60, 1440, 4320, 10080].includes(Number(value.defaultAutoArchiveMinutes))
+      ? Number(value.defaultAutoArchiveMinutes)
+      : 1440,
+    newMemberSlowmodeSeconds: Math.max(0, Math.min(604800, Number(value.newMemberSlowmodeSeconds) || 0)),
+    disableReactions: Boolean(value.disableReactions),
+    voiceMode: voiceMode === 'ptt' ? 'ptt' : 'voice_activity',
+    videoEnabled: value.videoEnabled !== false,
+    streamEnabled: value.streamEnabled !== false,
+    hideInactive: Boolean(value.hideInactive),
+    defaultThreadSlowmodeSeconds: Math.max(0, Math.min(21600, Number(value.defaultThreadSlowmodeSeconds) || 0))
+  };
+}
+
 export type GroupChannel = {
   id: string;
   groupId: string;
@@ -381,6 +466,7 @@ export type GroupChannel = {
   signPosts?: boolean;
   feedParentChannelId: string | null;
   requiredRoleIds: string[];
+  settings: ChannelExtraSettings;
 };
 
 export type CustomOption = {
@@ -409,9 +495,28 @@ export type VoiceParticipant = {
   userId: string;
   user: PublicUser;
   muted: boolean;
+  deafened?: boolean;
   screen: boolean;
+  camera?: boolean;
+  cameraStreamId?: string;
+  screenStreamId?: string;
   talking: boolean;
   joinedAt: number;
+};
+
+export type WatchQueueItem = {
+  id: string;
+  source: {
+    kind: 'youtube' | 'url' | 'embed';
+    value: string;
+    title: string;
+    addedBy: string;
+  };
+  addedByUserId: string;
+  addedByNickname: string;
+  addedByNameStyle?: NameStyle;
+  thumbnailUrl?: string;
+  createdAt: number;
 };
 
 export type VoiceChatMessage = {
@@ -494,7 +599,7 @@ export type AiQuota = {
   unlimited: boolean;
 };
 
-export type Language = 'en' | 'ru' | 'uk';
+export type Language = 'en' | 'ru' | 'uk' | 'zh' | 'zh-TW';
 
 export type Theme = 'light' | 'dark' | 'system-black' | 'mint' | 'ocean';
 

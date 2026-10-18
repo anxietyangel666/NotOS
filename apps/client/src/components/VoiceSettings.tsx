@@ -59,6 +59,34 @@ const voiceCopy = {
     noiseHint: 'Прибирає постійний фон, шум клавіатури й вентилятора через RNNoise.',
     echoHint: 'Приглушує відлуння від динаміків і повторне захоплення голосу.',
     gainHint: 'Автоматично вирівнює гучність мікрофона.'
+  },
+  zh: {
+    devices: '设备',
+    devicesHint: '选择通话使用的麦克风和扬声器。',
+    levels: '音量与测试',
+    levelsHint: '测试麦克风并听处理后的声音。',
+    input: '输入模式',
+    inputHint: '选择何时发送你的声音。',
+    processing: '麦克风处理',
+    processingHint: '通话和语音频道会应用 RNNoise + WebRTC 滤镜。',
+    monitoring: '测试期间你会听到自己的声音。',
+    noiseHint: '通过 RNNoise 降低持续背景音、键盘声和风扇声。',
+    echoHint: '减少扬声器回声和声音被再次拾取。',
+    gainHint: '自动平衡麦克风音量。'
+  },
+  'zh-TW': {
+    devices: '裝置',
+    devicesHint: '選擇通話使用的麥克風和喇叭。',
+    levels: '音量與測試',
+    levelsHint: '測試麥克風並聽處理後的聲音。',
+    input: '輸入模式',
+    inputHint: '選擇何時傳送你的聲音。',
+    processing: '麥克風處理',
+    processingHint: '通話和語音頻道會套用 RNNoise + WebRTC 濾鏡。',
+    monitoring: '測試期間你會聽到自己的聲音。',
+    noiseHint: '透過 RNNoise 降低持續背景音、鍵盤聲和風扇聲。',
+    echoHint: '減少喇叭回音和聲音被再次擷取。',
+    gainHint: '自動平衡麥克風音量。'
   }
 } satisfies Record<Language, Record<string, string>>;
 
@@ -182,11 +210,25 @@ export function VoiceSettings({ language, onChange, onDirtyChange }: VoiceSettin
     if (!capturingKey) return;
     const onKey = (event: KeyboardEvent) => {
       event.preventDefault();
+      event.stopPropagation();
       if (event.code !== 'Escape') update({ pushToTalkKey: event.code });
       setCapturingKey(false);
     };
+    const onMouse = (event: MouseEvent) => {
+      if (event.button === 1 || event.button === 3 || event.button === 4) {
+        event.preventDefault();
+        event.stopPropagation();
+        const code = event.button === 1 ? 'Mouse3' : event.button === 3 ? 'Mouse4' : 'Mouse5';
+        update({ pushToTalkKey: code });
+        setCapturingKey(false);
+      }
+    };
     window.addEventListener('keydown', onKey, { capture: true });
-    return () => window.removeEventListener('keydown', onKey, { capture: true });
+    window.addEventListener('mousedown', onMouse, { capture: true });
+    return () => {
+      window.removeEventListener('keydown', onKey, { capture: true });
+      window.removeEventListener('mousedown', onMouse, { capture: true });
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [capturingKey]);
 

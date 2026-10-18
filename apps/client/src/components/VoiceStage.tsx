@@ -12,6 +12,7 @@ import { UserName } from './UserName';
 import { EmojiPicker } from './EmojiPicker';
 import { expandCustomEmojiShortcodes } from '../utils/custom-emoji';
 import type { TenorGif } from '../utils/tenor';
+import { UserVolumePopover } from './UserVolumePopover';
 
 // A single screen-share tile in the Discord-style voice grid.
 function ScreenTile({ stream, label, focused, onFocus, onFullscreen }: { stream: MediaStream; label: string; focused: boolean; onFocus: () => void; onFullscreen: () => void }) {
@@ -36,23 +37,69 @@ function ScreenTile({ stream, label, focused, onFocus, onFullscreen }: { stream:
   );
 }
 
+function CameraVideoTile({ stream, mirrored }: { stream: MediaStream; mirrored?: boolean }) {
+  const ref = useRef<HTMLVideoElement | null>(null);
+  useEffect(() => {
+    const video = ref.current;
+    if (!video) return;
+    video.srcObject = stream;
+    const tryPlay = () => { void video.play().catch(() => undefined); };
+    tryPlay();
+    video.onloadedmetadata = tryPlay;
+  }, [stream]);
+  return <video ref={ref} className={`dvoice-tile-video${mirrored ? ' mirrored' : ''}`} autoPlay playsInline muted />;
+}
+
 // A single participant tile in the Discord-style voice grid: a dark rounded card
 // with the avatar centered, the name pinned bottom-left, and a mute badge.
-function PersonTile({ user, talking, muted, focused, onFocus }: { user: PublicUser; talking?: boolean; muted?: boolean; focused: boolean; onFocus: () => void }) {
+function PersonTile({
+  user,
+  talking,
+  muted,
+  deafened,
+  cameraStream,
+  mirrored,
+  focused,
+  onFocus,
+  onContextMenu
+}: {
+  user: PublicUser;
+  talking?: boolean;
+  muted?: boolean;
+  deafened?: boolean;
+  cameraStream?: MediaStream | null;
+  mirrored?: boolean;
+  focused: boolean;
+  onFocus: () => void;
+  onContextMenu?: (e: React.MouseEvent) => void;
+}) {
   const color = useAvatarColor(user.avatarData);
   return (
     <button
       type="button"
-      className={`dvoice-tile dvoice-tile-person${talking ? ' talking' : ''}${focused ? ' focused' : ''}`}
+      className={`dvoice-tile dvoice-tile-person${talking ? ' talking' : ''}${focused ? ' focused' : ''}${cameraStream ? ' has-camera' : ''}`}
       style={{ '--tile-tint': color } as CSSProperties}
       onClick={onFocus}
+      onContextMenu={(e) => {
+        if (onContextMenu) {
+          e.preventDefault();
+          e.stopPropagation();
+          onContextMenu(e);
+        }
+      }}
       title={user.nickname}
     >
-      <span className="dvoice-tile-avatar">
-        <img src={user.avatarData} alt="" />
-      </span>
+      {cameraStream ? (
+        <CameraVideoTile stream={cameraStream} mirrored={mirrored} />
+      ) : (
+        <span className="dvoice-tile-avatar">
+          <img src={user.avatarData} alt="" />
+        </span>
+      )}
       <span className="dvoice-tile-name">
-        {muted ? (
+        {deafened ? (
+          <svg className="dvoice-tile-mute" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M2.7 3.7 1.3 5.1 4.4 8.2A9 9 0 0 0 3 13v4a3 3 0 0 0 3 3h1v-7H5v-1a7 7 0 0 1 .9-3.4l13 13 1.4-1.4L2.7 3.7zM12 4a9 9 0 0 1 9 9v4a3 3 0 0 1-1.6 2.6L17 17.2V13h2a7 7 0 0 0-9.3-6.6L8.1 4.8A9 9 0 0 1 12 4z"/></svg>
+        ) : muted ? (
           <svg className="dvoice-tile-mute" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M19 11h-1.7c0 .74-.16 1.43-.43 2.05l1.23 1.23c.56-.98.9-2.09.9-3.28zM4.41 2.86 3 4.27l6 6V11c0 1.66 1.34 3 3 3 .23 0 .44-.03.65-.08l1.66 1.66c-.71.33-1.5.52-2.31.52-2.76 0-5.3-2.1-5.3-5.1H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c.91-.13 1.77-.45 2.54-.9l4.19 4.18 1.41-1.41L4.41 2.86z"/></svg>
         ) : null}
         <UserName user={user} />
@@ -162,16 +209,25 @@ export function VoiceStage({ language, currentUser, channelName, voiceRoom, toke
 
   // Build every tile: participants first, then screen shares.
   type Tile =
-    | { id: string; kind: 'person'; user: PublicUser; talking: boolean; muted: boolean }
+    | { id: string; kind: 'person'; user: PublicUser; talking: boolean; muted: boolean; deafened: boolean; cameraStream?: MediaStream | null; isSelf?: boolean }
     | { id: string; kind: 'screen'; stream: MediaStream; label: string };
   const tiles = useMemo<Tile[]>(() => {
-    const list: Tile[] = voiceRoom.participants.map((p) => ({
-      id: `person:${p.userId}`,
-      kind: 'person',
-      user: p.user,
-      talking: voiceRoom.talkingIds.has(p.userId),
-      muted: Boolean(p.muted)
-    }));
+    const list: Tile[] = voiceRoom.participants.map((p) => {
+      const isSelf = p.userId === currentUser.id;
+      const cameraStream = isSelf
+        ? (voiceRoom.cameraActive ? voiceRoom.localCameraStream : null)
+        : (voiceRoom.remoteCameras.get(p.userId) ?? null);
+      return {
+        id: `person:${p.userId}`,
+        kind: 'person',
+        user: p.user,
+        talking: voiceRoom.talkingIds.has(p.userId),
+        muted: Boolean(p.muted),
+        deafened: Boolean(p.deafened),
+        cameraStream,
+        isSelf
+      };
+    });
     voiceRoom.remoteVideo.forEach((stream, userId) => {
       const p = voiceRoom.participants.find((x) => x.userId === userId);
       list.push({ id: `screen:${userId}`, kind: 'screen', stream, label: p?.user.nickname ?? '' });
@@ -181,7 +237,7 @@ export function VoiceStage({ language, currentUser, channelName, voiceRoom, toke
     }
     return list;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [voiceRoom.participants, voiceRoom.remoteVideo, voiceRoom.localScreenStream, voiceRoom.talkingIds, currentUser.nickname]);
+  }, [voiceRoom.participants, voiceRoom.remoteVideo, voiceRoom.remoteCameras, voiceRoom.localScreenStream, voiceRoom.localCameraStream, voiceRoom.cameraActive, voiceRoom.talkingIds, currentUser.nickname, currentUser.id]);
 
   // When a screen share appears, focus it (Discord spotlights an active share).
   const firstScreen = tiles.find((tile) => tile.kind === 'screen');
@@ -208,11 +264,27 @@ export function VoiceStage({ language, currentUser, channelName, voiceRoom, toke
     }
   }
 
+  const [volumeMenu, setVolumeMenu] = useState<{ user: PublicUser; anchor: { x: number; y: number } } | null>(null);
+
   function renderTile(tile: Tile) {
     if (tile.kind === 'person') {
       return (
-        <PersonTile key={tile.id} user={tile.user} talking={tile.talking} muted={tile.muted}
-          focused={focused?.id === tile.id} onFocus={() => setFocusId((id) => (id === tile.id ? null : tile.id))} />
+        <PersonTile
+          key={tile.id}
+          user={tile.user}
+          talking={tile.talking}
+          muted={tile.muted}
+          deafened={tile.deafened}
+          cameraStream={tile.cameraStream}
+          mirrored={tile.isSelf}
+          focused={focused?.id === tile.id}
+          onFocus={() => setFocusId((id) => (id === tile.id ? null : tile.id))}
+          onContextMenu={(e) => {
+            if (tile.user.id !== currentUser.id) {
+              setVolumeMenu({ user: tile.user, anchor: { x: e.clientX, y: e.clientY } });
+            }
+          }}
+        />
       );
     }
     return (
@@ -254,6 +326,13 @@ export function VoiceStage({ language, currentUser, channelName, voiceRoom, toke
               <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M2.7 3.7 1.3 5.1 4.4 8.2A9 9 0 0 0 3 13v4a3 3 0 0 0 3 3h1v-7H5v-1a7 7 0 0 1 .9-3.4l13 13 1.4-1.4L2.7 3.7zM12 4a9 9 0 0 1 9 9v4a3 3 0 0 1-1.6 2.6L17 17.2V13h2a7 7 0 0 0-9.3-6.6L8.1 4.8A9 9 0 0 1 12 4z"/></svg>
             ) : (
               <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M12 3a9 9 0 0 0-9 9v5a3 3 0 0 0 3 3h1v-7H5v-1a7 7 0 0 1 14 0v1h-2v7h1a3 3 0 0 0 3-3v-5a9 9 0 0 0-9-9z"/></svg>
+            )}
+          </button>
+          <button className={`dvoice-ctrl${voiceRoom.cameraActive ? ' active' : ''}`} type="button" onClick={() => void voiceRoom.toggleCamera()} title={voiceRoom.cameraActive ? t(language, 'turnOffCamera') : t(language, 'turnOnCamera')}>
+            {voiceRoom.cameraActive ? (
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M18 10.48V6c0-1.1-.9-2-2-2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2v-4.48l4 3.98v-11l-4 3.5z"/></svg>
+            ) : (
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="m3.27 2 18.73 18.73-1.28 1.27-2.72-2.72V18c0 .55-.45 1-1 1H5c-.55 0-1-.45-1-1V6.27L1.99 4.28 3.27 2zm14.73 7.73V6c0-.55-.45-1-1-1H7.73l2 2H17v7.27l1 1V13.5l4 4v-11l-4 3.23z"/></svg>
             )}
           </button>
           <button className={`dvoice-ctrl${voiceRoom.sharingScreen ? ' active' : ''}`} type="button" onClick={() => void voiceRoom.requestScreenShare()} title={voiceRoom.sharingScreen ? t(language, 'stopScreenShare') : t(language, 'shareScreen')}>
@@ -331,29 +410,47 @@ export function VoiceStage({ language, currentUser, channelName, voiceRoom, toke
             })}
           </div>
           <form className="messenger-compose dvoice-chat-compose" onSubmit={(e) => { e.preventDefault(); send(); }}>
-            <div className="emoji-input-shell messenger-emoji-input">
-              <EmojiInlineInput ref={inputRef} className="emoji-inline-input messenger-input" value={draft} placeholder={`${t(language, 'voiceChat')} #${channelName}`}
-                onChange={(e) => setDraft(e.target.value)} />
-              <button
-                className="emoji-toggle inline chat-gif-toggle"
-                type="button"
-                aria-label="GIF"
-                onMouseDown={(event) => event.stopPropagation()}
-                onClick={(event) => { event.stopPropagation(); setPickerTab('gif'); setEmojiOpen((value) => !(value && pickerTab === 'gif')); }}
-              >
-                <GifIcon />
-              </button>
-              <div ref={emojiAnchorRef} className="emoji-host inline">
-                <button
-                  className="emoji-toggle inline"
-                  type="button"
-                  aria-label={t(language, 'emoji')}
-                  onMouseDown={(event) => event.stopPropagation()}
-                  onClick={(event) => { event.stopPropagation(); setPickerTab('emoji'); setEmojiOpen((value) => !(value && pickerTab === 'emoji')); }}
-                >
-                  <EmojiToggleIcon />
-                </button>
-                {emojiOpen ? <EmojiPicker language={language} enlarged initialTab={pickerTab} anchorRef={emojiAnchorRef} placement="top-end" onSelect={insertEmoji} onSelectGif={sendGif} onClose={() => setEmojiOpen(false)} token={token} currentUser={currentUser} /> : null}
+            <div className="messenger-compose-row">
+              <div className="messenger-input-shell">
+                <EmojiInlineInput ref={inputRef} className="emoji-inline-input messenger-chat-inline-input" value={draft} placeholder={`${t(language, 'voiceChat')} #${channelName}`}
+                  onChange={(e) => setDraft(e.target.value)} />
+                <div ref={emojiAnchorRef} className="messenger-input-actions">
+                  <button
+                    className="emoji-toggle inline chat-gif-toggle"
+                    type="button"
+                    aria-label="GIF"
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      if (emojiOpen && pickerTab === 'gif') {
+                        setEmojiOpen(false);
+                      } else {
+                        setPickerTab('gif');
+                        setEmojiOpen(true);
+                      }
+                    }}
+                  >
+                    <GifIcon />
+                  </button>
+                  <button
+                    className="emoji-toggle inline"
+                    type="button"
+                    aria-label={t(language, 'emoji')}
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      if (emojiOpen && pickerTab === 'emoji') {
+                        setEmojiOpen(false);
+                      } else {
+                        setPickerTab('emoji');
+                        setEmojiOpen(true);
+                      }
+                    }}
+                  >
+                    <EmojiToggleIcon />
+                  </button>
+                  {emojiOpen ? <EmojiPicker language={language} enlarged initialTab={pickerTab} anchorRef={emojiAnchorRef} placement="top-end" onSelect={insertEmoji} onSelectGif={sendGif} onClose={() => setEmojiOpen(false)} token={token} currentUser={currentUser} /> : null}
+                </div>
               </div>
             </div>
             {/* Submit on Enter; hidden submit keeps form submission working without a send button. */}
@@ -373,6 +470,15 @@ export function VoiceStage({ language, currentUser, channelName, voiceRoom, toke
           </button>
         </div>,
         document.body
+      ) : null}
+
+      {volumeMenu ? (
+        <UserVolumePopover
+          user={volumeMenu.user}
+          anchor={volumeMenu.anchor}
+          language={language}
+          onClose={() => setVolumeMenu(null)}
+        />
       ) : null}
     </div>
   );

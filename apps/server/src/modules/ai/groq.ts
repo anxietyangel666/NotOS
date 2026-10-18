@@ -1,29 +1,30 @@
-// Shared Groq chat-completions client used by the AI Chat routes and other
-// AI-powered features (channel summaries, translation, transcription).
+// Shared AI chat-completions client (AnyModel / OpenAI-compatible) used by
+// the AI Chat routes, channel summaries, translation, and assistants.
 import { config } from '../../config.js';
 import { HttpError } from '../../http/errors.js';
 
-const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
-
-export async function callGroq(
+export async function callAi(
   systemPrompt: string,
-  messages: Array<{ role: string; content: string }>,
-  // Optional model override. Defaults to the main AI Chat model; the translate
-  // route passes the dedicated translation model instead.
+  messages: Array<{ role: string; content: string | any[] }>,
+  // Optional model override. Defaults to the main AI Chat model (gcli/grok-4.7);
+  // the translate route passes the dedicated translation model instead.
   options: { model?: string; temperature?: number } = {}
 ) {
-  if (!config.groqApiKey) {
+  const apiKey = config.aiApiKey;
+  if (!apiKey) {
     throw new HttpError(503, 'AI is not configured on this server', 'AI_NOT_CONFIGURED');
   }
 
-  const response = await fetch(GROQ_URL, {
+  const endpoint = config.aiChatEndpoint || `${config.aiBaseUrl}/chat/completions`;
+
+  const response = await fetch(endpoint, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${config.groqApiKey}`
+      Authorization: `Bearer ${apiKey}`
     },
     body: JSON.stringify({
-      model: options.model ?? config.groqModel,
+      model: options.model ?? config.aiModel,
       messages: [{ role: 'system', content: systemPrompt }, ...messages],
       temperature: options.temperature ?? 0.7
     })
@@ -31,7 +32,7 @@ export async function callGroq(
 
   if (!response.ok) {
     const detail = await response.text().catch(() => '');
-    console.error('Groq request failed', response.status, detail);
+    console.error('AnyModel request failed', response.status, detail);
     throw new HttpError(502, 'AI provider request failed', 'AI_UPSTREAM_ERROR');
   }
 
@@ -44,3 +45,6 @@ export async function callGroq(
   }
   return reply;
 }
+
+// Backwards-compatible alias for existing imports
+export const callGroq = callAi;

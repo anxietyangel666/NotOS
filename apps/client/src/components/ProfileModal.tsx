@@ -18,7 +18,8 @@ import { UserStatusPanel } from './UserStatusPanel';
 import { ProfilePreviewCard } from './ProfilePreviewCard';
 import { currentActivityProgressMs, useUserActivities } from './UserActivityStatus';
 import { assetUrl } from '../utils/assets';
-import { levelFromXp, tierKeyForLevel } from '../utils/level';
+import { LevelRing } from './LevelRing';
+import { ProfileVoiceBio } from './ProfileVoiceBio';
 
 const CONNECTION_ICONS = {
   spotify: assetUrl('Icons/spotify.png'),
@@ -564,6 +565,16 @@ export function ProfileModal({
           ...popoverPos
         }}
         onClick={(event) => event.stopPropagation()}
+        onContextMenu={isSelf ? undefined : (event) => {
+          const target = event.target as HTMLElement | null;
+          if (target?.closest('button, input, textarea, a, .profile-status-bubble.editable')) return;
+          event.preventDefault();
+          event.stopPropagation();
+          setAvatarMenu({
+            x: Math.min(event.clientX, window.innerWidth - 220),
+            y: Math.min(event.clientY, window.innerHeight - 120)
+          });
+        }}
       >
         <div
           className="profile-banner"
@@ -624,6 +635,7 @@ export function ProfileModal({
                 }}
               >
                 <img src={user.avatarData} alt="" draggable={false} />
+                <LevelRing xp={profileXp} language={language} />
                 <span
                   ref={presenceAnchorRef}
                   className={profilePresenceClass}
@@ -653,6 +665,13 @@ export function ProfileModal({
                 </div>
               ) : null}
             </div>
+            <ProfileVoiceBio
+              userId={user.id}
+              isSelf={isSelf}
+              language={language}
+              initialBioUrl={user.voiceBio}
+              token={token}
+            />
             <div className="profile-info">
               <div className="profile-name-row">
                 <h3>
@@ -679,7 +698,7 @@ export function ProfileModal({
                           <button
                             type="button"
                             className="profile-group-role-remove"
-                            aria-label={language === 'ru' ? 'Снять роль' : language === 'uk' ? 'Зняти роль' : 'Remove role'}
+                            aria-label={language === 'ru' ? 'Снять роль' : language === 'uk' ? 'Зняти роль' : language === 'zh' ? '移除角色' : language === 'zh-TW' ? '移除身分組' : 'Remove role'}
                             disabled={removingGroupRoleId === role.id}
                             onClick={(event) => {
                               event.preventDefault();
@@ -708,21 +727,6 @@ export function ProfileModal({
                   </small>
                 ) : null}
               </div>
-
-              {(() => {
-                const levelInfo = levelFromXp(profileXp);
-                return (
-                  <div className="profile-level-card" title={t(language, tierKeyForLevel(levelInfo.level))}>
-                    <div className="profile-level-row">
-                      <span className="profile-level-label">{t(language, 'levelLabel')} {levelInfo.level}</span>
-                      <span className="profile-level-xp">{levelInfo.currentXp} / {levelInfo.nextLevelXp} XP</span>
-                    </div>
-                    <div className="profile-level-track">
-                      <div className="profile-level-fill" style={{ width: `${Math.max(2, Math.round(levelInfo.progress * 100))}%` }} />
-                    </div>
-                  </div>
-                );
-              })()}
 
               {activities.length > 0 ? (
                 <div className="profile-activities">
@@ -817,7 +821,7 @@ export function ProfileModal({
                     className="secondary-action"
                     onClick={toggleFullProfile}
                   >
-                    {language === 'ru' ? 'Посмотреть полный профиль' : language === 'uk' ? 'Переглянути повний профіль' : 'View full profile'}
+                    {language === 'ru' ? 'Посмотреть полный профиль' : language === 'uk' ? 'Переглянути повний профіль' : language === 'zh' ? '查看完整资料' : language === 'zh-TW' ? '檢視完整個人檔案' : 'View full profile'}
                   </button>
                 </div>
               ) : null}
@@ -829,7 +833,7 @@ export function ProfileModal({
                   aria-expanded={connectionsExpanded}
                   onClick={() => setConnectionsExpanded((value) => !value)}
                 >
-                  <span>{language === 'ru' ? 'Подключения' : language === 'uk' ? 'Підключення' : 'Connections'}</span>
+                  <span>{t(language, 'connectionsSettings')}</span>
                   <strong>{profileConnections.length}</strong>
                 </button>
                 <div className="profile-connections-list" aria-hidden={!connectionsExpanded}>
@@ -1081,6 +1085,18 @@ export function ProfileModal({
           >
             {t(language, 'copyProfileLink')}
           </button>
+          {onOpenDesktop ? (
+            <button
+              type="button"
+              onClick={() => {
+                setMoreMenuOpen(false);
+                onClose();
+                onOpenDesktop(user);
+              }}
+            >
+              {t(language, 'viewDesktop')}
+            </button>
+          ) : null}
           <div
             className="profile-more-menu-item-wrap"
             onMouseEnter={() => setInviteMenuOpen(true)}
@@ -1129,7 +1145,12 @@ export function ProfileModal({
       {avatarMenu ? createPortal(
         <div
           className="context-menu messenger-user-menu"
-          style={{ left: avatarMenu.x, top: avatarMenu.y }}
+          style={{
+            position: 'fixed',
+            left: avatarMenu.x,
+            top: avatarMenu.y,
+            zIndex: Math.max(100050, (zIndex ?? 1000) + 50)
+          }}
           onMouseDown={(event) => event.stopPropagation()}
         >
           <button type="button" onClick={() => { if (!isSelf) setExpanded(true); setAvatarMenu(null); }}>
@@ -1146,7 +1167,12 @@ export function ProfileModal({
       {mutualFriendMenu ? createPortal(
         <div
           className="context-menu messenger-user-menu"
-          style={{ left: mutualFriendMenu.x, top: mutualFriendMenu.y }}
+          style={{
+            position: 'fixed',
+            left: mutualFriendMenu.x,
+            top: mutualFriendMenu.y,
+            zIndex: Math.max(100050, (zIndex ?? 1000) + 50)
+          }}
           onMouseDown={(event) => event.stopPropagation()}
         >
           <button type="button" onClick={() => {

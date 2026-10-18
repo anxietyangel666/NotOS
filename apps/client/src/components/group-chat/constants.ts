@@ -12,14 +12,40 @@ export const GROUP_TYPING_STALE_MS = 4500;
 export const MENTION_EVERYONE_PERMISSION = 'MentionEveryone';
 export const MENTIONABLE_PERMISSION = 'Mentionable';
 export const GROUP_IDENTITY_PERMISSIONS = [
+  'Administrator',
+  'ManageServer',
   'ManageRoles',
   'DeleteAnyMessage',
   'ManageChannels',
   'ManageInvites',
   'KickMembers',
+  'BanMembers',
   'ManageMessages'
 ];
 export const EVERYONE_ROLE_ID = '@everyone';
+export const ROLE_COLOR_PRESETS = ['#1abc9c', '#2ecc71', '#3498db', '#9b59b6', '#e91e63', '#f1c40f', '#e67e22', '#e74c3c', '#95a5a6', '#607d8b', '#11806a', '#1f8b4c', '#206694', '#71368a', '#ad1457', '#c27c0e'];
+export const ROLE_PERMISSION_GROUPS = [
+  {
+    id: 'general',
+    titleKey: 'permGroupGeneral' as const,
+    permissions: ['Administrator', 'ViewChannel', 'ManageChannels', 'ManageRoles', 'ManageServer', 'CreateInvite', 'ManageInvites', 'ChangeNickname', 'ManageNicknames']
+  },
+  {
+    id: 'membership',
+    titleKey: 'permGroupMembership' as const,
+    permissions: ['KickMembers', 'BanMembers', 'TimeoutMembers', 'MuteMembers']
+  },
+  {
+    id: 'text',
+    titleKey: 'permGroupText' as const,
+    permissions: ['SendMessages', 'AttachFiles', 'AddReactions', 'UseExternalEmojis', 'MentionEveryone', 'ManageMessages', 'PinMessages', 'BypassSlowmode', 'ReadMessageHistory', 'SendVoiceMessages', 'SendVideoCircles', 'CreatePolls', 'DeleteAnyMessage']
+  },
+  {
+    id: 'voice',
+    titleKey: 'permGroupVoice' as const,
+    permissions: ['Connect', 'Speak', 'Stream', 'UseCamera', 'PrioritySpeaker', 'MuteMembers', 'DeafenMembers']
+  }
+] as const;
 
 export const CHANNEL_PERMISSION_GROUPS = [
   {
@@ -29,7 +55,12 @@ export const CHANNEL_PERMISSION_GROUPS = [
   {
     title: 'Text Channel Permissions',
     textOnly: true,
-    permissions: ['SendMessages', 'AttachFiles', 'AddReactions', 'UseExternalEmojis', 'MentionEveryone', 'ManageMessages', 'PinMessages', 'BypassSlowmode', 'ReadMessageHistory', 'SendVoiceMessages', 'SendVideoCircles', 'CreatePolls']
+    permissions: ['SendMessages', 'AttachFiles', 'EmbedLinks', 'AddReactions', 'UseExternalEmojis', 'MentionEveryone', 'ManageMessages', 'PinMessages', 'BypassSlowmode', 'ReadMessageHistory', 'SendVoiceMessages', 'SendVideoCircles', 'CreatePolls', 'CreatePublicThreads', 'UseApplicationCommands']
+  },
+  {
+    title: 'Voice Channel Permissions',
+    voiceOnly: true,
+    permissions: ['Connect', 'Speak', 'Stream', 'UseCamera', 'PrioritySpeaker', 'MuteMembers', 'DeafenMembers']
   }
 ] as const;
 

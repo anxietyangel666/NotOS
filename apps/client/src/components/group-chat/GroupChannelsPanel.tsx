@@ -2,16 +2,17 @@
 // group header with the quick nameplate popup, and the message search panel.
 // Extracted verbatim from GroupChatView.tsx — state and handlers still live in
 // the parent and arrive via props.
-import { Fragment, type Dispatch, type DragEvent, type MutableRefObject, type SetStateAction } from 'react';
+import { Fragment, useState, type Dispatch, type DragEvent, type MutableRefObject, type SetStateAction } from 'react';
 import { createPortal } from 'react-dom';
 import type { Group, GroupChannel, GroupFolder, GroupMessage, Language, NamePlate, PublicUser } from '../../api/types';
 import { nameplateToCss } from '../../api/types';
 import type { VoiceRoom } from '../../hooks/use-voice-room';
 import { t } from '../../i18n';
 import { formatMessageDate } from '../../utils/message-date';
-import { MicMuteIcon, ScreenShareIcon } from '../PlayerIcons';
+import { CameraActiveIcon, DeafenedIcon, MicMuteIcon, ScreenShareIcon } from '../PlayerIcons';
 import { UserName } from '../UserName';
 import { isVideoCircleAttachment, isVoiceAttachment } from '../VoiceMessage';
+import { UserVolumePopover } from '../UserVolumePopover';
 
 type ChannelMenuState = { x: number; y: number; kind: 'channel' | 'folder'; id: string; name: string } | null;
 type DeleteTargetState = { kind: 'channel' | 'folder'; id: string; name: string } | null;
@@ -137,6 +138,9 @@ export function GroupChannelsPanel({
     const isFeed = channel.type === 'feed';
     const inThisVoice = isVoice && voiceRoom?.activeChannelId === channel.id;
     const voiceParticipants = isVoice ? (voiceRoom?.channelParticipants.get(channel.id) ?? []) : [];
+    if (isVoice && channel.settings?.hideInactive && voiceParticipants.length === 0 && !inThisVoice && !canManageChannels) {
+      return null;
+    }
     const isActive = isVoice ? inThisVoice : activeChannel === channel.id;
     return (
       <button key={channel.id}
@@ -164,7 +168,7 @@ export function GroupChannelsPanel({
         {isVoice && channel.userLimit != null ? (
           <span className="group-channel-count">{voiceParticipants.length}/{channel.userLimit}</span>
         ) : null}
-        {true ? (
+        {canManageChannels ? (
           <span className="group-channel-gear" title={t(language, 'channelSettings')}
             onClick={(e) => { e.stopPropagation(); openChannelSettings(channel.id); }}>
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
@@ -177,6 +181,8 @@ export function GroupChannelsPanel({
     );
   }
 
+  const [volumeMenu, setVolumeMenu] = useState<{ user: PublicUser; anchor: { x: number; y: number } } | null>(null);
+
   // Bottom participant list for a voice channel (shown under it when occupied).
   function renderVoiceParticipants(channelId: string) {
     const list = voiceRoom?.channelParticipants.get(channelId) ?? [];
@@ -186,11 +192,35 @@ export function GroupChannelsPanel({
         {list.map((p) => (
           <div key={p.userId} className={`voice-participant ${voiceRoom?.talkingIds.has(p.userId) ? 'talking' : ''}`}
             title={p.user.nickname}
-            onClick={() => { if (voiceRoom?.activeChannelId === channelId) setVoiceStageOpen(true); }}>
+            onClick={() => { if (voiceRoom?.activeChannelId === channelId) setVoiceStageOpen(true); }}
+            onContextMenu={(e) => {
+              if (p.userId !== currentUser.id) {
+                e.preventDefault();
+                e.stopPropagation();
+                setVolumeMenu({ user: p.user, anchor: { x: e.clientX, y: e.clientY } });
+              }
+            }}>
             <img src={p.user.avatarData} alt="" />
             <span className="voice-participant-name"><UserName user={p.user} /></span>
-            {p.muted ? <span className="voice-participant-muted"><MicMuteIcon size={14} /></span> : null}
-            {p.screen ? <span className="voice-participant-screen"><ScreenShareIcon size={14} /></span> : null}
+            {p.deafened ? (
+              <span className="voice-participant-deafened" title={t(language, 'deafen')}>
+                <DeafenedIcon size={14} />
+              </span>
+            ) : p.muted ? (
+              <span className="voice-participant-muted" title={t(language, 'mute')}>
+                <MicMuteIcon size={14} />
+              </span>
+            ) : null}
+            {p.camera ? (
+              <span className="voice-participant-camera" title={t(language, 'cameraActive')}>
+                <CameraActiveIcon size={14} />
+              </span>
+            ) : null}
+            {p.screen ? (
+              <span className="voice-participant-screen" title={t(language, 'shareScreen')}>
+                <ScreenShareIcon size={14} />
+              </span>
+            ) : null}
           </div>
         ))}
       </div>
@@ -358,7 +388,7 @@ export function GroupChannelsPanel({
                 <>
                   <button type="button" onClick={() => { setCreateChannelType('text'); setShowCreateChannel(true); setPlatePopupOpen(false); }}>{t(language, 'createChannel')}</button>
                   <button type="button" onClick={() => { setCreateChannelType('voice'); setShowCreateChannel(true); setPlatePopupOpen(false); }}>{t(language, 'createVoiceChannel')}</button>
-                  <button type="button" onClick={() => { setCreateChannelType('feed'); setShowCreateChannel(true); setPlatePopupOpen(false); }}>{language === 'ru' ? 'Создать Feed' : 'Create Feed'}</button>
+                  <button type="button" onClick={() => { setCreateChannelType('feed'); setShowCreateChannel(true); setPlatePopupOpen(false); }}>{t(language, 'createFeed')}</button>
                   <button type="button" onClick={() => { setShowCreateFolder(true); setPlatePopupOpen(false); }}>{t(language, 'createFolder')}</button>
                 </>
               ) : null}
@@ -433,6 +463,15 @@ export function GroupChannelsPanel({
       </div>
       </>
       )}
+
+      {volumeMenu ? (
+        <UserVolumePopover
+          user={volumeMenu.user}
+          anchor={volumeMenu.anchor}
+          language={language}
+          onClose={() => setVolumeMenu(null)}
+        />
+      ) : null}
     </aside>
   );
 }

@@ -59,10 +59,21 @@ type WatchChatMessage = {
   senderId: string;
   senderNickname: string;
   senderAvatar: string;
+  senderNameStyle?: unknown;
   body: string;
   // Optional GIF attachment (Tenor url), mirroring the messenger composer.
   gifUrl?: string;
   createdAt: string;
+};
+
+export type WatchQueueItem = {
+  id: string;
+  source: WatchSource;
+  addedByUserId: string;
+  addedByNickname: string;
+  addedByNameStyle?: unknown;
+  thumbnailUrl?: string;
+  createdAt: number;
 };
 
 type WatchRoom = {
@@ -80,6 +91,7 @@ type WatchRoom = {
   createdAt: number;
   members: Map<string, WatchMember>;
   player: PlayerState;
+  queue: WatchQueueItem[];
   chat: WatchChatMessage[];
 };
 
@@ -168,6 +180,7 @@ function roomSnapshot(room: WatchRoom) {
     controlMode: room.controlMode,
     members: publicMembers(room),
     player: room.player,
+    queue: room.queue,
     chat: room.chat
   };
 }
@@ -308,6 +321,7 @@ export function registerWatchHandlers(io: Server, socket: Socket, userId: string
       createdAt: Date.now(),
       members: new Map(),
       player: { source, playing: false, position: 0, updatedAt: Date.now() },
+      queue: [],
       chat: []
     };
     rooms.set(roomId, room);
@@ -381,6 +395,78 @@ export function registerWatchHandlers(io: Server, socket: Socket, userId: string
     room.player = { source, playing: true, position: 0, updatedAt: Date.now() };
     io.to(`watch:${room.id}`).emit('watch:player', { roomId: room.id, player: room.player });
     broadcastLobby(io);
+  });
+
+  socket.on('watch:addToQueue', (payload: { roomId?: unknown; source?: unknown }) => {
+    if (typeof payload?.roomId !== 'string') return;
+    const room = rooms.get(payload.roomId);
+    if (!room || !room.members.has(userId)) return;
+    const source = sanitizeSource(payload.source);
+    if (!source) return;
+    const member = room.members.get(userId);
+    const addedByNickname = member?.user.nickname ?? 'Гость';
+    source.addedBy = addedByNickname;
+    let thumbnailUrl: string | undefined;
+    if (source.kind === 'youtube') {
+      thumbnailUrl = `https://img.youtube.com/vi/${source.value}/mqdefault.jpg`;
+    }
+    const item: WatchQueueItem = {
+      id: randomUUID(),
+      source,
+      addedByUserId: userId,
+      addedByNickname,
+      addedByNameStyle: member?.user.nameStyle ?? null,
+      thumbnailUrl,
+      createdAt: Date.now()
+    };
+    room.queue.push(item);
+    io.to(`watch:${room.id}`).emit('watch:queue', { roomId: room.id, queue: room.queue });
+  });
+
+  socket.on('watch:removeFromQueue', (payload: { roomId?: unknown; itemId?: unknown }) => {
+    if (typeof payload?.roomId !== 'string' || typeof payload?.itemId !== 'string') return;
+    const room = rooms.get(payload.roomId);
+    if (!room || !room.members.has(userId)) return;
+    const item = room.queue.find((i) => i.id === payload.itemId);
+    if (!item) return;
+    if (!canControl(room, userId) && item.addedByUserId !== userId) return;
+    room.queue = room.queue.filter((i) => i.id !== payload.itemId);
+    io.to(`watch:${room.id}`).emit('watch:queue', { roomId: room.id, queue: room.queue });
+  });
+
+  socket.on('watch:playQueueItem', (payload: { roomId?: unknown; itemId?: unknown }) => {
+    if (typeof payload?.roomId !== 'string' || typeof payload?.itemId !== 'string') return;
+    const room = rooms.get(payload.roomId);
+    if (!room || !room.members.has(userId)) return;
+    if (!canControl(room, userId)) return;
+    const idx = room.queue.findIndex((i) => i.id === payload.itemId);
+    if (idx === -1) return;
+    const [item] = room.queue.splice(idx, 1);
+    room.player = { source: item.source, playing: true, position: 0, updatedAt: Date.now() };
+    io.to(`watch:${room.id}`).emit('watch:player', { roomId: room.id, player: room.player });
+    io.to(`watch:${room.id}`).emit('watch:queue', { roomId: room.id, queue: room.queue });
+    broadcastLobby(io);
+  });
+
+  socket.on('watch:playNextInQueue', (payload: { roomId?: unknown }) => {
+    if (typeof payload?.roomId !== 'string') return;
+    const room = rooms.get(payload.roomId);
+    if (!room || !room.members.has(userId)) return;
+    if (!canControl(room, userId) || room.queue.length === 0) return;
+    const item = room.queue.shift()!;
+    room.player = { source: item.source, playing: true, position: 0, updatedAt: Date.now() };
+    io.to(`watch:${room.id}`).emit('watch:player', { roomId: room.id, player: room.player });
+    io.to(`watch:${room.id}`).emit('watch:queue', { roomId: room.id, queue: room.queue });
+    broadcastLobby(io);
+  });
+
+  socket.on('watch:clearQueue', (payload: { roomId?: unknown }) => {
+    if (typeof payload?.roomId !== 'string') return;
+    const room = rooms.get(payload.roomId);
+    if (!room || !room.members.has(userId)) return;
+    if (!canControl(room, userId)) return;
+    room.queue = [];
+    io.to(`watch:${room.id}`).emit('watch:queue', { roomId: room.id, queue: room.queue });
   });
 
   socket.on('watch:control', (payload: { roomId?: unknown; playing?: unknown; position?: unknown }) => {
@@ -467,6 +553,7 @@ export function registerWatchHandlers(io: Server, socket: Socket, userId: string
       senderId: userId,
       senderNickname: member.user.nickname,
       senderAvatar: member.user.avatarData,
+      senderNameStyle: member.user.nameStyle ?? null,
       body,
       gifUrl,
       createdAt: new Date().toISOString()

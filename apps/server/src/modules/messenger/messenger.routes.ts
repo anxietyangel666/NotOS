@@ -72,8 +72,11 @@ import { createPoll, findPoll, pollMarker, setPollVotes, toPublicPoll, type Poll
 import { resolveGameCommand } from './games.js';
 import { isGroupMember, listGroupMemberIds } from '../../db/groups.js';
 import { transcribeAudioDataUrl } from '../ai/transcribe.js';
-import { consumeAiQuota } from '../../db/ai-quota.js';
+import { consumeAiQuota, getAiQuotaStatus } from '../../db/ai-quota.js';
+import { getAiSettings } from '../../db/ai-settings.js';
+import { callAi } from '../ai/groq.js';
 import { config } from '../../config.js';
+import { detectPlayerFromUrl } from './player-detector.js';
 
 const friendSchema = z.object({
   userId: z.string().uuid()
@@ -208,11 +211,7 @@ async function emitFriendUpdates(io: Server, ...userIds: string[]) {
 }
 
 function toCompactGroup(group: Parameters<typeof toPublicGroup>[0]) {
-  const publicGroup = toPublicGroup(group);
-  return {
-    ...publicGroup,
-    nameplate: publicGroup.nameplate?.type === 'image' ? null : publicGroup.nameplate
-  };
+  return toPublicGroup(group);
 }
 
 export function createMessengerRouter(io: Server) {
@@ -240,6 +239,16 @@ export function createMessengerRouter(io: Server) {
         }
         throw error;
       }
+    })
+  );
+
+  router.post(
+    '/watch-together/detect-player',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const { url } = z.object({ url: z.string().trim().min(1).max(2048) }).parse(req.body);
+      const result = await detectPlayerFromUrl(url);
+      res.json({ result: result ?? { detected: false, kind: 'embed', value: url, title: '', originalUrl: url } });
     })
   );
 
@@ -514,7 +523,6 @@ export function createMessengerRouter(io: Server) {
     asyncHandler<AuthenticatedRequest>(async (req, res) => {
       const userId = z.string().uuid().parse(req.params.userId);
       const input = conversationBackgroundSchema.parse(req.body ?? {});
-      if (userId === req.auth.userId) throw new HttpError(400, 'Cannot update your own conversation', 'INVALID_RECIPIENT');
       if (!(await userExistsById(userId))) throw new HttpError(404, 'User not found', 'USER_NOT_FOUND');
       if (await blockExistsBetween(req.auth.userId, userId)) {
         throw new HttpError(403, 'You cannot update this conversation', 'USER_BLOCKED');
@@ -529,8 +537,8 @@ export function createMessengerRouter(io: Server) {
       );
       const message = toPublicMessage(created);
       const publicSettings = toPublicConversationSettings(settings);
-      const ownPayload = { userId, backgroundData: publicSettings.backgroundData, updatedBy: publicSettings.updatedBy, updatedAt: publicSettings.updatedAt };
-      const peerPayload = { userId: req.auth.userId, backgroundData: publicSettings.backgroundData, updatedBy: publicSettings.updatedBy, updatedAt: publicSettings.updatedAt };
+      const ownPayload = { userId, backgroundData: input.backgroundData ? 'set' : '', updatedBy: publicSettings.updatedBy, updatedAt: publicSettings.updatedAt };
+      const peerPayload = { userId: req.auth.userId, backgroundData: input.backgroundData ? 'set' : '', updatedBy: publicSettings.updatedBy, updatedAt: publicSettings.updatedAt };
 
       io.to(req.auth.userId).emit('messenger:conversationBackgroundChanged', ownPayload);
       io.to(userId).emit('messenger:conversationBackgroundChanged', peerPayload);
@@ -550,7 +558,6 @@ export function createMessengerRouter(io: Server) {
       const input = z.object({
         ttlSeconds: z.number().int().refine((value) => ALLOWED_MESSAGE_TTLS.includes(value), { message: 'Unsupported TTL' })
       }).parse(req.body ?? {});
-      if (userId === req.auth.userId) throw new HttpError(400, 'Cannot update your own conversation', 'INVALID_RECIPIENT');
       if (!(await userExistsById(userId))) throw new HttpError(404, 'User not found', 'USER_NOT_FOUND');
       if (await blockExistsBetween(req.auth.userId, userId)) {
         throw new HttpError(403, 'You cannot update this conversation', 'USER_BLOCKED');
@@ -562,9 +569,11 @@ export function createMessengerRouter(io: Server) {
       const publicSettings = toPublicConversationSettings(settings);
 
       io.to(req.auth.userId).emit('messenger:conversationTtlChanged', { userId, ttlSeconds: input.ttlSeconds, updatedBy: req.auth.userId });
-      io.to(userId).emit('messenger:conversationTtlChanged', { userId: req.auth.userId, ttlSeconds: input.ttlSeconds, updatedBy: req.auth.userId });
       io.to(req.auth.userId).emit('messenger:message', { message });
-      io.to(userId).emit('messenger:message', { message });
+      if (userId !== req.auth.userId) {
+        io.to(userId).emit('messenger:conversationTtlChanged', { userId: req.auth.userId, ttlSeconds: input.ttlSeconds, updatedBy: req.auth.userId });
+        io.to(userId).emit('messenger:message', { message });
+      }
       res.json({ settings: publicSettings, message });
     })
   );
@@ -992,10 +1001,7 @@ export function createMessengerRouter(io: Server) {
         senderGroup = { id: group.id, name: group.name, avatarData: group.avatar_data };
       }
 
-      // Disappearing messages: apply the conversation's TTL (Saved Messages
-      // has no settings row and never expires).
-      const conversationSettings = isSelfMessage ? null : await getConversationSettings(req.auth.userId, input.recipientId);
-      const messageTtlSeconds = conversationSettings?.message_ttl_seconds ?? 0;
+      const conversationSettings = await getConversationSettings(req.auth.userId, input.recipientId);
 
       // Game commands (/roll, /coin, ...) are resolved server-side so the
       // outcome is authoritative; the body becomes a [game:...] marker.
@@ -1015,6 +1021,9 @@ export function createMessengerRouter(io: Server) {
       }
 
       const awaitingOnline = Boolean(input.sendWhenOnline) && !isSelfMessage && !scheduledAt;
+      const messageTtlSeconds = (scheduledAt || awaitingOnline)
+        ? 0
+        : (conversationSettings?.message_ttl_seconds ?? 0);
 
       const created = await createMessage(
         req.auth.userId, input.recipientId, input.body, input.image, input.replyTo,
@@ -1072,6 +1081,119 @@ export function createMessengerRouter(io: Server) {
         io.to(req.auth.userId).emit('messenger:messageUpdated', { message: withPreview });
         if (!isSelfMessage) io.to(input.recipientId).emit('messenger:messageUpdated', { message: withPreview });
       })().catch(() => undefined);
+
+      // If replying to an AI-generated message, trigger the AI follow-up response
+      if (input.replyTo) {
+        void (async () => {
+          try {
+            const targetRes = await pool.query<MessageRecord>(
+              'SELECT * FROM messages WHERE id = $1 AND deleted_at IS NULL',
+              [input.replyTo]
+            );
+            const targetMsg = targetRes.rows[0];
+            if (!targetMsg || !targetMsg.ai_generated) return;
+
+            const replierUserId = req.auth.userId;
+            const replierUser = await findUserById(replierUserId);
+            if (!replierUser) return;
+
+            const isDev = replierUser.role === 'dev';
+            const quota = await getAiQuotaStatus(replierUserId, isDev);
+            if (!isDev && (quota.remaining ?? 0) <= 0) return;
+
+            const aiOwnerId = targetMsg.sender_id;
+            const aiOwner = await findUserById(aiOwnerId);
+            const aiOwnerNickname = aiOwner?.nickname || 'владелец';
+
+            const aiSettings = await getAiSettings(aiOwnerId);
+            const assistantName = targetMsg.ai_name || aiSettings.assistant_name?.trim() || 'NotAI';
+            const assistantAvatarData = targetMsg.ai_avatar_data || aiSettings.assistant_avatar_data || '';
+
+            const isOwner = replierUserId === aiOwnerId;
+            const ownerContextText = isOwner
+              ? `Твой создатель и единственный владелец — @${aiOwnerNickname}. Сейчас твой создатель @${aiOwnerNickname} обратился к тебе в ответ на твою предыдущую реплику.`
+              : `Твой создатель и владелец — @${aiOwnerNickname}. Ты — персональный ИИ-ассистент пользователя @${aiOwnerNickname}. Сейчас в диалоге к тебе обратился собеседник @${replierUser.nickname} с ответом на твою реплику.`;
+
+            const otherDmUserId = isSelfMessage ? replierUserId : (aiOwnerId === replierUserId ? input.recipientId : aiOwnerId);
+
+            const recentMessages = await pool.query<MessageRecord>(
+              `
+                SELECT sender_id, body, ai_generated, ai_name FROM messages
+                WHERE LEAST(sender_id, recipient_id) = LEAST($1::uuid, $2::uuid)
+                  AND GREATEST(sender_id, recipient_id) = GREATEST($1::uuid, $2::uuid)
+                  AND deleted_at IS NULL AND scheduled_at IS NULL
+                  AND created_at <= $3
+                ORDER BY created_at DESC
+                LIMIT 10
+              `,
+              [replierUserId, otherDmUserId, created.created_at]
+            );
+            const conversationHistory = recentMessages.rows.reverse().map((m) => {
+              const author = m.ai_generated ? (m.ai_name || 'AI') : (m.sender_id === replierUserId ? replierUser.nickname : aiOwnerNickname);
+              return `${author}: ${m.body || '[attachment]'}`;
+            }).join('\n');
+
+            const systemPrompt = [
+              `You are ${assistantName}, a personal AI assistant in private chat.`,
+              ownerContextText,
+              `Persona: ${aiSettings.persona || 'friendly'}, Tone: ${aiSettings.tone || 'balanced'}, Response length: ${aiSettings.response_length || 'concise'}.`,
+              aiSettings.custom_instructions ? `Owner custom instructions: ${aiSettings.custom_instructions}` : '',
+              `You are replying to the message from @${replierUser.nickname}: "${created.body || '[attachment]'}"`,
+              `Recent conversation context:\n${conversationHistory}`,
+              'STRICT RULES:',
+              `1. Your reply MUST begin with @${replierUser.nickname} followed by a space.`,
+              '2. Keep your answer natural, human, conversational, and direct (1 to 3 short sentences). Do not use markdown titles, asterisks for bold headers, or bullet points.',
+              '3. Match the language of the conversation (Russian if Russian, Ukrainian if Ukrainian, English if English, etc.).',
+              '4. Do not wrap the message in quotes.',
+              '5. Be aware of who your owner is and who is currently talking to you.'
+            ].filter(Boolean).join('\n');
+
+            const replyText = await callAi(systemPrompt, [
+              { role: 'user', content: `Reply to @${replierUser.nickname}'s message: "${created.body || '[attachment]'}"` }
+            ]);
+
+            let cleanReply = replyText.trim();
+            if (!cleanReply.startsWith(`@${replierUser.nickname}`)) {
+              cleanReply = `@${replierUser.nickname} ${cleanReply.replace(/^@\S+\s*/, '')}`;
+            }
+
+            await consumeAiQuota(replierUserId, isDev);
+
+            const aiReplyMsg = await createMessage(
+              aiOwnerId,
+              isSelfMessage ? replierUserId : (aiOwnerId === replierUserId ? input.recipientId : replierUserId),
+              cleanReply,
+              undefined,
+              created.id,
+              null,
+              undefined,
+              messageTtlSeconds,
+              {
+                ai: {
+                  generated: true,
+                  name: assistantName,
+                  avatarData: assistantAvatarData
+                }
+              }
+            );
+
+            const publicAiMsg = await toPublicMessageEnriched(aiReplyMsg);
+            io.to(replierUserId).emit('messenger:message', { message: publicAiMsg });
+            if (!isSelfMessage && otherDmUserId !== replierUserId) {
+              io.to(otherDmUserId).emit('messenger:message', { message: publicAiMsg });
+            }
+            if (replierUserId !== aiOwnerId) {
+              io.to(replierUserId).emit('messenger:mention', {
+                kind: 'dm',
+                message: publicAiMsg,
+                sender: toPublicUserLite(aiOwner || replierUser)
+              });
+            }
+          } catch (err) {
+            console.error('[AI Auto-Reply Error in DM]', err);
+          }
+        })().catch(() => undefined);
+      }
     })
   );
 
@@ -1109,6 +1231,145 @@ export function createMessengerRouter(io: Server) {
       io.to(deleted.recipient_id).emit('messenger:messageDeleted', { message });
       io.to(deleted.sender_id).emit('messenger:messageDeleted', { message });
       res.json({ message });
+    })
+  );
+
+  router.post(
+    '/messages/:messageId/ai-reply',
+    requireAuth,
+    asyncHandler<AuthenticatedRequest>(async (req, res) => {
+      const messageId = z.string().uuid().parse(req.params.messageId);
+      const user = await findUserById(req.auth.userId);
+      if (!user) throw new HttpError(404, 'User not found', 'USER_NOT_FOUND');
+
+      const isDev = user.role === 'dev';
+      const quota = await getAiQuotaStatus(req.auth.userId, isDev);
+      if (!isDev && (quota.remaining ?? 0) <= 0) {
+        throw new HttpError(429, 'Daily AI request quota reached', 'AI_QUOTA_EXCEEDED');
+      }
+
+      const msgResult = await pool.query<MessageRecord>(
+        'SELECT * FROM messages WHERE id = $1 AND deleted_at IS NULL AND scheduled_at IS NULL',
+        [messageId]
+      );
+      const targetMessage = msgResult.rows[0];
+      if (!targetMessage) throw new HttpError(404, 'Message not found', 'MESSAGE_NOT_FOUND');
+
+      if (targetMessage.sender_id !== req.auth.userId && targetMessage.recipient_id !== req.auth.userId) {
+        throw new HttpError(403, 'You do not have access to this conversation', 'CONVERSATION_FORBIDDEN');
+      }
+
+      const otherUserId = targetMessage.sender_id === req.auth.userId
+        ? targetMessage.recipient_id
+        : targetMessage.sender_id;
+
+      const isSelfMessage = otherUserId === req.auth.userId;
+
+      if (!isSelfMessage && (await blockExistsBetween(req.auth.userId, otherUserId))) {
+        throw new HttpError(403, 'You cannot message this user', 'USER_BLOCKED');
+      }
+
+      const targetAuthor = await findUserById(targetMessage.sender_id);
+      const targetNickname = targetAuthor?.nickname || 'user';
+
+      const aiSettings = await getAiSettings(req.auth.userId);
+      const assistantName = aiSettings.assistant_name?.trim() || 'NotAI';
+      const assistantAvatarData = aiSettings.assistant_avatar_data || '';
+
+      const recentMessages = await pool.query<MessageRecord>(
+        `
+          SELECT sender_id, body FROM messages
+          WHERE LEAST(sender_id, recipient_id) = LEAST($1::uuid, $2::uuid)
+            AND GREATEST(sender_id, recipient_id) = GREATEST($1::uuid, $2::uuid)
+            AND deleted_at IS NULL AND scheduled_at IS NULL
+            AND created_at <= $3
+          ORDER BY created_at DESC
+          LIMIT 8
+        `,
+        [req.auth.userId, otherUserId, targetMessage.created_at]
+      );
+      const conversationHistory = recentMessages.rows.reverse().map((m) => {
+        const isCurrent = m.sender_id === req.auth.userId;
+        return `${isCurrent ? user.nickname : targetNickname}: ${m.body || '[attachment]'}`;
+      }).join('\n');
+
+      const isOwnerReplyingToSelf = user.id === targetMessage.sender_id;
+      const ownerContextText = isOwnerReplyingToSelf
+        ? `Твой создатель и единственный владелец — @${user.nickname}. Он обратился к тебе напрямую или просит ответить на его сообщение: "${targetMessage.body}".`
+        : `Твой создатель и владелец — @${user.nickname}. Ты его личный ИИ-ассистент по имени ${assistantName}. Твой владелец попросил тебя ответить в приватном чате на сообщение от @${targetNickname}: "${targetMessage.body}". Ты представляешь своего владельца @${user.nickname}, но общаешься напрямую с @${targetNickname}.`;
+
+      const targetIsAiText = targetMessage.ai_generated
+        ? `Сообщение, на которое ты отвечаешь, было отправлено ИИ-ассистентом (${targetMessage.ai_name || 'AI'}), принадлежащим @${targetNickname}.`
+        : '';
+
+      const systemPrompt = [
+        `You are ${assistantName}, a personal AI assistant in private chat.`,
+        ownerContextText,
+        targetIsAiText,
+        `Persona: ${aiSettings.persona || 'friendly'}, Tone: ${aiSettings.tone || 'balanced'}, Response length: ${aiSettings.response_length || 'concise'}.`,
+        aiSettings.custom_instructions ? `Owner custom instructions: ${aiSettings.custom_instructions}` : '',
+        `You are replying to the message from @${targetNickname}: "${targetMessage.body || '[attachment]'}"`,
+        `Recent conversation context:\n${conversationHistory}`,
+        'STRICT RULES:',
+        `1. Your reply MUST begin with @${targetNickname} followed by a space.`,
+        '2. Keep your answer natural, human, conversational, and direct (1 to 3 short sentences). Do not use markdown titles, asterisks for bold headers, or bullet points.',
+        '3. Match the language of the conversation (Russian if Russian, Ukrainian if Ukrainian, English if English, etc.).',
+        '4. Do not wrap the message in quotes.',
+        '5. Clearly understand who your owner is and who you are speaking with.'
+      ].filter(Boolean).join('\n');
+
+      const replyText = await callAi(systemPrompt, [
+        { role: 'user', content: `Reply to @${targetNickname}'s message: "${targetMessage.body || '[attachment]'}"` }
+      ]);
+
+      let cleanReply = replyText.trim();
+      if (!cleanReply.startsWith(`@${targetNickname}`)) {
+        cleanReply = `@${targetNickname} ${cleanReply.replace(/^@\S+\s*/, '')}`;
+      }
+
+      await consumeAiQuota(req.auth.userId, isDev);
+
+      const conversationSettings = await getConversationSettings(req.auth.userId, otherUserId);
+      const messageTtlSeconds = conversationSettings?.message_ttl_seconds ?? 0;
+
+      const created = await createMessage(
+        req.auth.userId,
+        otherUserId,
+        cleanReply,
+        undefined,
+        targetMessage.id,
+        null,
+        undefined,
+        messageTtlSeconds,
+        {
+          ai: {
+            generated: true,
+            name: assistantName,
+            avatarData: assistantAvatarData
+          }
+        }
+      );
+
+      if (isSelfMessage) {
+        const read = await pool.query<{ read_at: Date }>(
+          'UPDATE messages SET read_at = NOW() WHERE id = $1 RETURNING read_at',
+          [created.id]
+        );
+        created.read_at = read.rows[0]?.read_at ?? created.read_at;
+      }
+
+      const publicMessage = await toPublicMessageEnriched(created);
+      io.to(req.auth.userId).emit('messenger:message', { message: publicMessage });
+      if (!isSelfMessage) {
+        io.to(otherUserId).emit('messenger:message', { message: publicMessage });
+        io.to(otherUserId).emit('messenger:mention', {
+          kind: 'dm',
+          message: publicMessage,
+          sender: toPublicUserLite(user)
+        });
+      }
+
+      res.json({ message: publicMessage });
     })
   );
 

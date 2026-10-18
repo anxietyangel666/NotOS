@@ -110,6 +110,55 @@ async function fetchJson<T>(url: string): Promise<T> {
   }
 }
 
+const scraperCache = new Map<string, { time: number; results: TenorResult[] }>();
+const CACHE_TTL_MS = 5 * 60 * 1000;
+
+async function tenorScraperRequest(path: 'featured' | 'search', input: z.infer<typeof gifQuerySchema>): Promise<GifPage> {
+  const queryText = (input.q ?? '').trim();
+  const slug = queryText ? queryText.replace(/\s+/g, '-') : 'trending';
+  const cacheKey = slug.toLowerCase();
+
+  let rawResults: TenorResult[] = [];
+  const cached = scraperCache.get(cacheKey);
+  if (cached && Date.now() - cached.time < CACHE_TTL_MS) {
+    rawResults = cached.results;
+  } else {
+    const url = `https://tenor.com/search/${encodeURIComponent(slug)}-gifs`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10000);
+    try {
+      const res = await fetch(url, {
+        signal: controller.signal,
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7'
+        }
+      });
+      if (!res.ok) throw new Error(`Tenor scraper status ${res.status}`);
+      const html = await res.text();
+      const match = html.match(/<script id="store-cache"[^>]*>([\s\S]*?)<\/script>/);
+      if (!match) throw new Error('No store-cache found in Tenor HTML');
+      const store = JSON.parse(match[1]) as { universal?: { search?: Record<string, { results?: TenorResult[] }> } };
+      const searchEntries = Object.values(store.universal?.search ?? {});
+      rawResults = searchEntries[0]?.results ?? [];
+      scraperCache.set(cacheKey, { time: Date.now(), results: rawResults });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  const mapped = mapTenorResults(rawResults);
+  const offset = Number(input.pos) || 0;
+  const limit = input.limit ?? DEFAULT_LIMIT;
+  const pageItems = mapped.slice(offset, offset + limit);
+  const nextOffset = offset + pageItems.length;
+  const next = nextOffset < mapped.length ? String(nextOffset) : '';
+
+  return { gifs: pageItems, next };
+}
+
 async function tenorRequest(path: 'featured' | 'search', input: z.infer<typeof gifQuerySchema>): Promise<GifPage> {
   const query = new URLSearchParams({
     key: config.tenorApiKey,
@@ -148,6 +197,13 @@ async function giphyRequest(path: 'trending' | 'search', input: z.infer<typeof g
 
 async function gifRequest(path: 'featured' | 'search', input: z.infer<typeof gifQuerySchema>): Promise<GifPage> {
   if (input.pos?.startsWith('giphy:')) return giphyRequest(path === 'featured' ? 'trending' : 'search', input);
+
+  try {
+    const page = await tenorScraperRequest(path, input);
+    if (page.gifs.length > 0) return page;
+  } catch {
+    // If scraper fails, try official API
+  }
 
   try {
     const page = await tenorRequest(path, input);

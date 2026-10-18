@@ -21,6 +21,8 @@ export type GroupMemberRecord = {
   user_id: string;
   role: string;
   role_id: string | null;
+  nickname: string;
+  timeout_until: Date | null;
   joined_at: Date;
 };
 
@@ -31,6 +33,16 @@ export type GroupInviteRecord = {
   code: string;
   creator_id: string;
   uses_count: number;
+  max_uses: number | null;
+  expires_at: Date | null;
+  created_at: Date;
+};
+
+export type GroupBanRecord = {
+  group_id: string;
+  user_id: string;
+  banned_by: string | null;
+  reason: string;
   created_at: Date;
 };
 
@@ -69,8 +81,51 @@ export type GroupChannelRecord = {
   feed_chat_channel_id: string | null;
   feed_parent_channel_id: string | null;
   sign_posts: boolean;
+  settings: Record<string, unknown> | null;
   created_at: Date;
 };
+
+export type ChannelExtraSettings = {
+  privateChannel: boolean;
+  locked: boolean;
+  announcement: boolean;
+  defaultNotifications: 'all' | 'mentions' | 'nothing';
+  videoQuality: 'auto' | '720' | '1080';
+  rtcRegion: string;
+  defaultAutoArchiveMinutes: number;
+  newMemberSlowmodeSeconds: number;
+  disableReactions: boolean;
+  voiceMode: 'voice_activity' | 'ptt';
+  videoEnabled: boolean;
+  streamEnabled: boolean;
+  hideInactive: boolean;
+  defaultThreadSlowmodeSeconds: number;
+};
+
+export function parseChannelSettings(raw: unknown): ChannelExtraSettings {
+  const value = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {};
+  const notifications = value.defaultNotifications;
+  const videoQuality = value.videoQuality;
+  const voiceMode = value.voiceMode;
+  return {
+    privateChannel: Boolean(value.privateChannel),
+    locked: Boolean(value.locked),
+    announcement: Boolean(value.announcement),
+    defaultNotifications: notifications === 'mentions' || notifications === 'nothing' ? notifications : 'all',
+    videoQuality: videoQuality === '720' || videoQuality === '1080' ? videoQuality : 'auto',
+    rtcRegion: typeof value.rtcRegion === 'string' && value.rtcRegion.trim() ? value.rtcRegion.trim().slice(0, 40) : 'automatic',
+    defaultAutoArchiveMinutes: [60, 1440, 4320, 10080].includes(Number(value.defaultAutoArchiveMinutes))
+      ? Number(value.defaultAutoArchiveMinutes)
+      : 1440,
+    newMemberSlowmodeSeconds: Math.max(0, Math.min(604800, Number(value.newMemberSlowmodeSeconds) || 0)),
+    disableReactions: Boolean(value.disableReactions),
+    voiceMode: voiceMode === 'ptt' ? 'ptt' : 'voice_activity',
+    videoEnabled: value.videoEnabled !== false,
+    streamEnabled: value.streamEnabled !== false,
+    hideInactive: Boolean(value.hideInactive),
+    defaultThreadSlowmodeSeconds: Math.max(0, Math.min(21600, Number(value.defaultThreadSlowmodeSeconds) || 0))
+  };
+}
 
 export type GroupFolderRecord = {
   id: string;
@@ -106,6 +161,9 @@ export type GroupMessageRecord = {
   comment_count?: number;
   scheduled_at: Date | null;
   link_preview: { url: string; title: string; description: string; imageUrl: string; siteName: string } | null;
+  ai_generated?: boolean;
+  ai_name?: string | null;
+  ai_avatar_data?: string | null;
   created_at: Date;
 };
 
@@ -161,6 +219,7 @@ export type PublicGroupChannel = {
   signPosts: boolean;
   // Role ids that gate visibility. Empty array = visible to everyone.
   requiredRoleIds: string[];
+  settings: ChannelExtraSettings;
 };
 
 export type GroupIdentityRecord = GroupRecord & {
@@ -186,6 +245,9 @@ export type GroupMessageReplySnippet = {
   id: string;
   senderId: string;
   senderGroup: { id: string; name: string; avatarData: string } | null;
+  aiGenerated?: boolean;
+  aiName?: string | null;
+  aiAvatarData?: string | null;
   body: string;
   imageData: string | null;
   imageName: string | null;
@@ -211,6 +273,9 @@ export type PublicGroupMessage = {
   channelId: string | null;
   senderId: string;
   senderGroup: { id: string; name: string; avatarData: string } | null;
+  aiGenerated?: boolean;
+  aiName?: string | null;
+  aiAvatarData?: string | null;
   body: string;
   imageData: string | null;
   imageName: string | null;
@@ -292,6 +357,9 @@ export function toPublicGroupMessage(message: GroupMessageRecord, reactions: Gro
     threadCount: Number(message.thread_count ?? 0),
     commentCount: Number(message.comment_count ?? 0),
     scheduledAt: message.scheduled_at?.toISOString() ?? null,
+    aiGenerated: Boolean(message.ai_generated),
+    aiName: message.ai_name ?? null,
+    aiAvatarData: message.ai_avatar_data ?? null,
     createdAt: message.created_at.toISOString()
   };
 }
@@ -330,6 +398,9 @@ export async function loadGroupReplySnippets(replyIds: string[]): Promise<Map<st
             name: row.sender_group_name ?? '',
             avatarData: row.sender_group_avatar_data ?? ''
           },
+      aiGenerated: Boolean(row.ai_generated),
+      aiName: row.ai_name ?? null,
+      aiAvatarData: row.ai_avatar_data ?? null,
       body: row.deleted_at ? '' : row.body,
       imageData: mediaItems[0]?.dataUrl ?? null,
       imageName: mediaItems[0]?.name ?? null,
@@ -454,7 +525,7 @@ export async function createGroup(ownerId: string, name: string, avatarData: str
       INSERT INTO group_roles (id, group_id, name, color, position, is_owner, permissions)
       VALUES ($1, $2, 'Owner', '#ffd700', 0, TRUE, $3)
     `,
-    [ownerRoleId, id, JSON.stringify(['ManageRoles', 'DeleteAnyMessage', 'ManageChannels', 'ManageInvites', 'KickMembers', 'MentionEveryone', 'SendVoiceMessages', 'SendVideoCircles'])]
+    [ownerRoleId, id, JSON.stringify(['Administrator', 'ManageServer', 'ManageRoles', 'DeleteAnyMessage', 'ManageChannels', 'ManageInvites', 'KickMembers', 'BanMembers', 'TimeoutMembers', 'MuteMembers', 'MentionEveryone', 'SendVoiceMessages', 'SendVideoCircles', 'Connect', 'Speak'])]
   );
 
   await pool.query(
@@ -593,24 +664,9 @@ export async function getGroupById(groupId: string) {
 
 export async function updateGroup(
   groupId: string,
-  userId: string,
-  updates: { name?: string; avatarData?: string; nameplate?: NamePlate | null; description?: string; automodWords?: string[] }
+  _userId: string,
+  updates: { name?: string; avatarData?: string; nameplate?: NamePlate | null; description?: string; automodWords?: string[]; ownerId?: string }
 ) {
-  const member = await pool.query(
-    `
-      SELECT
-        gm.role_id,
-        COALESCE(gr.is_owner, FALSE) AS is_owner,
-        groups.owner_id = $2 AS is_creator
-      FROM group_members gm
-      JOIN groups ON groups.id = gm.group_id
-      LEFT JOIN group_roles gr ON gr.id = gm.role_id
-      WHERE gm.group_id = $1 AND gm.user_id = $2
-    `,
-    [groupId, userId]
-  );
-  if (!member.rows[0]?.is_owner && !member.rows[0]?.is_creator) return null;
-
   const setClauses: string[] = [];
   const values: unknown[] = [];
   let paramIdx = 1;
@@ -636,6 +692,10 @@ export async function updateGroup(
     setClauses.push(`nameplate = $${paramIdx++}::jsonb`);
     values.push(updates.nameplate == null ? null : JSON.stringify(updates.nameplate));
   }
+  if (updates.ownerId !== undefined) {
+    setClauses.push(`owner_id = $${paramIdx++}`);
+    values.push(updates.ownerId);
+  }
 
   if (setClauses.length === 0) return getGroupById(groupId);
 
@@ -658,6 +718,8 @@ export async function deleteGroup(groupId: string, userId: string) {
 // ── Members ──
 
 export async function addGroupMember(groupId: string, userId: string, roleId?: string) {
+  const banned = await pool.query('SELECT 1 FROM group_bans WHERE group_id = $1 AND user_id = $2 LIMIT 1', [groupId, userId]);
+  if ((banned.rowCount ?? 0) > 0) throw new Error('GROUP_BANNED');
   const role = roleId || (await getDefaultRole(groupId));
   const roleRecord = role ? await pool.query<GroupRoleRecord>('SELECT * FROM group_roles WHERE id = $1', [role]) : null;
   const roleName = roleRecord?.rows[0]?.name ?? 'Member';
@@ -710,24 +772,14 @@ export async function setGroupDefaultRole(groupId: string, roleId: string | null
   return result.rows[0] ?? null;
 }
 
-export async function removeGroupMember(groupId: string, userId: string, requesterId: string) {
-  const requester = await pool.query(
-    "SELECT COALESCE(gr.is_owner, FALSE) AS is_owner, gr.permissions FROM group_members gm LEFT JOIN group_roles gr ON gr.id = gm.role_id WHERE gm.group_id = $1 AND gm.user_id = $2",
-    [groupId, requesterId]
+export async function removeGroupMember(groupId: string, userId: string, _requesterId?: string) {
+  await pool.query('DELETE FROM group_member_roles WHERE group_id = $1 AND user_id = $2', [groupId, userId]);
+  await pool.query('DELETE FROM group_onboarding_state WHERE group_id = $1 AND user_id = $2', [groupId, userId]);
+  const result = await pool.query(
+    'DELETE FROM group_members WHERE group_id = $1 AND user_id = $2 RETURNING user_id',
+    [groupId, userId]
   );
-  if (!requester.rows[0]) return false;
-
-  const canKick = requester.rows[0].is_owner || requester.rows[0].permissions?.includes('KickMembers');
-
-  if (canKick || requesterId === userId) {
-    const result = await pool.query(
-      "DELETE FROM group_members WHERE group_id = $1 AND user_id = $2 RETURNING user_id",
-      [groupId, userId]
-    );
-    return (result.rowCount ?? 0) > 0;
-  }
-
-  return false;
+  return (result.rowCount ?? 0) > 0;
 }
 
 // Lightweight member-id lookup for fan-out broadcasts. The full listGroupMembers
@@ -752,6 +804,9 @@ export async function listGroupMembers(groupId: string) {
         GROUP BY group_id, user_id
       )
       SELECT ${liteUserColumns('users')}, gm.user_id, gm.role, gm.role_id, gm.joined_at,
+        COALESCE(NULLIF(gm.nickname, ''), users.nickname) AS nickname,
+        gm.nickname AS member_nickname,
+        gm.timeout_until,
         -- gm.role (the group role) overwrites users.role in the result row, so
         -- expose the global account role separately for badges (e.g. 'dev').
         users.role AS account_role,
@@ -815,14 +870,19 @@ export async function listGroupInvites(groupId: string, channelId?: string | nul
   return result.rows;
 }
 
-export async function createGroupInvite(groupId: string, creatorId: string, channelId: string | null = null) {
+export async function createGroupInvite(
+  groupId: string,
+  creatorId: string,
+  channelId: string | null = null,
+  options?: { maxUses?: number | null; expiresAt?: Date | null }
+) {
   const result = await pool.query<GroupInviteRecord>(
     `
-      INSERT INTO group_invites (id, group_id, channel_id, code, creator_id)
-      VALUES ($1, $2, $3, $4, $5)
+      INSERT INTO group_invites (id, group_id, channel_id, code, creator_id, max_uses, expires_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
       RETURNING *
     `,
-    [randomUUID(), groupId, channelId, generateInviteCode(), creatorId]
+    [randomUUID(), groupId, channelId, generateInviteCode(), creatorId, options?.maxUses ?? null, options?.expiresAt ?? null]
   );
   return result.rows[0];
 }
@@ -839,12 +899,137 @@ export async function incrementGroupInviteUse(inviteCode: string) {
   await pool.query('UPDATE group_invites SET uses_count = uses_count + 1 WHERE code = $1', [inviteCode]);
 }
 
+export function isInviteUsable(invite: GroupInviteRecord) {
+  if (invite.expires_at && invite.expires_at.getTime() <= Date.now()) return false;
+  if (invite.max_uses != null && invite.uses_count >= invite.max_uses) return false;
+  return true;
+}
+
+export async function reorderGroupRoles(groupId: string, roleIds: string[]) {
+  for (let index = 0; index < roleIds.length; index += 1) {
+    await pool.query(
+      'UPDATE group_roles SET position = $1 WHERE id = $2 AND group_id = $3 AND NOT is_owner',
+      [index + 1, roleIds[index], groupId]
+    );
+  }
+  return listGroupRoles(groupId);
+}
+
+export async function isGroupBanned(groupId: string, userId: string) {
+  const result = await pool.query('SELECT 1 FROM group_bans WHERE group_id = $1 AND user_id = $2 LIMIT 1', [groupId, userId]);
+  return (result.rowCount ?? 0) > 0;
+}
+
+export async function listGroupBans(groupId: string) {
+  const result = await pool.query<GroupBanRecord>(
+    'SELECT * FROM group_bans WHERE group_id = $1 ORDER BY created_at DESC',
+    [groupId]
+  );
+  return result.rows;
+}
+
+export async function banGroupMember(groupId: string, userId: string, bannedBy: string, reason: string) {
+  await pool.query(
+    `
+      INSERT INTO group_bans (group_id, user_id, banned_by, reason)
+      VALUES ($1, $2, $3, $4)
+      ON CONFLICT (group_id, user_id) DO UPDATE SET banned_by = $3, reason = $4, created_at = NOW()
+    `,
+    [groupId, userId, bannedBy, reason]
+  );
+  await removeGroupMember(groupId, userId);
+}
+
+export async function unbanGroupMember(groupId: string, userId: string) {
+  const result = await pool.query('DELETE FROM group_bans WHERE group_id = $1 AND user_id = $2 RETURNING user_id', [groupId, userId]);
+  return (result.rowCount ?? 0) > 0;
+}
+
+export async function setGroupMemberTimeout(groupId: string, userId: string, timeoutUntil: Date | null) {
+  const result = await pool.query<GroupMemberRecord>(
+    'UPDATE group_members SET timeout_until = $3 WHERE group_id = $1 AND user_id = $2 RETURNING *',
+    [groupId, userId, timeoutUntil]
+  );
+  return result.rows[0] ?? null;
+}
+
+export async function setGroupMemberNickname(groupId: string, userId: string, nickname: string) {
+  const result = await pool.query<GroupMemberRecord>(
+    'UPDATE group_members SET nickname = $3 WHERE group_id = $1 AND user_id = $2 RETURNING *',
+    [groupId, userId, nickname]
+  );
+  return result.rows[0] ?? null;
+}
+
+export async function getGroupMemberTimeout(groupId: string, userId: string) {
+  const result = await pool.query<{ timeout_until: Date | null }>(
+    'SELECT timeout_until FROM group_members WHERE group_id = $1 AND user_id = $2',
+    [groupId, userId]
+  );
+  return result.rows[0]?.timeout_until ?? null;
+}
+
 export async function listChannelPermissionOverrides(channelId: string) {
   const result = await pool.query<GroupChannelPermissionOverrideRecord>(
     'SELECT channel_id, role_id, target_id, permission, value FROM group_channel_permission_overrides WHERE channel_id = $1 ORDER BY target_id, permission',
     [channelId]
   );
   return result.rows;
+}
+
+export async function upsertChannelPermissionOverride(
+  channelId: string,
+  roleId: string,
+  permission: string,
+  value: 'allow' | 'deny'
+) {
+  const storedRoleId = roleId === '@everyone' ? null : roleId;
+  await pool.query(
+    `
+      INSERT INTO group_channel_permission_overrides (channel_id, role_id, target_id, permission, value)
+      VALUES ($1, $2, $3, $4, $5)
+      ON CONFLICT (channel_id, target_id, permission)
+      DO UPDATE SET value = EXCLUDED.value
+    `,
+    [channelId, storedRoleId, roleId, permission, value]
+  );
+}
+
+export async function deleteChannelPermissionOverride(channelId: string, roleId: string, permission: string) {
+  await pool.query(
+    'DELETE FROM group_channel_permission_overrides WHERE channel_id = $1 AND target_id = $2 AND permission = $3',
+    [channelId, roleId, permission]
+  );
+}
+
+export async function cloneGroupChannel(channel: GroupChannelRecord, name: string) {
+  const created = await createGroupChannel(
+    channel.group_id,
+    name,
+    channel.type === 'voice' ? 'voice' : channel.type === 'feed' ? 'feed' : 'text',
+    { folderId: channel.folder_id }
+  );
+  const updated = await updateGroupChannel(created.id, channel.group_id, {
+    topic: channel.topic,
+    slowmodeSeconds: channel.slowmode_seconds,
+    nsfw: channel.nsfw,
+    bitrate: channel.bitrate,
+    userLimit: channel.user_limit,
+    signPosts: channel.sign_posts,
+    settings: parseChannelSettings(channel.settings)
+  });
+  const overrides = await listChannelPermissionOverrides(channel.id);
+  if (overrides.length > 0) {
+    await replaceChannelPermissionOverrides(
+      created.id,
+      overrides.map((override) => ({
+        roleId: override.target_id,
+        permission: override.permission,
+        value: override.value
+      }))
+    );
+  }
+  return updated ?? created;
 }
 
 export async function replaceChannelPermissionOverrides(
@@ -1070,7 +1255,7 @@ export async function deleteGroupChannel(channelId: string, groupId: string) {
 export async function updateGroupChannel(
   channelId: string,
   groupId: string,
-  updates: { name?: string; position?: number; folderId?: string | null; userLimit?: number | null; topic?: string; slowmodeSeconds?: number; nsfw?: boolean; bitrate?: number; signPosts?: boolean }
+  updates: { name?: string; position?: number; folderId?: string | null; userLimit?: number | null; topic?: string; slowmodeSeconds?: number; nsfw?: boolean; bitrate?: number; signPosts?: boolean; settings?: ChannelExtraSettings }
 ) {
   const setClauses: string[] = [];
   const values: unknown[] = [];
@@ -1085,6 +1270,7 @@ export async function updateGroupChannel(
   if (updates.nsfw !== undefined) { setClauses.push(`nsfw = $${paramIdx++}`); values.push(updates.nsfw); }
   if (updates.bitrate !== undefined) { setClauses.push(`bitrate = $${paramIdx++}`); values.push(updates.bitrate); }
   if (updates.signPosts !== undefined) { setClauses.push(`sign_posts = $${paramIdx++}`); values.push(updates.signPosts); }
+  if (updates.settings !== undefined) { setClauses.push(`settings = $${paramIdx++}::jsonb`); values.push(JSON.stringify(updates.settings)); }
 
   if (setClauses.length === 0) return null;
 
@@ -1438,7 +1624,8 @@ export async function createGroupMessage(
   mediaItems?: Array<{ dataUrl: string; name?: string | null; spoiler?: boolean }>,
   feed?: { sourceId?: string | null; mirror?: boolean },
   threadRootId?: string | null,
-  scheduledAt?: Date | null
+  scheduledAt?: Date | null,
+  ai?: { generated?: boolean; name?: string | null; avatarData?: string | null }
 ) {
   const member = await isGroupMember(groupId, senderId);
   if (!member) return null;
@@ -1451,9 +1638,10 @@ export async function createGroupMessage(
       INSERT INTO group_messages (
         id, group_id, channel_id, sender_id,
         sender_group_id, sender_group_name, sender_group_avatar_data,
-        body, image_data, image_name, image_spoiler, media_items, reply_to, feed_source_id, feed_mirror, thread_root_id, scheduled_at
+        body, image_data, image_name, image_spoiler, media_items, reply_to, feed_source_id, feed_mirror, thread_root_id, scheduled_at,
+        ai_generated, ai_name, ai_avatar_data
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14, $15, $16, $17)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14, $15, $16, $17, $18, $19, $20)
       RETURNING *
     `,
     [
@@ -1473,7 +1661,10 @@ export async function createGroupMessage(
       feed?.sourceId ?? null,
       Boolean(feed?.mirror),
       threadRootId ?? null,
-      scheduledAt ?? null
+      scheduledAt ?? null,
+      Boolean(ai?.generated),
+      ai?.name ?? null,
+      ai?.avatarData ?? null
     ]
   );
 
@@ -1636,7 +1827,8 @@ export function toPublicGroupChannel(channel: GroupChannelRecord, requiredRoleId
     feedChatChannelId: channel.feed_chat_channel_id ?? null,
     feedParentChannelId: channel.feed_parent_channel_id ?? null,
     signPosts: Boolean(channel.sign_posts),
-    requiredRoleIds
+    requiredRoleIds,
+    settings: parseChannelSettings(channel.settings)
   };
 }
 

@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState, type Dispatch, type MouseEvent, type SetStateAction } from 'react';
+import { Fragment, useEffect, useMemo, useState, type Dispatch, type MouseEvent, type ReactNode, type SetStateAction } from 'react';
 import { api } from '../api/client';
 import type { DesktopWallMessage, FriendRequests, FriendRequestUser, Language, MentionNotification, PublicUser } from '../api/types';
 import { useSocket } from '../hooks/use-socket';
@@ -6,6 +6,7 @@ import { MessageBody, MessagePreviewText } from './Twemoji';
 import { UserName } from './UserName';
 import { WindowFrame } from './WindowFrame';
 import { isVideoCircleAttachment, isVoiceAttachment, VideoCircleMessagePlayer, VoiceMessagePlayer } from './VoiceMessage';
+import { LOCALES } from '../i18n';
 
 type InboxTab = 'all' | 'friendRequests' | 'desktopWall' | 'mentions';
 type InboxItem =
@@ -86,6 +87,52 @@ function inboxCopy(language: Language) {
       unread: 'Нове'
     };
   }
+  if (language === 'zh') {
+    return {
+      title: '收件箱',
+      subtitle: 'NotOC 通知收件箱',
+      all: '全部',
+      friendRequests: '好友请求',
+      desktopWall: '桌面墙',
+      inbox: '收件箱',
+      noItems: '还没有邮件',
+      noItemsHint: '好友请求和桌面墙上的新内容会显示在这里。',
+      requestTitle: '新的好友请求',
+      wallTitle: '墙上的新内容',
+      requestPreview: '想加你为好友。',
+      wallPreview: '在你的墙上留了言。',
+      accept: '接受',
+      decline: '拒绝',
+      openProfile: '资料',
+      openDesktop: '桌面',
+      incoming: '收到',
+      markAllRead: '标为已读',
+      unread: '新'
+    };
+  }
+  if (language === 'zh-TW') {
+    return {
+      title: '收件匣',
+      subtitle: 'NotOC 通知收件匣',
+      all: '全部',
+      friendRequests: '好友請求',
+      desktopWall: '桌面牆',
+      inbox: '收件匣',
+      noItems: '尚無郵件',
+      noItemsHint: '好友請求和桌面牆上的新內容會顯示在這裡。',
+      requestTitle: '新的好友請求',
+      wallTitle: '牆上的新內容',
+      requestPreview: '想加你為好友。',
+      wallPreview: '在你的牆上留了言。',
+      accept: '接受',
+      decline: '拒絕',
+      openProfile: '個人檔案',
+      openDesktop: '桌面',
+      incoming: '收到',
+      markAllRead: '標為已讀',
+      unread: '新'
+    };
+  }
   return {
     title: 'Mail',
     subtitle: 'NotOC notification inbox',
@@ -112,7 +159,7 @@ function inboxCopy(language: Language) {
 function formatInboxTime(value: string, language: Language) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return '';
-  return new Intl.DateTimeFormat(language === 'ru' ? 'ru-RU' : language === 'uk' ? 'uk-UA' : 'en-US', {
+  return new Intl.DateTimeFormat(LOCALES[language], {
     day: '2-digit',
     month: 'short',
     hour: '2-digit',
@@ -126,6 +173,12 @@ function mentionCopy(language: Language) {
   }
   if (language === 'uk') {
     return { folder: 'Згадки', title: 'Вас згадали', preview: 'згадав вас у чаті.', openChat: 'Відкрити чат', image: 'Зображення' };
+  }
+  if (language === 'zh') {
+    return { folder: '提及', title: '有人提及了你', preview: '在聊天中提及了你。', openChat: '打开聊天', image: '图片' };
+  }
+  if (language === 'zh-TW') {
+    return { folder: '提及', title: '有人提及了你', preview: '在聊天中提及了你。', openChat: '開啟聊天', image: '圖片' };
   }
   return { folder: 'Mentions', title: 'You were mentioned', preview: 'mentioned you in chat.', openChat: 'Open chat', image: 'Image' };
 }
@@ -379,15 +432,27 @@ export function InboxWindow({
     >
       <div className="inbox-shell">
         <aside className="inbox-sidebar">
+          <div className="inbox-sidebar-label">{copy.inbox}</div>
           {([
-            ['all', copy.all, items.length],
-            ['friendRequests', copy.friendRequests, requests.incoming.length],
-            ['desktopWall', copy.desktopWall, wallMessages.length],
-            ['mentions', mentionLabels.folder, mentionItems.length]
-          ] as Array<[InboxTab, string, number]>).map(([id, label, count]) => (
+            ['all', copy.all, items.length, (
+              <svg key="all" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 7l9 6 9-6"/></svg>
+            )],
+            ['friendRequests', copy.friendRequests, requests.incoming.length, (
+              <svg key="fr" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6M22 11h-6"/></svg>
+            )],
+            ['desktopWall', copy.desktopWall, wallMessages.length, (
+              <svg key="wall" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 10h8M8 14h5"/></svg>
+            )],
+            ['mentions', mentionLabels.folder, mentionItems.length, (
+              <svg key="at" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="4"/><path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-4 8"/></svg>
+            )]
+          ] as Array<[InboxTab, string, number, ReactNode]>).map(([id, label, count, icon]) => (
             <button key={id} type="button" className={tab === id ? 'inbox-folder active' : 'inbox-folder'} onClick={() => { setTab(id); setSelectedKey(null); }}>
-              <span>{label}</span>
-              <b>{count}</b>
+              <span className="inbox-folder-main">
+                <span className="inbox-folder-icon">{icon}</span>
+                <span>{label}</span>
+              </span>
+              {count > 0 ? <b>{count}</b> : null}
             </button>
           ))}
         </aside>
@@ -457,12 +522,18 @@ export function InboxWindow({
                 <strong>{tab === 'all' ? copy.all : tab === 'friendRequests' ? copy.friendRequests : tab === 'mentions' ? mentionLabels.folder : copy.desktopWall}</strong>
                 <span>{unreadCount ? `${unreadCount} ${copy.unread.toLowerCase()}` : copy.markAllRead}</span>
               </div>
-              <button type="button" className="compact-action" onClick={markAllRead}>{copy.markAllRead}</button>
+              <button type="button" className="inbox-mark-read" onClick={markAllRead}>{copy.markAllRead}</button>
             </header>
             <div className="inbox-list">
               {loading ? <div className="inbox-empty">{copy.inbox}...</div> : null}
               {!loading && filteredItems.length === 0 ? (
                 <div className="inbox-empty">
+                  <span className="inbox-empty-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="36" height="36" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                      <rect x="3" y="5" width="18" height="14" rx="2"/>
+                      <path d="M3 7l9 6 9-6"/>
+                    </svg>
+                  </span>
                   <strong>{copy.noItems}</strong>
                   <span>{copy.noItemsHint}</span>
                 </div>

@@ -19,6 +19,7 @@ import type {
   GroupChannel,
   ChannelPermissionOverride,
   GroupFolder,
+  GroupBan,
   GroupInvite,
   GroupConversationPreview,
   GroupMember,
@@ -41,7 +42,7 @@ import type {
   GroupAuditEntry
 } from './types';
 
-export const DEFAULT_API_URL = import.meta.env.VITE_API_URL ?? 'https://server-production-23e35.up.railway.app';
+export const DEFAULT_API_URL = import.meta.env.VITE_API_URL ?? 'http://163.5.16.156:4000';
 export const API_URL_STORAGE_KEY = 'notoc.api-url';
 export const API_URL_CHANGED_EVENT = 'notoc:api-url-changed';
 
@@ -70,10 +71,20 @@ export function setApiBaseUrl(value: string) {
   try {
     localStorage.setItem(API_URL_STORAGE_KEY, normalized);
     window.dispatchEvent(new CustomEvent(API_URL_CHANGED_EVENT, { detail: normalized }));
+    void window.notoc?.setServerUrl?.(normalized);
   } catch {
     /* ignore storage errors */
   }
   return normalized;
+}
+
+export function resolveAudioUrl(url: string | undefined): string {
+  if (!url) return '';
+  if (url.startsWith('data:') || url.startsWith('blob:') || /^https?:\/\//i.test(url)) {
+    return url;
+  }
+  const base = getApiBaseUrl();
+  return `${base}${url.startsWith('/') ? url : `/${url}`}`;
 }
 
 type RequestOptions = {
@@ -204,6 +215,7 @@ export const api = {
       hideDesktopIcons?: boolean;
       desktopSort?: DesktopSort;
       status?: string;
+      voiceBio?: string | null;
       pinnedImageData?: string;
       pinnedCards?: PinnedCard[];
       nameStyle?: NameStyle;
@@ -418,6 +430,14 @@ export const api = {
       slowRequestMs: mediaUpload ? 3000 : undefined
     });
   },
+  replyWithAiDm(token: string, messageId: string) {
+    return request<{ message: MessengerMessage }>(`/api/messenger/messages/${encodeURIComponent(messageId)}/ai-reply`, {
+      method: 'POST',
+      token,
+      label: 'messenger.replyWithAiDm',
+      slowRequestMs: 4000
+    });
+  },
   toggleMessageReaction(token: string, messageId: string, emoji: string) {
     return request<{ message: MessengerMessage }>(`/api/messenger/messages/${encodeURIComponent(messageId)}/reactions/toggle`, {
       method: 'POST', token, body: { emoji }
@@ -468,6 +488,33 @@ export const api = {
   },
   getPublicAudio(token: string, userId: string) {
     return request<{ tracks: PublicAudioTrack[] }>(`/api/storage/public-audio/${encodeURIComponent(userId)}`, { token });
+  },
+  uploadAudioTrack(token: string, track: { name: string; dataUrl: string }) {
+    return request<{ track: PublicAudioTrack }>('/api/storage/audio', {
+      method: 'POST',
+      token,
+      body: track
+    });
+  },
+  deleteAudioTrack(token: string, trackId: string) {
+    return request<{ ok: boolean }>(`/api/storage/audio/${encodeURIComponent(trackId)}`, {
+      method: 'DELETE',
+      token
+    });
+  },
+  reorderAudioTracks(token: string, trackIds: string[]) {
+    return request<{ ok: boolean }>('/api/storage/audio/order', {
+      method: 'PUT',
+      token,
+      body: { trackIds }
+    });
+  },
+  detectPlayer(token: string, url: string) {
+    return request<{ result: { detected: boolean; kind: 'youtube' | 'url' | 'embed'; value: string; title: string; originalUrl: string } }>('/api/messenger/watch-together/detect-player', {
+      method: 'POST',
+      token,
+      body: { url }
+    });
   },
   // Load one page of a user's wall. Pass `before` (a message id) to fetch the
   // page of older messages for lazy scroll loading. `hasMore` indicates that an
@@ -547,9 +594,9 @@ export const api = {
       method: 'PATCH', token, body: input
     });
   },
-  regenerateInvite(token: string, groupId: string, channelId?: string | null) {
+  regenerateInvite(token: string, groupId: string, channelId?: string | null, options?: { maxUses?: number | null; expiresInHours?: number | null }) {
     return request<{ inviteCode: string; invite?: GroupInvite }>(`/api/messenger/groups/${encodeURIComponent(groupId)}/invite`, {
-      method: 'POST', token, body: { channelId: channelId ?? null }
+      method: 'POST', token, body: { channelId: channelId ?? null, maxUses: options?.maxUses ?? null, expiresInHours: options?.expiresInHours ?? null }
     });
   },
   getGroupInvites(token: string, groupId: string, channelId?: string | null) {
@@ -746,6 +793,14 @@ export const api = {
       slowRequestMs: mediaUpload ? 3000 : undefined
     });
   },
+  replyWithAiGroup(token: string, groupId: string, messageId: string) {
+    return request<{ message: GroupMessage }>(`/api/messenger/groups/${encodeURIComponent(groupId)}/messages/${encodeURIComponent(messageId)}/ai-reply`, {
+      method: 'POST',
+      token,
+      label: 'messenger.replyWithAiGroup',
+      slowRequestMs: 4000
+    });
+  },
   getGroupChannels(token: string, groupId: string) {
     return request<{ channels: GroupChannel[] }>(`/api/messenger/groups/${encodeURIComponent(groupId)}/channels`, { token });
   },
@@ -759,10 +814,24 @@ export const api = {
       method: 'DELETE', token
     });
   },
-  updateGroupChannel(token: string, groupId: string, channelId: string, data: { name?: string; position?: number; folderId?: string | null; userLimit?: number | null; topic?: string; slowmodeSeconds?: number; nsfw?: boolean; bitrate?: number; signPosts?: boolean }) {
+  updateGroupChannel(token: string, groupId: string, channelId: string, data: { name?: string; position?: number; folderId?: string | null; userLimit?: number | null; topic?: string; slowmodeSeconds?: number; nsfw?: boolean; bitrate?: number; signPosts?: boolean; settings?: Partial<import('./types').ChannelExtraSettings> }) {
     return request<{ channel: GroupChannel }>(`/api/messenger/groups/${encodeURIComponent(groupId)}/channels/${encodeURIComponent(channelId)}`, {
       method: 'PATCH', token, body: data
     });
+  },
+  getMyChannelPermissions(token: string, groupId: string, channelId: string) {
+    return request<{ permissions: string[] }>(`/api/messenger/groups/${encodeURIComponent(groupId)}/channels/${encodeURIComponent(channelId)}/permissions/me`, { token });
+  },
+  cloneGroupChannel(token: string, groupId: string, channelId: string) {
+    return request<{ channel: GroupChannel }>(`/api/messenger/groups/${encodeURIComponent(groupId)}/channels/${encodeURIComponent(channelId)}/clone`, {
+      method: 'POST', token
+    });
+  },
+  resetChannelPermissions(token: string, groupId: string, channelId: string) {
+    return request<{ overrides: Array<{ roleId: string; permission: string; value: 'allow' | 'deny' }> }>(
+      `/api/messenger/groups/${encodeURIComponent(groupId)}/channels/${encodeURIComponent(channelId)}/permissions/reset`,
+      { method: 'POST', token }
+    );
   },
   reorderGroupChannels(token: string, groupId: string, items: { id: string; position: number; folderId: string | null }[]) {
     return request<{ channels: GroupChannel[] }>(`/api/messenger/groups/${encodeURIComponent(groupId)}/channels/reorder`, {
@@ -800,9 +869,42 @@ export const api = {
       method: 'DELETE', token
     });
   },
-  updateGroupRole(token: string, groupId: string, roleId: string, data: { name?: string; color?: string; permissions?: string[]; hoist?: boolean }) {
+  updateGroupRole(token: string, groupId: string, roleId: string, data: { name?: string; color?: string; permissions?: string[]; hoist?: boolean; position?: number }) {
     return request<{ role: GroupRole }>(`/api/messenger/groups/${encodeURIComponent(groupId)}/roles/${encodeURIComponent(roleId)}`, {
       method: 'PATCH', token, body: data
+    });
+  },
+  reorderGroupRoles(token: string, groupId: string, roleIds: string[]) {
+    return request<{ roles: GroupRole[] }>(`/api/messenger/groups/${encodeURIComponent(groupId)}/roles/reorder`, {
+      method: 'POST', token, body: { roleIds }
+    });
+  },
+  duplicateGroupRole(token: string, groupId: string, roleId: string) {
+    return request<{ role: GroupRole }>(`/api/messenger/groups/${encodeURIComponent(groupId)}/roles/${encodeURIComponent(roleId)}/duplicate`, {
+      method: 'POST', token
+    });
+  },
+  getGroupBans(token: string, groupId: string) {
+    return request<{ bans: GroupBan[] }>(`/api/messenger/groups/${encodeURIComponent(groupId)}/bans`, { token });
+  },
+  banGroupMember(token: string, groupId: string, userId: string, reason?: string) {
+    return request<{ success: boolean }>(`/api/messenger/groups/${encodeURIComponent(groupId)}/members/${encodeURIComponent(userId)}/ban`, {
+      method: 'POST', token, body: { reason }
+    });
+  },
+  unbanGroupMember(token: string, groupId: string, userId: string) {
+    return request<{ success: boolean }>(`/api/messenger/groups/${encodeURIComponent(groupId)}/members/${encodeURIComponent(userId)}/ban`, {
+      method: 'DELETE', token
+    });
+  },
+  timeoutGroupMember(token: string, groupId: string, userId: string, minutes: number) {
+    return request<{ members: GroupMember[] }>(`/api/messenger/groups/${encodeURIComponent(groupId)}/members/${encodeURIComponent(userId)}/timeout`, {
+      method: 'PATCH', token, body: { minutes }
+    });
+  },
+  setGroupMemberNickname(token: string, groupId: string, userId: string, nickname: string) {
+    return request<{ members: GroupMember[] }>(`/api/messenger/groups/${encodeURIComponent(groupId)}/members/${encodeURIComponent(userId)}/nickname`, {
+      method: 'PATCH', token, body: { nickname }
     });
   },
   updateGroupEveryonePermissions(token: string, groupId: string, permissions: string[]) {

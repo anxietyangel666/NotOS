@@ -1,6 +1,8 @@
 import type { Server, Socket } from 'socket.io';
 import { randomUUID } from 'node:crypto';
-import { getGroupChannelById, isGroupMember, listGroupMemberIds, listGroupMembers } from '../db/groups.js';
+import { getGroupChannelById, isGroupMember, listChannelPermissionOverrides, listGroupMemberIds, listGroupMembers, parseChannelSettings } from '../db/groups.js';
+import { getMemberRoleIds } from '../db/customization.js';
+import { getChannelPermissionSet, hasChannelPermission } from '../modules/messenger/group.routes.js';
 import { findUserById, toPublicUser, type PublicUser } from '../db/users.js';
 import { pool } from '../db/pool.js';
 
@@ -9,7 +11,11 @@ type Participant = {
   user: PublicUser;
   sockets: Set<string>;
   muted: boolean;
+  deafened: boolean;
   screen: boolean;
+  camera: boolean;
+  cameraStreamId?: string;
+  screenStreamId?: string;
   talking: boolean;
   joinedAt: number;
 };
@@ -72,7 +78,11 @@ function publicParticipants(channelId: string) {
     userId: p.userId,
     user: p.user,
     muted: p.muted,
+    deafened: p.deafened ?? false,
     screen: p.screen,
+    camera: p.camera,
+    cameraStreamId: p.cameraStreamId,
+    screenStreamId: p.screenStreamId,
     talking: p.talking,
     joinedAt: p.joinedAt
   }));
@@ -142,7 +152,7 @@ export function registerVoiceHandlers(io: Server, socket: Socket, userId: string
     if (groupId) broadcastParticipants(io, groupId, channelId);
   }
 
-  socket.on('voice:join', async (payload: { channelId?: unknown; muted?: unknown }) => {
+  socket.on('voice:join', async (payload: { channelId?: unknown; muted?: unknown; deafened?: unknown }) => {
     if (typeof payload?.channelId !== 'string') return;
     const channelId = payload.channelId;
     const channel = await getGroupChannelById(channelId);
@@ -158,6 +168,28 @@ export function registerVoiceHandlers(io: Server, socket: Socket, userId: string
       socket.emit('voice:error', { channelId, code: 'NOT_MEMBER' });
       return;
     }
+    const [voicePerms, overrides, roleIds] = await Promise.all([
+      getChannelPermissionSet(groupId, channelId, userId),
+      listChannelPermissionOverrides(channelId),
+      getMemberRoleIds(groupId, userId)
+    ]);
+    const denied = (permission: string) => {
+      const everyone = overrides.find((row) => row.target_id === '@everyone' && row.permission === permission);
+      let isDenied = everyone?.value === 'deny';
+      for (const row of overrides) {
+        if (row.permission !== permission || row.target_id === '@everyone' || !roleIds.has(row.target_id)) continue;
+        if (row.value === 'allow') return false;
+        if (row.value === 'deny') isDenied = true;
+      }
+      return isDenied;
+    };
+    const connectGranted = hasChannelPermission(voicePerms, 'Connect');
+    const connectAllowExists = overrides.some((row) => row.permission === 'Connect' && row.value === 'allow');
+    if (denied('Connect') || (connectAllowExists && !connectGranted && !voicePerms?.isOwner)) {
+      socket.emit('voice:error', { channelId, code: 'CONNECT_FORBIDDEN' });
+      return;
+    }
+    if (denied('Speak')) payload = { ...payload, muted: true };
 
     let room = rooms.get(channelId);
     const alreadyIn = room?.has(userId) ?? false;
@@ -185,13 +217,16 @@ export function registerVoiceHandlers(io: Server, socket: Socket, userId: string
 
     let participant = room.get(userId);
     const initialMuted = typeof payload.muted === 'boolean' ? payload.muted : false;
+    const initialDeafened = typeof payload.deafened === 'boolean' ? payload.deafened : false;
     if (!participant) {
       participant = {
         userId,
         user,
         sockets: new Set(),
         muted: initialMuted,
+        deafened: initialDeafened,
         screen: false,
+        camera: false,
         talking: false,
         joinedAt: Date.now()
       };
@@ -203,6 +238,7 @@ export function registerVoiceHandlers(io: Server, socket: Socket, userId: string
     participant.sockets.add(socket.id);
     participant.user = user;
     if (typeof payload.muted === 'boolean') participant.muted = payload.muted;
+    if (typeof payload.deafened === 'boolean') participant.deafened = payload.deafened;
 
     // Send the joining socket the current peer list it should connect to.
     const existingPeers = publicParticipants(channelId).filter((p) => p.userId !== userId);
@@ -249,19 +285,43 @@ export function registerVoiceHandlers(io: Server, socket: Socket, userId: string
     });
   });
 
-  socket.on('voice:state', async (payload: { channelId?: unknown; muted?: unknown; screen?: unknown; talking?: unknown }) => {
+  socket.on('voice:state', async (payload: { channelId?: unknown; muted?: unknown; deafened?: unknown; screen?: unknown; camera?: unknown; talking?: unknown; cameraStreamId?: unknown; screenStreamId?: unknown }) => {
     if (typeof payload?.channelId !== 'string') return;
     const room = rooms.get(payload.channelId);
     const participant = room?.get(userId);
     if (!participant) return;
     if (typeof payload.muted === 'boolean') participant.muted = payload.muted;
-    if (typeof payload.screen === 'boolean') participant.screen = payload.screen;
+    if (typeof payload.deafened === 'boolean') participant.deafened = payload.deafened;
+    if (typeof payload.camera === 'boolean') {
+      participant.camera = payload.camera;
+      participant.cameraStreamId = payload.camera && typeof payload.cameraStreamId === 'string' ? payload.cameraStreamId : undefined;
+    }
+    if (typeof payload.screen === 'boolean') {
+      if (payload.screen) {
+        const liveChannel = await getGroupChannelById(payload.channelId);
+        const liveSettings = parseChannelSettings(liveChannel?.settings);
+        if (!liveSettings.streamEnabled) {
+          participant.screen = false;
+          participant.screenStreamId = undefined;
+        } else {
+          participant.screen = true;
+          participant.screenStreamId = typeof payload.screenStreamId === 'string' ? payload.screenStreamId : undefined;
+        }
+      } else {
+        participant.screen = false;
+        participant.screenStreamId = undefined;
+      }
+    }
     if (typeof payload.talking === 'boolean') participant.talking = payload.talking;
     const statePayload = {
       channelId: payload.channelId,
       userId,
       muted: participant.muted,
+      deafened: participant.deafened ?? false,
       screen: participant.screen,
+      screenStreamId: participant.screenStreamId,
+      camera: participant.camera,
+      cameraStreamId: participant.cameraStreamId,
       talking: participant.talking
     };
     // Tell everyone in the room (they need the live talking/muted indicators
@@ -270,28 +330,10 @@ export function registerVoiceHandlers(io: Server, socket: Socket, userId: string
     // Also tell every group member (their left-side channel list shows the
     // mic/screen icons even when they are not currently in the channel).
     // Skip the 'talking' updates here to avoid flooding non-room sockets.
-    //
-    // This used to do up to three DB queries per toggle (getGroupChannelById +
-    // listGroupMembers, plus another listGroupMembers inside
-    // broadcastParticipants), which is what made the mic/screen icons appear
-    // with a visible delay. Now the group id and member list both come from the
-    // in-memory caches. We resolve the member ids once and reuse them for both
-    // the full participants snapshot and the incremental state fan-out.
-    if (typeof payload.muted === 'boolean' || typeof payload.screen === 'boolean') {
+    if (typeof payload.muted === 'boolean' || typeof payload.deafened === 'boolean' || typeof payload.screen === 'boolean' || typeof payload.camera === 'boolean') {
       const groupId = await resolveGroupId(payload.channelId);
       if (groupId) {
         const memberIds = await getGroupMemberIds(groupId);
-        // Send ONLY the lightweight incremental state event to group members
-        // who are not already in the room (the room itself was notified above).
-        // Previously we also emitted a full voice:participants snapshot here,
-        // which on the sender's own client triggered a second cascade of state
-        // updates (participants + channelParticipants + talkingIds) on top of
-        // the voice:state cascade. Those duplicate updates re-rendered the whole
-        // group view and were the source of the lag spike on every mute toggle.
-        // The client's voice:state handler already updates the cached
-        // per-channel participant lists, so the snapshot is redundant here.
-        // Emitting voice:state again to in-room members is harmless (the state
-        // is idempotent) and far cheaper than the previous double cascade.
         for (const id of memberIds) {
           io.to(id).emit('voice:state', statePayload);
         }
